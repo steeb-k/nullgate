@@ -30,6 +30,9 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   on-disk secrets are not migrated.
 
 ### Fixed
+- **Emoji code is laid out consistently.** The SAS now renders in a fixed, symmetric **2 / 3 / 2**
+  grid on both the joiner's "Verify this code" dialog and the originator's join-requests flyout
+  (they previously wrapped differently — 3/3/1 vs 3/4 — depending on container width).
 - **Declined join now resets the joiner to no-network.** The joiner was provisionally activated
   before the decision and a decline (or handshake failure) left it lingering "in" the network
   (showing the originator as a member, unable to retry). It now tears the activation back down on

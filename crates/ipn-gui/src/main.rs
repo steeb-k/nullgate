@@ -1555,17 +1555,40 @@ fn notify_newly_online(app: &adw::Application, prev: Option<&NetworkStatus>, new
     }
 }
 
-/// A large, centered emoji label for the SAS.
-fn sas_label(sas: &[String]) -> gtk::Label {
-    let label = gtk::Label::new(None);
-    label.set_markup(&format!(
-        "<span size='350%'>{}</span>",
-        glib::markup_escape_text(&sas.join("  "))
-    ));
-    label.set_justify(gtk::Justification::Center);
-    label.set_halign(gtk::Align::Center);
-    label.set_wrap(true);
-    label
+/// The emoji SAS, laid out in fixed, symmetric rows so it looks identical on the
+/// joiner's "Verify this code" dialog and the originator's requests flyout
+/// (relying on text wrapping made them differ by container width). The usual
+/// 7-emoji code is arranged 2 / 3 / 2; other lengths fall back to rows of ≤3.
+fn sas_label(sas: &[String]) -> gtk::Box {
+    let pattern: Vec<usize> = if sas.len() == 7 {
+        vec![2, 3, 2]
+    } else {
+        let mut p = Vec::new();
+        let mut left = sas.len();
+        while left > 0 {
+            let take = left.min(3);
+            p.push(take);
+            left -= take;
+        }
+        p
+    };
+
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    vbox.set_halign(gtk::Align::Center);
+    let mut idx = 0;
+    for count in pattern {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        row.set_halign(gtk::Align::Center);
+        for _ in 0..count {
+            let Some(e) = sas.get(idx) else { break };
+            let lbl = gtk::Label::new(None);
+            lbl.set_markup(&format!("<span size='350%'>{}</span>", glib::markup_escape_text(e)));
+            row.append(&lbl);
+            idx += 1;
+        }
+        vbox.append(&row);
+    }
+    vbox
 }
 
 /// Render the ticket/recovery string as a fixed-size QR image (~240px).
