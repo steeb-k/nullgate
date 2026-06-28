@@ -6,6 +6,9 @@
 # Bundled at package time, not committed
 /vendor/wintun/
 
+# Local hands-on test plan (kept untracked; updated as issues are resolved).
+/MANUAL-TESTING.md
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db
