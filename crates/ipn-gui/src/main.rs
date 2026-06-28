@@ -60,6 +60,11 @@ impl Net {
         });
     }
 
+    /// Push a transient toast to the UI from the GTK thread (synchronous callers).
+    fn toast(&self, msg: impl Into<String>) {
+        let _ = self.tx.try_send(UiMsg::Toast(msg.into()));
+    }
+
     /// Long-lived subscription to daemon events, reconnecting if it restarts.
     fn subscribe_loop(&self) {
         let socket = self.socket.clone();
@@ -137,6 +142,38 @@ async fn stream_events(socket: &std::path::Path, tx: &async_channel::Sender<UiMs
     Ok(())
 }
 
+/// Path of the small file remembering the window size (best-effort).
+fn window_state_path() -> Option<PathBuf> {
+    directories::ProjectDirs::from("io.github", "steeb_k", "ipn")
+        .map(|d| d.config_dir().join("gui-window"))
+}
+
+/// Load the saved window size as `(width, height)`, falling back to a sane default.
+fn load_window_size() -> (i32, i32) {
+    let parse = || -> Option<(i32, i32)> {
+        let s = std::fs::read_to_string(window_state_path()?).ok()?;
+        let (w, h) = s.trim().split_once('x')?;
+        Some((w.parse().ok()?, h.parse().ok()?))
+    };
+    parse()
+        .filter(|(w, h)| *w >= 360 && *h >= 360)
+        .unwrap_or((560, 640))
+}
+
+/// Remember the current window size (best-effort; ignores errors).
+fn save_window_size(window: &adw::ApplicationWindow) {
+    let (w, h) = (window.width(), window.height());
+    if w < 360 || h < 360 {
+        return; // skip bogus sizes (e.g. while hidden)
+    }
+    if let Some(path) = window_state_path() {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, format!("{w}x{h}"));
+    }
+}
+
 fn main() -> glib::ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -168,11 +205,12 @@ fn main() -> glib::ExitCode {
 }
 
 fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>) {
+    let (win_w, win_h) = load_window_size();
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("iroh-private-network")
-        .default_width(560)
-        .default_height(640)
+        .default_width(win_w)
+        .default_height(win_h)
         .build();
 
     let header = adw::HeaderBar::new();
@@ -180,6 +218,30 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
         .icon_name("list-add-symbolic")
         .tooltip_text("Create or join a network")
         .build();
+
+    // Primary menu (About).
+    let menu_btn = gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .tooltip_text("Menu")
+        .build();
+    let menu_pop = gtk::Popover::new();
+    let menu_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    menu_box.set_margin_top(8);
+    menu_box.set_margin_bottom(8);
+    menu_box.set_margin_start(8);
+    menu_box.set_margin_end(8);
+    let about_btn = gtk::Button::with_label("About IPN");
+    about_btn.add_css_class("flat");
+    menu_box.append(&about_btn);
+    menu_pop.set_child(Some(&menu_box));
+    menu_btn.set_popover(Some(&menu_pop));
+    {
+        let window = window.clone();
+        about_btn.connect_clicked(move |_| {
+            menu_pop.popdown();
+            show_about(&window);
+        });
+    }
     let popover = gtk::Popover::new();
     let pop_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
     pop_box.set_margin_top(8);
@@ -195,6 +257,7 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
     popover.set_child(Some(&pop_box));
     add_btn.set_popover(Some(&popover));
     header.pack_start(&add_btn);
+    header.pack_end(&menu_btn);
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
@@ -229,22 +292,39 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
         });
     }
 
+    // Last status, kept so a timer can re-render to keep relative times ("last
+    // seen") live, and to detect members coming online for notifications.
+    let state: std::rc::Rc<std::cell::RefCell<Option<NetworkStatus>>> = Default::default();
+
     {
         let content = content.clone();
         let window = window.clone();
         let net = net.clone();
         let toast_overlay = toast_overlay.clone();
+        let state = state.clone();
+        let app_n = app.clone();
         glib::spawn_future_local(async move {
             while let Ok(msg) = rx.recv().await {
                 match msg {
-                    UiMsg::Status(Some(s)) => render_status(&content, &s, &net, &window),
-                    UiMsg::Status(None) => render_empty(&content),
-                    UiMsg::DaemonDown => render_daemon_down(&content),
+                    UiMsg::Status(Some(s)) => {
+                        notify_newly_online(&app_n, state.borrow().as_ref(), &s);
+                        *state.borrow_mut() = Some(s.clone());
+                        render_status(&content, &s, &net, &window);
+                    }
+                    UiMsg::Status(None) => {
+                        *state.borrow_mut() = None;
+                        render_empty(&content)
+                    }
+                    UiMsg::DaemonDown => {
+                        *state.borrow_mut() = None;
+                        render_daemon_down(&content)
+                    }
                     UiMsg::VersionMismatch { daemon, gui } => {
+                        *state.borrow_mut() = None;
                         render_version_mismatch(&content, daemon, gui)
                     }
-                    UiMsg::Ticket(t) => show_ticket(&window, &t),
-                    UiMsg::Recovery(code) => show_recovery(&window, &code),
+                    UiMsg::Ticket(t) => show_ticket(&window, &net, &t),
+                    UiMsg::Recovery(code) => show_recovery(&window, &net, &code),
                     UiMsg::JoinSas(sas) => show_join_sas(&window, &sas),
                     UiMsg::JoinRequest {
                         node_id,
@@ -254,6 +334,21 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
                     UiMsg::Toast(t) => toast_overlay.add_toast(adw::Toast::new(&t)),
                 }
             }
+        });
+    }
+
+    // Re-render periodically so relative "last seen" times stay current even when
+    // no roster change arrives.
+    {
+        let content = content.clone();
+        let window = window.clone();
+        let net = net.clone();
+        let state = state.clone();
+        glib::timeout_add_seconds_local(20, move || {
+            if let Some(s) = state.borrow().as_ref() {
+                render_status(&content, s, &net, &window);
+            }
+            glib::ControlFlow::Continue
         });
     }
 
@@ -267,6 +362,7 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
         let app = app.clone();
         let notified = std::cell::Cell::new(false);
         window.connect_close_request(move |w| {
+            save_window_size(w);
             w.set_visible(false);
             if !notified.replace(true) {
                 let n = gtk::gio::Notification::new("iroh-private-network");
@@ -283,8 +379,10 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
     {
         let app = app.clone();
         let net = net.clone();
+        let window = window.clone();
         glib::spawn_future_local(async move {
             while quit_rx.recv().await.is_ok() {
+                save_window_size(&window);
                 let (done_tx, done_rx) = async_channel::bounded::<()>(1);
                 let socket = net.socket.clone();
                 net.handle.spawn(async move {
@@ -379,6 +477,22 @@ fn render_status(content: &gtk::Box, s: &NetworkStatus, net: &Net, window: &adw:
             if s.routing { "on" } else { "off" }
         ))
         .build();
+    {
+        let id_copy = gtk::Button::builder()
+            .icon_name("edit-copy-symbolic")
+            .tooltip_text("Copy this device's node ID")
+            .valign(gtk::Align::Center)
+            .build();
+        id_copy.add_css_class("flat");
+        let nid = s.self_node_id.clone();
+        let win = window.clone();
+        let net2 = net.clone();
+        id_copy.connect_clicked(move |_| {
+            win.clipboard().set_text(&nid);
+            net2.toast("Node ID copied");
+        });
+        self_row.add_suffix(&id_copy);
+    }
     info.add(&self_row);
 
     if s.is_originator {
@@ -389,7 +503,10 @@ fn render_status(content: &gtk::Box, s: &NetworkStatus, net: &Net, window: &adw:
             .build();
         let net2 = net.clone();
         freeze.connect_state_set(move |_, state| {
-            net2.request(IpcRequest::SetFrozen { frozen: state }, |r| match r {
+            net2.request(IpcRequest::SetFrozen { frozen: state }, move |r| match r {
+                Ok(IpcResponse::Ok) => Some(UiMsg::Toast(
+                    if state { "Membership frozen" } else { "Membership unfrozen" }.into(),
+                )),
                 Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
                 _ => None,
             });
@@ -401,9 +518,12 @@ fn render_status(content: &gtk::Box, s: &NetworkStatus, net: &Net, window: &adw:
     }
     content.append(&info);
 
+    let others = s.members.iter().filter(|m| !m.is_self).count();
     let group = adw::PreferencesGroup::builder()
         .title("Members")
-        .description(format!("{} member(s)", s.members.len()))
+        .description(format!(
+            "{others} other device(s) · ● green = online · direct = peer-to-peer, relay = via a relay server"
+        ))
         .build();
     for m in &s.members {
         if m.is_self {
@@ -412,6 +532,7 @@ fn render_status(content: &gtk::Box, s: &NetworkStatus, net: &Net, window: &adw:
         let dot = gtk::Label::new(Some("●"));
         dot.add_css_class(if m.online { "success" } else { "dim-label" });
         dot.set_valign(gtk::Align::Center);
+        dot.set_tooltip_text(Some(if m.online { "Online" } else { "Offline" }));
 
         let mut subtitle = m.virtual_ip.clone().unwrap_or_else(|| "(no IP)".into());
         if let Some(addr) = &m.observed_addr {
@@ -442,8 +563,10 @@ fn render_status(content: &gtk::Box, s: &NetworkStatus, net: &Net, window: &adw:
             copy.add_css_class("flat");
             let ip = ip.clone();
             let win = window.clone();
+            let net2 = net.clone();
             copy.connect_clicked(move |_| {
                 win.clipboard().set_text(&ip);
+                net2.toast("Virtual IP copied");
             });
             row.add_suffix(&copy);
         }
@@ -459,6 +582,7 @@ fn render_status(content: &gtk::Box, s: &NetworkStatus, net: &Net, window: &adw:
             let id = m.node_id.clone();
             remove.connect_clicked(move |_| {
                 net2.request(IpcRequest::RemoveMember { node_id: id.clone() }, |r| match r {
+                    Ok(IpcResponse::Ok) => Some(UiMsg::Toast("Member removed".into())),
                     Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
                     _ => None,
                 });
@@ -660,6 +784,11 @@ fn join_dialog(window: &adw::ApplicationWindow, net: &Net) {
             return;
         }
         let ticket = entry.text().to_string();
+        if !ticket.trim().starts_with("ipn1") {
+            net.toast("That doesn't look like a join ticket (it should start with “ipn1…”).");
+            return;
+        }
+        let ticket = ticket.trim().to_string();
         net.request(IpcRequest::Join { ticket }, |r| match r {
             Ok(IpcResponse::Ok) => Some(UiMsg::Toast("Joined!".into())),
             Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(format!("join failed: {e}"))),
@@ -710,7 +839,7 @@ fn qr_picture(data: &str) -> Option<gtk::Picture> {
     Some(pic)
 }
 
-fn show_ticket(window: &adw::ApplicationWindow, ticket: &str) {
+fn show_ticket(window: &adw::ApplicationWindow, net: &Net, ticket: &str) {
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
 
     if let Some(pic) = qr_picture(ticket) {
@@ -729,8 +858,10 @@ fn show_ticket(window: &adw::ApplicationWindow, ticket: &str) {
     copy.set_valign(gtk::Align::Center);
     let ticket_owned = ticket.to_string();
     let win = window.clone();
+    let net2 = net.clone();
     copy.connect_clicked(move |_| {
         win.clipboard().set_text(&ticket_owned);
+        net2.toast("Ticket copied");
     });
     row.append(&entry);
     row.append(&copy);
@@ -760,7 +891,7 @@ fn sas_label(sas: &[String]) -> gtk::Label {
     label
 }
 
-fn show_recovery(window: &adw::ApplicationWindow, code: &str) {
+fn show_recovery(window: &adw::ApplicationWindow, net: &Net, code: &str) {
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
     if let Some(pic) = qr_picture(code) {
         vbox.append(&pic);
@@ -771,7 +902,11 @@ fn show_recovery(window: &adw::ApplicationWindow, code: &str) {
     copy.set_valign(gtk::Align::Center);
     let code_owned = code.to_string();
     let win = window.clone();
-    copy.connect_clicked(move |_| win.clipboard().set_text(&code_owned));
+    let net2 = net.clone();
+    copy.connect_clicked(move |_| {
+        win.clipboard().set_text(&code_owned);
+        net2.toast("Recovery code copied");
+    });
     row.append(&entry);
     row.append(&copy);
     vbox.append(&row);
@@ -863,6 +998,40 @@ fn show_join_request(
         });
     });
     dialog.present();
+}
+
+fn show_about(window: &adw::ApplicationWindow) {
+    let about = adw::AboutWindow::builder()
+        .transient_for(window)
+        .application_name("iroh-private-network")
+        .application_icon(APP_ID)
+        .version(env!("CARGO_PKG_VERSION"))
+        .developer_name("steeb_k")
+        .license_type(gtk::License::Gpl30)
+        .comments("A peer-to-peer private VPN over iroh — connect your own devices into a private LAN.")
+        .build();
+    about.present();
+}
+
+/// Notify when a member transitions offline→online (skips the first render so we
+/// don't announce everyone on startup/reconnect).
+fn notify_newly_online(app: &adw::Application, prev: Option<&NetworkStatus>, new: &NetworkStatus) {
+    let Some(prev) = prev else { return };
+    for m in &new.members {
+        if m.is_self || !m.online {
+            continue;
+        }
+        let was_online = prev
+            .members
+            .iter()
+            .any(|p| p.node_id == m.node_id && p.online);
+        if !was_online {
+            let name = m.hostname.clone().unwrap_or_else(|| short_id(&m.node_id));
+            let n = gtk::gio::Notification::new("iroh-private-network");
+            n.set_body(Some(&format!("{name} came online")));
+            app.send_notification(None, &n);
+        }
+    }
 }
 
 // --- helpers ---

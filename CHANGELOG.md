@@ -33,6 +33,11 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   address. New `roster` unit tests cover determinism and the concurrent case.
 
 ### Added
+- **GUI polish.** An **About** dialog (version/license) in a new header menu; the window now
+  **remembers its size**; **success toasts** for copy/remove/freeze actions; the **Join ticket
+  field is validated** (must look like `ipn1…`); a **copy button for this device's node ID**;
+  **tooltips + a legend** explaining the online dot and direct-vs-relay; relative **"last seen"
+  updates live**; and a desktop **notification when a member comes online**.
 - **Originator key backup & recovery.** The originator can export its master key as a single
   `ipnkey1…` recovery code (GUI "Back up originator key" → QR + copy, with a keep-it-safe
   warning; CLI `export-key`). Another member of the same network can import it ("Restore
