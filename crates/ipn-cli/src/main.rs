@@ -43,6 +43,10 @@ enum Cmd {
     Rotate,
     /// Leave the network on this device only.
     Leave,
+    /// Connect to the saved network (go online).
+    Connect,
+    /// Disconnect but keep the network saved (go offline).
+    Disconnect,
 }
 
 #[tokio::main]
@@ -62,6 +66,8 @@ async fn main() -> Result<()> {
         Cmd::Delete => IpcRequest::DeleteNetwork,
         Cmd::Rotate => IpcRequest::RotateNetwork,
         Cmd::Leave => IpcRequest::LeaveNetwork,
+        Cmd::Connect => IpcRequest::Connect,
+        Cmd::Disconnect => IpcRequest::Disconnect,
     };
 
     let resp = oneshot_request(&socket, req)

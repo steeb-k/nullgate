@@ -59,6 +59,10 @@ pub enum IpcRequest {
     RotateNetwork,
     /// Leave the network on this device only.
     LeaveNetwork,
+    /// Connect to the saved network (go online). Idempotent.
+    Connect,
+    /// Disconnect from the network but keep it saved (go offline). Idempotent.
+    Disconnect,
     GetTicket,
     /// Upgrade this connection to receive pushed [`IpcEvent`]s.
     Subscribe,

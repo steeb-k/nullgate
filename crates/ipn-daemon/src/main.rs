@@ -262,6 +262,14 @@ async fn handle_request(engine: &Engine, req: IpcRequest) -> IpcResponse {
             Ok(()) => IpcResponse::Ok,
             Err(e) => to_err(e),
         },
+        IpcRequest::Connect => match engine.set_online(true).await {
+            Ok(()) => IpcResponse::Ok,
+            Err(e) => to_err(e),
+        },
+        IpcRequest::Disconnect => match engine.set_online(false).await {
+            Ok(()) => IpcResponse::Ok,
+            Err(e) => to_err(e),
+        },
         IpcRequest::GetTicket => match engine.ticket().await {
             Ok(t) => IpcResponse::Ticket(t),
             Err(e) => to_err(e),

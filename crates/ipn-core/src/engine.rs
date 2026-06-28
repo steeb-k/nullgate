@@ -108,6 +108,9 @@ pub struct NetworkStatus {
     pub is_originator: bool,
     /// Whether the TUN is up so RDP/SSH traffic is actually routed (needs elevation).
     pub routing: bool,
+    /// Whether the daemon is currently connected to the network (vs. disconnected
+    /// via "Quit", but still holding the config).
+    pub online: bool,
     pub members: Vec<MemberView>,
 }
 
@@ -597,6 +600,31 @@ impl Engine {
         Ok(())
     }
 
+    /// Connect to / disconnect from the network without forgetting it. Used by the
+    /// GUI: "Quit IPN" disconnects (the device goes offline from the pool) but
+    /// keeps the config; reopening the app reconnects. Idempotent.
+    pub async fn set_online(&self, online: bool) -> Result<()> {
+        let inner = &self.inner;
+        if online {
+            if inner.state.lock().await.doc.is_some() {
+                return Ok(()); // already connected
+            }
+            let cfg = inner
+                .state
+                .lock()
+                .await
+                .config
+                .clone()
+                .or_else(|| load_config(&inner.data_dir).ok().flatten())
+                .context("no network to connect to")?;
+            activate(inner, cfg).await?;
+        } else {
+            soft_disconnect(inner).await;
+        }
+        let _ = inner.events.send(EngineEvent::Changed);
+        Ok(())
+    }
+
     async fn originator_key(&self) -> Result<SigningKey> {
         let st = self.inner.state.lock().await;
         let cfg = st.config.as_ref().context("no network")?;
@@ -654,6 +682,7 @@ impl Engine {
             self_ip: cfg.my_ip.map(|ip| Ipv4Addr::from(ip).to_string()),
             is_originator: cfg.originator_secret.is_some(),
             routing: self.inner.tun.read().unwrap().is_some(),
+            online: st.doc.is_some(),
             members,
         })
     }
@@ -714,38 +743,38 @@ async fn activate(inner: &Arc<Inner>, cfg: StoredConfig) -> Result<()> {
     Ok(())
 }
 
-/// Tear down all network state on this device: stop network-scoped tasks, drop
-/// the TUN (removing the interface), close mesh connections, clear in-memory
-/// state, and delete the persisted config. Leaves the device key + node intact.
-async fn teardown(inner: &Arc<Inner>) {
-    // Stop the presence receiver + TUN read loop.
+/// Drop the live network state on this device (stop network-scoped tasks, drop
+/// the TUN/interface, close mesh connections, clear in-memory live state) while
+/// **keeping** the persisted config so it can reconnect. This is "go offline".
+async fn soft_disconnect(inner: &Arc<Inner>) {
     for h in inner.net_tasks.lock().unwrap().drain(..) {
         h.abort();
     }
-    // Drop the TUN (its Drop removes the OS interface).
     *inner.tun.write().unwrap() = None;
     inner.tun_attempted.store(false, Ordering::SeqCst);
     inner.was_member.store(false, Ordering::SeqCst);
     *inner.routes.write().unwrap() = RouteTable::default();
-    // Close mesh connections.
     let conns: Vec<Connection> = {
         let mut map = inner.conns.write().unwrap();
         map.drain().map(|(_, c)| c).collect()
     };
     for c in conns {
-        c.close(0u32.into(), b"left network");
+        c.close(0u32.into(), b"disconnected");
     }
-    // Clear engine state + delete the persisted network config.
-    {
-        let mut st = inner.state.lock().await;
-        st.config = None;
-        st.doc = None;
-        st.author = None;
-        st.roster = Roster::default();
-        st.presence = PresenceTracker::default();
-        st.gossip_sender = None;
-        st.pending.clear();
-    }
+    let mut st = inner.state.lock().await;
+    st.doc = None;
+    st.author = None;
+    st.roster = Roster::default();
+    st.presence = PresenceTracker::default();
+    st.gossip_sender = None;
+    st.pending.clear();
+    // st.config is intentionally kept.
+}
+
+/// Fully leave a network: go offline, then forget the config (in memory + on disk).
+async fn teardown(inner: &Arc<Inner>) {
+    soft_disconnect(inner).await;
+    inner.state.lock().await.config = None;
     let _ = std::fs::remove_file(config_path(&inner.data_dir));
 }
 

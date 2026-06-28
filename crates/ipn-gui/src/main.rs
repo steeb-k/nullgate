@@ -15,6 +15,8 @@ use ipn_ipc::transport::{self, read_frame, write_frame};
 use ipn_ipc::{Frame, IpcEvent, IpcRequest, IpcResponse, Message, NetworkStatus};
 use tokio::runtime::Handle;
 
+mod tray;
+
 const APP_ID: &str = "io.github.steeb_k.IPN";
 
 /// Messages from the IO side to the UI.
@@ -53,15 +55,6 @@ impl Net {
             if let Some(msg) = map(res) {
                 let _ = tx.send(msg).await;
             }
-        });
-    }
-
-    fn refresh(&self) {
-        self.request(IpcRequest::GetStatus, |r| match r {
-            Ok(IpcResponse::Status(s)) => Some(UiMsg::Status(s)),
-            Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
-            Err(_) => Some(UiMsg::DaemonDown),
-            _ => None,
         });
     }
 
@@ -227,6 +220,53 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
         });
     }
 
+    // --- system tray + minimize-to-tray ---
+    let (quit_tx, quit_rx) = async_channel::unbounded::<()>();
+    tray::install(app, &window, quit_tx);
+
+    // Closing the window hides it to the tray (keeps the connection) and, the first
+    // time, notifies the user it's still running.
+    {
+        let app = app.clone();
+        let notified = std::cell::Cell::new(false);
+        window.connect_close_request(move |w| {
+            w.set_visible(false);
+            if !notified.replace(true) {
+                let n = gtk::gio::Notification::new("iroh-private-network");
+                n.set_body(Some(
+                    "Still running in the tray — click the tray icon to reopen, or “Quit IPN” to disconnect.",
+                ));
+                app.send_notification(Some("ipn-tray"), &n);
+            }
+            glib::Propagation::Stop
+        });
+    }
+
+    // "Quit IPN" from the tray: disconnect from the network locally, then exit.
+    {
+        let app = app.clone();
+        let net = net.clone();
+        glib::spawn_future_local(async move {
+            while quit_rx.recv().await.is_ok() {
+                let (done_tx, done_rx) = async_channel::bounded::<()>(1);
+                let socket = net.socket.clone();
+                net.handle.spawn(async move {
+                    let _ = transport::oneshot_request(&socket, IpcRequest::Disconnect).await;
+                    let _ = done_tx.send(()).await;
+                });
+                let _ = done_rx.recv().await; // wait for the disconnect to land
+                app.quit();
+            }
+        });
+    }
+
+    // Opening the app connects to the saved network (reconnects if a prior "Quit"
+    // left it offline).
+    net.request(IpcRequest::Connect, |r| match r {
+        Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
+        _ => None,
+    });
+
     window.present();
 }
 
@@ -264,7 +304,13 @@ fn render_empty(content: &gtk::Box) {
 fn render_status(content: &gtk::Box, s: &NetworkStatus, net: &Net, window: &adw::ApplicationWindow) {
     clear_box(content);
 
-    if !s.routing {
+    if !s.online {
+        let banner = adw::Banner::builder()
+            .title("Disconnected — reopen the app to reconnect")
+            .revealed(true)
+            .build();
+        content.append(&banner);
+    } else if !s.routing {
         let banner = adw::Banner::builder()
             .title("Routing off — start the daemon elevated to carry RDP/SSH traffic")
             .revealed(true)
