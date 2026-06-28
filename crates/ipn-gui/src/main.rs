@@ -437,6 +437,11 @@ fn build_ui(
 
     let state: Rc<RefCell<Option<NetworkStatus>>> = Default::default();
     let pending: Rc<RefCell<Vec<PendingJoin>>> = Default::default();
+    // Signature of the last-rendered state. We only rebuild the page when this
+    // changes, so the frequent (every-tick) status pushes that don't change
+    // anything visible don't tear down + recreate widgets — which would steal
+    // keyboard focus / clicks. `""` forces the next render.
+    let last_sig: Rc<RefCell<String>> = Default::default();
 
     {
         let ui = ui.clone();
@@ -445,6 +450,7 @@ fn build_ui(
         let toast_overlay = toast_overlay.clone();
         let state = state.clone();
         let pending = pending.clone();
+        let last_sig = last_sig.clone();
         let app_n = app.clone();
         let add_btn = add_btn.clone();
         glib::spawn_future_local(async move {
@@ -457,26 +463,29 @@ fn build_ui(
                             .borrow_mut()
                             .retain(|p| !s.members.iter().any(|m| m.node_id == p.node_id));
                         *state.borrow_mut() = Some(s.clone());
-                        render_all(&ui, &s, &net, &window, &pending);
+                        render_if_changed(&ui, &s, &net, &window, &pending, &last_sig);
                     }
                     UiMsg::Status(None) => {
                         add_btn.set_visible(true); // no network — offer create/join
                         *state.borrow_mut() = None;
+                        last_sig.borrow_mut().clear();
                         render_placeholder(&ui, &empty_page(&net, &window));
                     }
                     UiMsg::Refresh => {
                         if let Some(s) = state.borrow().as_ref() {
-                            render_all(&ui, s, &net, &window, &pending);
+                            render_if_changed(&ui, s, &net, &window, &pending, &last_sig);
                         }
                     }
                     UiMsg::DaemonDown => {
                         add_btn.set_visible(false);
                         *state.borrow_mut() = None;
+                        last_sig.borrow_mut().clear();
                         render_placeholder(&ui, &daemon_down_page());
                     }
                     UiMsg::VersionMismatch { daemon, gui } => {
                         add_btn.set_visible(false);
                         *state.borrow_mut() = None;
+                        last_sig.borrow_mut().clear();
                         render_placeholder(&ui, &version_mismatch_page(daemon, gui));
                     }
                     UiMsg::Ticket(t) => fill_ticket(&ui, &t, &net, &window),
@@ -501,7 +510,7 @@ fn build_ui(
                         n.set_body(Some(&format!("“{hostname}” wants to join — approve in IPN")));
                         app_n.send_notification(None, &n);
                         if let Some(s) = state.borrow().as_ref() {
-                            render_all(&ui, s, &net, &window, &pending);
+                            render_if_changed(&ui, s, &net, &window, &pending, &last_sig);
                         }
                     }
                     UiMsg::Toast(t) => toast_overlay.add_toast(adw::Toast::new(&t)),
@@ -664,6 +673,66 @@ fn empty_page(net: &Net, window: &adw::ApplicationWindow) -> adw::StatusPage {
         .child(&buttons)
         .vexpand(true)
         .build()
+}
+
+/// A compact string capturing everything the UI displays. Used to skip rebuilds
+/// when a status push doesn't change anything visible (avoids stealing focus).
+fn render_signature(s: &NetworkStatus, pending: &[PendingJoin]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = write!(
+        out,
+        "{}|{}|{}|{}|{}|{}|{}|{}|",
+        s.name,
+        s.online,
+        s.routing,
+        s.frozen,
+        s.is_originator,
+        s.self_ip.as_deref().unwrap_or(""),
+        s.self_label.as_deref().unwrap_or(""),
+        s.home_relay.as_deref().unwrap_or(""),
+    );
+    for m in &s.members {
+        // Only include last-seen for offline members (it's the only field shown
+        // for them), bucketed via `fmt_last_seen` so it changes rarely.
+        let last = if m.online { String::new() } else { fmt_last_seen(m.last_seen) };
+        let _ = write!(
+            out,
+            "[{}|{}|{}|{}|{}|{:?}|{}|{}|{}]",
+            m.node_id,
+            m.is_self,
+            m.label.as_deref().unwrap_or(""),
+            m.hostname.as_deref().unwrap_or(""),
+            m.virtual_ip.as_deref().unwrap_or(""),
+            m.direct,
+            m.online,
+            m.observed_addr.as_deref().unwrap_or(""),
+            last,
+        );
+    }
+    out.push('#');
+    for p in pending {
+        out.push_str(&p.node_id);
+        out.push(',');
+    }
+    out
+}
+
+/// Re-render only if the displayed data changed since the last render.
+fn render_if_changed(
+    ui: &Ui,
+    s: &NetworkStatus,
+    net: &Net,
+    window: &adw::ApplicationWindow,
+    pending: &Rc<RefCell<Vec<PendingJoin>>>,
+    last_sig: &Rc<RefCell<String>>,
+) {
+    let sig = render_signature(s, &pending.borrow());
+    if *last_sig.borrow() == sig {
+        return;
+    }
+    *last_sig.borrow_mut() = sig;
+    render_all(ui, s, net, window, pending);
 }
 
 /// Render the main page and the (persistent) flyout content boxes.

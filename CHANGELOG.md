@@ -30,6 +30,10 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   on-disk secrets are not migrated.
 
 ### Fixed
+- **GUI focus no longer jumps / clicks no longer get stolen.** The main page was torn down and
+  rebuilt on every status push from the daemon (every couple seconds), which reset keyboard focus
+  (to "Administration") and could eat a click landing mid-rebuild. The UI now re-renders only when
+  the displayed data actually changes (memoized by a content signature), so idle ticks are no-ops.
 - **Roster-doc spam safeguard (partial).** Folding the roster now ignores non-`e/` keys, skips
   oversized entry values, and caps how many entries it processes, so a member spamming the shared
   doc can't OOM/peg others. (Bounding on-disk growth needs originator snapshot/prune compaction —
