@@ -38,10 +38,13 @@ Copy-Item "$root\target\release\ipn-daemon.exe" "$dist\bin\"
 Copy-Item "$root\target\release\ipn-cli.exe" "$dist\bin\"
 
 # 2. wintun.dll (cached in vendor\wintun). tun-rs loads it at runtime; without it
-#    the app still runs but routing stays off.
+#    the app still runs but routing stays off. Wintun is proprietary (WireGuard
+#    LLC) — we ship its LICENSE.txt alongside the DLL, as its license requires and
+#    as our GPL "Wintun exception" assumes (see LICENSE).
 $wintunDir = Join-Path $root "vendor\wintun"
 $wintunDll = Join-Path $wintunDir "wintun.dll"
-if (-not (Test-Path $wintunDll)) {
+$wintunLic = Join-Path $wintunDir "LICENSE.txt"
+if (-not (Test-Path $wintunDll) -or -not (Test-Path $wintunLic)) {
     New-Item -ItemType Directory -Force -Path $wintunDir | Out-Null
     $zip = Join-Path $env:TEMP "wintun-$wintunVer.zip"
     Write-Host "Fetching wintun $wintunVer..."
@@ -50,8 +53,13 @@ if (-not (Test-Path $wintunDll)) {
     if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
     Expand-Archive -Path $zip -DestinationPath $extract
     Copy-Item "$extract\wintun\bin\amd64\wintun.dll" $wintunDll
+    Copy-Item "$extract\wintun\LICENSE.txt" $wintunLic
 }
 Copy-Item $wintunDll "$dist\bin\"
+
+# Licenses in the bundle: this project (GPLv3 + Wintun exception) and Wintun's own.
+Copy-Item "$root\LICENSE" "$dist\LICENSE.txt"
+Copy-Item $wintunLic "$dist\wintun-LICENSE.txt"
 
 # 3. GTK runtime DLLs.
 Copy-Item "$gbin\*.dll" "$dist\bin\"

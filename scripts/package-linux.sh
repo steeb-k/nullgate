@@ -33,6 +33,9 @@ install -m 0755 "target/release/ipn" "$STAGE/bin/ipn"
 install -m 0755 "target/release/ipn-daemon" "$STAGE/bin/ipn-daemon"
 install -m 0755 "target/release/ipn-cli" "$STAGE/bin/ipn-cli"
 
+# License (GPLv3 + Wintun exception). Linux uses the kernel TUN, so no Wintun here.
+install -m 0644 "$ROOT/LICENSE" "$STAGE/LICENSE.txt"
+
 # Wrapper: run as the normal user (a GUI must NOT run under sudo). It starts the
 # daemon in the background if it isn't already running, then launches the GUI.
 # The daemon carries the CAP_NET_ADMIN capability granted by ./enable-routing.sh,

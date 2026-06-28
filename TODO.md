@@ -93,8 +93,6 @@ Legend: **★ recommended next** · ⚠️ known gap/risk in the current code ·
 
 ## Nice-to-haves / quick wins (low effort)
 Polish and small ergonomics — likely an afternoon each or less.
-- Add a `LICENSE` file (Cargo.toml declares GPL-3.0-or-later; the file itself is missing) and
-  include it in the release bundles.
 - `--version` on `ipn`, `ipn-daemon`, `ipn-cli`; show the version in the GUI (header/About).
 - An **About** dialog (version, repo link, license, credits).
 - Clear the existing `ipn-gui` compiler warning; add a `cargo fmt`/`clippy` clean pass.

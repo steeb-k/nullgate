@@ -80,4 +80,10 @@ Built on a lot of other people's work:
   [Tailscale](https://tailscale.com), and Hamachi.
 
 ## License
-GPL-3.0-or-later.
+**GPL-3.0-or-later**, with one additional permission (GPLv3 §7): the program may be combined and
+distributed with the proprietary **Wintun** prebuilt DLL (used only via its public API). See
+[`LICENSE`](LICENSE) for the full text and the exact exception.
+
+Wintun (`wintun.dll`, bundled in Windows builds) is **not** covered by the GPL — it's licensed
+separately by WireGuard LLC and shipped with its own `wintun-LICENSE.txt`. Linux uses the
+kernel's built-in TUN and bundles no third-party driver.
