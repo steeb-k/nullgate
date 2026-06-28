@@ -71,7 +71,7 @@ Legend: **★ recommended next** · ⚠️ known gap/risk in the current code ·
 - Per-member quick actions: **Connect (RDP/SSH)** launcher, copy address (done), rename.
 - A diagnostics/status view: relay-in-use, direct-vs-relay (shown), throughput, NAT info; expose
   the existing `conn_probe` logic in-app.
-- Tray icon + minimize-to-tray; launch on login; app icon + desktop integration.
+- Launch on login / autostart (tray + minimize-to-tray + app icon are done).
 - Friendlier first-run / onboarding; clearer empty and error states.
 
 ## Platforms
@@ -101,8 +101,7 @@ Polish and small ergonomics — likely an afternoon each or less.
 - Disable a button while its action is in flight (avoid double-submits).
 - Remember window size/position between runs.
 - Show this device's own NodeId somewhere + a copy button (useful for `add-key`/debugging).
-- App/window icon; a Linux desktop icon (the `.desktop` exists, ship an icon with it); a
-  Windows Start-menu shortcut in the bundle.
+- A Windows Start-menu shortcut in the bundle (app/window icon + Linux desktop icon are done).
 - Dev convenience scripts: `scripts/run-dev` (start daemon + GUI) and `scripts/test`
   (unit + all ignored e2e) for quick local checks.
 - A short top-level `CONTRIBUTING.md` that points at `docs/development.md`.

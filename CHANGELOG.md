@@ -5,8 +5,17 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 ### Added
-- Documentation framework: user-facing `README.md`, `CLAUDE.md` agent guide, and `docs/`
-  (`architecture`, `security`, `building`, `releasing`, `development`) plus this changelog.
+- **System tray** (Open IPN / Quit IPN) with minimize-to-tray: closing the window hides it to
+  the tray (keeps the connection) and notifies once; "Quit IPN" disconnects from the network
+  locally, then exits. tray-icon on Windows/macOS, ksni on Linux; uses `img/trayicon.png`.
+- **Connect / Disconnect** (engine `set_online`) so quitting takes the device offline while
+  keeping the saved network; reopening the app reconnects. Wired through IPC/daemon/CLI;
+  `NetworkStatus` gained `online`.
+- **App icon**: embedded in the Windows `.exe` (from `img/icon.ico`) and installed into the
+  Linux icon theme (`img/icon.png`); image assets added under `img/`.
+- **GPL-3.0 `LICENSE`** with a §7 "Wintun exception"; bundles ship the project + Wintun licenses.
+- Documentation framework: user-facing `README.md`, `CLAUDE.md` agent guide, `docs/`
+  (`architecture`, `security`, `building`, `releasing`, `development`), `CHANGELOG.md`, `TODO.md`.
 
 ## [0.0.1-test5]
 ### Added
