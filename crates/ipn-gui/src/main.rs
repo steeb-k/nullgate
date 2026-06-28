@@ -7,12 +7,13 @@
 //! pushed events arrive on the GTK main thread via an `async-channel` consumed by
 //! `glib::spawn_future_local`. GTK objects are only touched on the main thread.
 //!
-//! Layout (SEED-style): a static "IPN" titlebar, the editable network name, a few
-//! section rows that open slide-in **flyouts** (Diagnostics, Show join ticket,
-//! Administration), and a separated **Members** list at the bottom where each
-//! member opens its own detail flyout (with the kick button).
+//! Layout (SEED-style): a static "IPN" titlebar; a main page with a control group
+//! (Administration, Show join ticket, Diagnostics) and a Members list at the
+//! bottom (this device included). Each control row, and each member, opens a
+//! slide-in **flyout** — an `adw::OverlaySplitView` sidebar that overlays the
+//! content (the window stays visible behind it), so it reads as a sub-menu.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -223,8 +224,6 @@ fn main() -> glib::ExitCode {
         println!("ipn {}", env!("CARGO_PKG_VERSION"));
         return glib::ExitCode::SUCCESS;
     }
-    // Start hidden in the tray (for launch-on-login). Also honored via env so a
-    // desktop autostart entry can set it without arg quoting.
     let start_minimized =
         args.iter().any(|a| a == "--minimized") || std::env::var_os("IPN_START_MINIMIZED").is_some();
 
@@ -234,7 +233,6 @@ fn main() -> glib::ExitCode {
         )
         .init();
 
-    // Tokio runtime on a dedicated thread for socket IO.
     let (handle_tx, handle_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -260,35 +258,34 @@ fn main() -> glib::ExitCode {
 /// Handles to the persistent widgets, passed to the render functions.
 #[derive(Clone)]
 struct Ui {
-    nav: adw::NavigationView,
-    name_area: gtk::Box,
+    split: adw::OverlaySplitView,
+    stack: gtk::Stack,
     main_box: gtk::Box,
-    diag_box: gtk::Box,
     admin_box: gtk::Box,
+    diag_box: gtk::Box,
     requests_box: gtk::Box,
-    diag_page: adw::NavigationPage,
-    admin_page: adw::NavigationPage,
-    requests_page: adw::NavigationPage,
-    editing_name: Rc<Cell<bool>>,
+    ticket_box: gtk::Box,
+    member_box: gtk::Box,
+    member_title: adw::WindowTitle,
 }
 
-/// Build a flyout page: a ToolbarView (header with the section title; the
-/// NavigationView supplies the back arrow) wrapping a scrollable content box.
-fn flyout_page(title: &str, content: &gtk::Box, tag: &str) -> adw::NavigationPage {
-    let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new(title, "")));
-    let clamp = adw::Clamp::builder().maximum_size(520).child(content).build();
-    let scrolled = gtk::ScrolledWindow::builder().child(&clamp).vexpand(true).build();
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&scrolled));
-    adw::NavigationPage::with_tag(&toolbar, title, tag)
+impl Ui {
+    /// Reveal a flyout by stack name (it overlays the content; window stays behind).
+    fn open(&self, name: &str) {
+        self.stack.set_visible_child_name(name);
+        self.split.set_show_sidebar(true);
+    }
+    fn close_flyout(&self) {
+        self.split.set_show_sidebar(false);
+    }
 }
 
 fn padded_box() -> gtk::Box {
     let b = gtk::Box::new(gtk::Orientation::Vertical, 12);
     b.set_margin_top(12);
     b.set_margin_bottom(12);
+    b.set_margin_start(6);
+    b.set_margin_end(6);
     b
 }
 
@@ -308,7 +305,7 @@ fn build_ui(
         .default_height(win_h)
         .build();
 
-    // --- main page header (static branding) ---
+    // --- main header (static branding; carries the window controls) ---
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&adw::WindowTitle::new("IPN", "Iroh Private Network")));
 
@@ -356,52 +353,89 @@ fn build_ui(
     header.pack_start(&add_btn);
     header.pack_end(&menu_btn);
 
-    // --- main page content ---
-    let name_area = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    name_area.set_halign(gtk::Align::Center);
-    name_area.set_margin_top(6);
+    // --- main page body ---
     let main_box = padded_box();
+    let clamp = adw::Clamp::builder().maximum_size(520).child(&main_box).build();
+    let main_scroller = gtk::ScrolledWindow::builder().child(&clamp).vexpand(true).build();
 
-    let root_vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    root_vbox.append(&name_area);
-    root_vbox.append(&main_box);
+    // --- flyout: an overlay sidebar (kept collapsed → always overlays the content
+    // with a scrim + slide, the window visible behind it). A stack swaps which
+    // panel fills it. ---
+    let split = adw::OverlaySplitView::new();
+    split.set_collapsed(true);
+    split.set_sidebar_position(gtk::PackType::End);
+    split.set_show_sidebar(false);
+    split.set_min_sidebar_width(300.0);
+    split.set_max_sidebar_width(460.0);
+    split.set_sidebar_width_fraction(0.72);
+    split.set_content(Some(&main_scroller));
 
-    let clamp = adw::Clamp::builder().maximum_size(520).child(&root_vbox).build();
-    let scrolled = gtk::ScrolledWindow::builder().child(&clamp).vexpand(true).build();
+    let admin_box = padded_box();
+    let diag_box = padded_box();
+    let requests_box = padded_box();
+    let ticket_box = padded_box();
+    let member_box = padded_box();
+
+    // Build a flyout panel (back-button top bar + scrollable content). Returns the
+    // panel widget and its title widget (so dynamic titles can be updated).
+    let make_panel = |title: &str, content: &gtk::Box| -> (adw::ToolbarView, adw::WindowTitle) {
+        let tv = adw::ToolbarView::new();
+        let hb = adw::HeaderBar::new();
+        hb.set_show_start_title_buttons(false);
+        hb.set_show_end_title_buttons(false);
+        let wt = adw::WindowTitle::new(title, "");
+        hb.set_title_widget(Some(&wt));
+        let back = gtk::Button::builder()
+            .icon_name("go-previous-symbolic")
+            .tooltip_text("Back")
+            .css_classes(["flat", "circular"])
+            .build();
+        {
+            let split = split.clone();
+            back.connect_clicked(move |_| split.set_show_sidebar(false));
+        }
+        hb.pack_start(&back);
+        tv.add_top_bar(&hb);
+        let clamp = adw::Clamp::builder().maximum_size(520).child(content).build();
+        let scr = gtk::ScrolledWindow::builder().child(&clamp).vexpand(true).build();
+        tv.set_content(Some(&scr));
+        (tv, wt)
+    };
+
+    let (admin_panel, _) = make_panel("Administration", &admin_box);
+    let (diag_panel, _) = make_panel("Diagnostics", &diag_box);
+    let (requests_panel, _) = make_panel("Join requests", &requests_box);
+    let (ticket_panel, _) = make_panel("Join ticket", &ticket_box);
+    let (member_panel, member_title) = make_panel("Member", &member_box);
+
+    let stack = gtk::Stack::new();
+    stack.add_named(&admin_panel, Some("admin"));
+    stack.add_named(&diag_panel, Some("diagnostics"));
+    stack.add_named(&requests_panel, Some("requests"));
+    stack.add_named(&ticket_panel, Some("ticket"));
+    stack.add_named(&member_panel, Some("member"));
+    split.set_sidebar(Some(&stack));
+
     let main_toolbar = adw::ToolbarView::new();
     main_toolbar.add_top_bar(&header);
-    main_toolbar.set_content(Some(&scrolled));
-    let main_page = adw::NavigationPage::with_tag(&main_toolbar, "IPN", "main");
-
-    // --- flyout pages (persistent content boxes, rebuilt on each status) ---
-    let diag_box = padded_box();
-    let admin_box = padded_box();
-    let requests_box = padded_box();
-    let diag_page = flyout_page("Diagnostics", &diag_box, "diagnostics");
-    let admin_page = flyout_page("Administration", &admin_box, "admin");
-    let requests_page = flyout_page("Join requests", &requests_box, "requests");
-
-    let nav = adw::NavigationView::new();
-    nav.add(&main_page);
+    main_toolbar.set_content(Some(&split));
 
     let toast_overlay = adw::ToastOverlay::new();
-    toast_overlay.set_child(Some(&nav));
+    toast_overlay.set_child(Some(&main_toolbar));
     window.set_content(Some(&toast_overlay));
 
     let ui = Ui {
-        nav,
-        name_area,
+        split,
+        stack,
         main_box,
-        diag_box,
         admin_box,
+        diag_box,
         requests_box,
-        diag_page,
-        admin_page,
-        requests_page,
-        editing_name: Rc::new(Cell::new(false)),
+        ticket_box,
+        member_box,
+        member_title,
     };
 
-    // Initial placeholder until the first status/event arrives.
     render_placeholder(&ui, &connecting_page());
 
     {
@@ -423,7 +457,6 @@ fn build_ui(
         });
     }
 
-    // Last status (for live "last seen" + online notifications) + pending joins.
     let state: Rc<RefCell<Option<NetworkStatus>>> = Default::default();
     let pending: Rc<RefCell<Vec<PendingJoin>>> = Default::default();
 
@@ -463,7 +496,7 @@ fn build_ui(
                         *state.borrow_mut() = None;
                         render_placeholder(&ui, &version_mismatch_page(daemon, gui));
                     }
-                    UiMsg::Ticket(t) => push_ticket(&ui, &t, &net, &window),
+                    UiMsg::Ticket(t) => fill_ticket(&ui, &t, &net, &window),
                     UiMsg::Recovery(code) => show_recovery(&window, &net, &code),
                     UiMsg::JoinSas(sas) => show_join_sas(&window, &sas),
                     UiMsg::JoinRequest {
@@ -507,7 +540,6 @@ fn build_ui(
     let (quit_tx, quit_rx) = async_channel::unbounded::<()>();
     tray::install(app, &window, quit_tx.clone());
 
-    // Ctrl+Q → Quit IPN (disconnect + exit), same as the tray's "Quit IPN".
     {
         let action = gtk::gio::SimpleAction::new("quit", None);
         let qtx = quit_tx.clone();
@@ -518,7 +550,6 @@ fn build_ui(
         app.set_accels_for_action("app.quit", &["<Ctrl>q"]);
     }
 
-    // Closing the window hides it to the tray (keeps the connection) and notifies once.
     {
         let app = app.clone();
         let notified = std::cell::Cell::new(false);
@@ -536,7 +567,6 @@ fn build_ui(
         });
     }
 
-    // "Quit IPN" from the tray: disconnect from the network locally, then exit.
     {
         let app = app.clone();
         let net = net.clone();
@@ -550,13 +580,12 @@ fn build_ui(
                     let _ = transport::oneshot_request(&socket, IpcRequest::Disconnect).await;
                     let _ = done_tx.send(()).await;
                 });
-                let _ = done_rx.recv().await; // wait for the disconnect to land
+                let _ = done_rx.recv().await;
                 app.quit();
             }
         });
     }
 
-    // Opening the app connects to the saved network (reconnects after a "Quit").
     net.request(IpcRequest::Connect, |r| match r {
         Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
         _ => None,
@@ -579,20 +608,15 @@ fn clear_box(b: &gtk::Box) {
     }
 }
 
-/// Show a full-screen placeholder (connecting / empty / error) on the main page,
-/// hiding the network chrome and popping any open flyout.
+/// Show a full-screen placeholder (connecting / empty / error), closing any flyout.
 fn render_placeholder(ui: &Ui, page: &adw::StatusPage) {
-    while ui.nav.pop() {}
-    ui.name_area.set_visible(false);
+    ui.close_flyout();
     clear_box(&ui.main_box);
     ui.main_box.append(page);
 }
 
 fn connecting_page() -> adw::StatusPage {
-    let spinner = gtk::Spinner::builder()
-        .width_request(32)
-        .height_request(32)
-        .build();
+    let spinner = gtk::Spinner::builder().width_request(32).height_request(32).build();
     spinner.start();
     adw::StatusPage::builder()
         .title("Connecting…")
@@ -659,8 +683,7 @@ fn empty_page(net: &Net, window: &adw::ApplicationWindow) -> adw::StatusPage {
         .build()
 }
 
-/// Render the whole UI for a status: the name area, the main page sections, and
-/// the (persistent) flyout content boxes.
+/// Render the main page and the (persistent) flyout content boxes.
 fn render_all(
     ui: &Ui,
     s: &NetworkStatus,
@@ -668,92 +691,14 @@ fn render_all(
     window: &adw::ApplicationWindow,
     pending: &Rc<RefCell<Vec<PendingJoin>>>,
 ) {
-    if !ui.editing_name.get() {
-        name_area_view(ui, &s.name, net);
-    }
-    ui.name_area.set_visible(true);
     render_main(ui, s, net, window, pending);
-    render_diag(&ui.diag_box, s);
     render_admin(&ui.admin_box, s, net, window);
+    render_diag(&ui.diag_box, s);
     render_requests(&ui.requests_box, net, pending);
 }
 
-/// The editable network name: a bold label + pencil. The pencil swaps it for an
-/// inline entry (see [`name_area_edit`]).
-fn name_area_view(ui: &Ui, name: &str, net: &Net) {
-    clear_box(&ui.name_area);
-    let label = gtk::Label::new(Some(name));
-    label.add_css_class("title-2");
-    label.add_css_class("network-name");
-    let pencil = gtk::Button::builder()
-        .icon_name("document-edit-symbolic")
-        .tooltip_text("Rename the network")
-        .valign(gtk::Align::Center)
-        .build();
-    pencil.add_css_class("flat");
-    let ui2 = ui.clone();
-    let net2 = net.clone();
-    let cur = name.to_string();
-    pencil.connect_clicked(move |_| name_area_edit(&ui2, &cur, &net2));
-    ui.name_area.append(&label);
-    ui.name_area.append(&pencil);
-}
-
-/// Inline editor for the network name (replaces the label in place).
-fn name_area_edit(ui: &Ui, current: &str, net: &Net) {
-    ui.editing_name.set(true);
-    clear_box(&ui.name_area);
-    let entry = gtk::Entry::builder().text(current).build();
-    let save = gtk::Button::from_icon_name("emblem-ok-symbolic");
-    save.add_css_class("flat");
-    save.set_valign(gtk::Align::Center);
-    let cancel = gtk::Button::from_icon_name("window-close-symbolic");
-    cancel.add_css_class("flat");
-    cancel.set_valign(gtk::Align::Center);
-    ui.name_area.append(&entry);
-    ui.name_area.append(&save);
-    ui.name_area.append(&cancel);
-    entry.grab_focus();
-
-    let commit = {
-        let ui = ui.clone();
-        let net = net.clone();
-        let entry = entry.clone();
-        move || {
-            let name = entry.text().trim().to_string();
-            ui.editing_name.set(false);
-            if !name.is_empty() {
-                name_area_view(&ui, &name, &net);
-                net.request(IpcRequest::SetNetworkName { name }, |r| match r {
-                    Ok(IpcResponse::Ok) => Some(UiMsg::Toast("Network renamed".into())),
-                    Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
-                    _ => None,
-                });
-            } else {
-                net.refresh();
-            }
-        }
-    };
-    {
-        let commit = commit.clone();
-        save.connect_clicked(move |_| commit());
-    }
-    {
-        let commit = commit.clone();
-        entry.connect_activate(move |_| commit());
-    }
-    {
-        let ui = ui.clone();
-        let net = net.clone();
-        cancel.connect_clicked(move |_| {
-            ui.editing_name.set(false);
-            net.refresh();
-        });
-    }
-}
-
-/// Build the main page: connection banners, a This-device card, the section rows
-/// that open flyouts, and the separated Members list at the bottom.
+/// Build the main page: connection banners, the control group (Administration,
+/// Show join ticket, Diagnostics), and the Members list (this device included).
 fn render_main(
     ui: &Ui,
     s: &NetworkStatus,
@@ -779,62 +724,21 @@ fn render_main(
         );
     }
 
-    // This device.
-    let dev = adw::PreferencesGroup::new();
-    let self_host = s
-        .members
-        .iter()
-        .find(|m| m.is_self)
-        .and_then(|m| m.hostname.clone())
-        .unwrap_or_default();
-    let self_row = adw::ActionRow::builder()
-        .title(s.self_label.clone().unwrap_or_else(|| "This device".into()))
-        .subtitle(format!(
-            "{}{}{} · routing {}",
-            self_host,
-            s.self_ip.clone().map(|ip| format!(" · {ip}")).unwrap_or_default(),
-            if s.is_originator { " · originator" } else { "" },
-            if s.routing { "on" } else { "off" }
-        ))
-        .build();
-    {
-        let rename = icon_button("document-edit-symbolic", "Set this device's friendly name");
-        let window2 = window.clone();
-        let net2 = net.clone();
-        let current = s.self_label.clone();
-        rename.connect_clicked(move |_| set_label_dialog(&window2, &net2, current.clone()));
-        self_row.add_suffix(&rename);
-        let id_copy = icon_button("edit-copy-symbolic", "Copy this device's node ID");
-        let nid = s.self_node_id.clone();
-        let win = window.clone();
-        let net2 = net.clone();
-        id_copy.connect_clicked(move |_| {
-            win.clipboard().set_text(&nid);
-            net2.toast("Node ID copied");
-        });
-        self_row.add_suffix(&id_copy);
-    }
-    dev.add(&self_row);
-    ui.main_box.append(&dev);
-
-    // Section rows → flyouts.
-    let sections = adw::PreferencesGroup::new();
+    // Control group: Administration (top) → Show join ticket → Diagnostics
+    // (bottom), with Join requests surfaced above when present.
+    let controls = adw::PreferencesGroup::new();
     let n_pending = pending.borrow().len();
     if n_pending > 0 {
-        let row = flyout_row(
-            "Join requests",
-            &format!("{n_pending} waiting"),
-            "dialog-question-symbolic",
-        );
+        let row = flyout_row("Join requests", &format!("{n_pending} waiting"), "dialog-question-symbolic");
         let ui2 = ui.clone();
-        row.connect_activated(move |_| ui2.nav.push(&ui2.requests_page));
-        sections.add(&row);
+        row.connect_activated(move |_| ui2.open("requests"));
+        controls.add(&row);
     }
     {
-        let row = flyout_row("Diagnostics", "Relay, connection paths, routing", "network-wired-symbolic");
+        let row = flyout_row("Administration", "Name, freeze, rotate, recovery, delete/leave", "emblem-system-symbolic");
         let ui2 = ui.clone();
-        row.connect_activated(move |_| ui2.nav.push(&ui2.diag_page));
-        sections.add(&row);
+        row.connect_activated(move |_| ui2.open("admin"));
+        controls.add(&row);
     }
     {
         let row = flyout_row("Show join ticket", "Invite another device", "send-to-symbolic");
@@ -846,71 +750,86 @@ fn render_main(
                 _ => None,
             });
         });
-        sections.add(&row);
+        controls.add(&row);
     }
     {
-        let row = flyout_row("Administration", "Freeze, rotate, recovery, delete/leave", "emblem-system-symbolic");
+        let row = flyout_row("Diagnostics", "Relay, connection paths, routing", "network-wired-symbolic");
         let ui2 = ui.clone();
-        row.connect_activated(move |_| ui2.nav.push(&ui2.admin_page));
-        sections.add(&row);
+        row.connect_activated(move |_| ui2.open("diagnostics"));
+        controls.add(&row);
     }
-    ui.main_box.append(&sections);
+    ui.main_box.append(&controls);
 
-    // Members (inline, at the bottom) — each row opens a detail flyout.
+    // Members (this device first), each row opens a detail flyout.
     let others = s.members.iter().filter(|m| !m.is_self).count();
     let members = adw::PreferencesGroup::builder()
         .title("Members")
-        .description(format!("{others} other device(s)"))
+        .description(format!("{} device(s) total", others + 1))
         .build();
-    for m in &s.members {
-        if m.is_self {
-            continue;
-        }
-        let dot = gtk::Label::new(Some("●"));
-        dot.add_css_class("status-dot");
-        dot.add_css_class(if m.online { "success" } else { "dim-label" });
-        dot.set_valign(gtk::Align::Center);
-        dot.set_tooltip_text(Some(if m.online { "Online" } else { "Offline" }));
-
-        let title = m
-            .label
-            .clone()
-            .or_else(|| m.hostname.clone())
-            .unwrap_or_else(|| short_id(&m.node_id));
-        let mut subtitle = String::new();
-        if m.label.is_some() {
-            if let Some(h) = &m.hostname {
-                subtitle.push_str(h);
-                subtitle.push_str(" · ");
-            }
-        }
-        subtitle.push_str(&m.virtual_ip.clone().unwrap_or_else(|| "(no IP)".into()));
-        if m.online {
-            match m.direct {
-                Some(true) => subtitle.push_str(" · direct"),
-                Some(false) => subtitle.push_str(" · relay"),
-                None => {}
-            }
-        } else {
-            subtitle.push_str(&format!(" · last seen {}", fmt_last_seen(m.last_seen)));
-        }
-
-        let row = adw::ActionRow::builder()
-            .title(title)
-            .subtitle(subtitle)
-            .activatable(true)
-            .build();
-        row.add_prefix(&dot);
-        row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-        let ui2 = ui.clone();
-        let net2 = net.clone();
-        let window2 = window.clone();
-        let m2 = m.clone();
-        let is_orig = s.is_originator;
-        row.connect_activated(move |_| push_member_detail(&ui2, &m2, is_orig, &net2, &window2));
-        members.add(&row);
+    let mut ordered: Vec<&MemberView> = s.members.iter().collect();
+    ordered.sort_by_key(|m| !m.is_self); // self first
+    for m in ordered {
+        members.add(&member_row(ui, m, s.is_originator, net, window));
     }
     ui.main_box.append(&members);
+}
+
+/// One member row for the main list (dot + name/host/ip/status + chevron).
+fn member_row(
+    ui: &Ui,
+    m: &MemberView,
+    is_originator: bool,
+    net: &Net,
+    window: &adw::ApplicationWindow,
+) -> adw::ActionRow {
+    let dot = gtk::Label::new(Some("●"));
+    dot.add_css_class("status-dot");
+    dot.add_css_class(if m.online { "success" } else { "dim-label" });
+    dot.set_valign(gtk::Align::Center);
+    dot.set_tooltip_text(Some(if m.online { "Online" } else { "Offline" }));
+
+    let mut title = m
+        .label
+        .clone()
+        .or_else(|| m.hostname.clone())
+        .unwrap_or_else(|| short_id(&m.node_id));
+    if m.is_self {
+        title.push_str(" (this device)");
+    }
+
+    let mut subtitle = String::new();
+    if m.label.is_some() {
+        if let Some(h) = &m.hostname {
+            subtitle.push_str(h);
+            subtitle.push_str(" · ");
+        }
+    }
+    subtitle.push_str(&m.virtual_ip.clone().unwrap_or_else(|| "(no IP)".into()));
+    if m.is_self {
+        // (online by definition)
+    } else if m.online {
+        match m.direct {
+            Some(true) => subtitle.push_str(" · direct"),
+            Some(false) => subtitle.push_str(" · relay"),
+            None => {}
+        }
+    } else {
+        subtitle.push_str(&format!(" · last seen {}", fmt_last_seen(m.last_seen)));
+    }
+
+    let row = adw::ActionRow::builder()
+        .title(title)
+        .subtitle(subtitle)
+        .activatable(true)
+        .build();
+    row.add_prefix(&dot);
+    row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+    let ui2 = ui.clone();
+    let net2 = net.clone();
+    let window2 = window.clone();
+    let m2 = m.clone();
+    row.connect_activated(move |_| fill_member(&ui2, &m2, is_originator, &net2, &window2));
+    row
 }
 
 fn render_diag(b: &gtk::Box, s: &NetworkStatus) {
@@ -924,19 +843,30 @@ fn render_diag(b: &gtk::Box, s: &NetworkStatus) {
         "Routing (TUN)",
         if s.routing { "on — carrying traffic" } else { "off — needs the elevated daemon" },
     ));
-    g.add(&property_row("This device", &s.self_node_id));
     b.append(&g);
 }
 
 fn render_admin(b: &gtk::Box, s: &NetworkStatus, net: &Net, window: &adw::ApplicationWindow) {
     clear_box(b);
-    let g = adw::PreferencesGroup::new();
 
+    // Network name (rename here, not on the main screen).
+    let name_group = adw::PreferencesGroup::new();
+    let name_row = adw::ActionRow::builder()
+        .title("Network name")
+        .subtitle(&s.name)
+        .build();
+    let edit = icon_button("document-edit-symbolic", "Rename the network");
+    let net2 = net.clone();
+    let window2 = window.clone();
+    let cur = s.name.clone();
+    edit.connect_clicked(move |_| rename_dialog(&window2, &net2, &cur));
+    name_row.add_suffix(&edit);
+    name_group.add(&name_row);
+    b.append(&name_group);
+
+    let g = adw::PreferencesGroup::new();
     if s.is_originator {
-        let freeze = gtk::Switch::builder()
-            .active(s.frozen)
-            .valign(gtk::Align::Center)
-            .build();
+        let freeze = gtk::Switch::builder().active(s.frozen).valign(gtk::Align::Center).build();
         let net2 = net.clone();
         freeze.connect_state_set(move |_, state| {
             net2.request(IpcRequest::SetFrozen { frozen: state }, move |r| match r {
@@ -955,23 +885,13 @@ fn render_admin(b: &gtk::Box, s: &NetworkStatus, net: &Net, window: &adw::Applic
         frow.add_suffix(&freeze);
         g.add(&frow);
 
-        let rotate = adw::ActionRow::builder()
-            .title("Rotate secret (re-key)")
-            .subtitle("Removes everyone; mints a fresh ticket")
-            .activatable(true)
-            .build();
-        rotate.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+        let rotate = action_row("Rotate secret (re-key)", "Removes everyone; mints a fresh ticket");
         let net2 = net.clone();
         let window2 = window.clone();
         rotate.connect_activated(move |_| confirm_rotate(&window2, &net2));
         g.add(&rotate);
 
-        let backup = adw::ActionRow::builder()
-            .title("Back up originator key")
-            .subtitle("Save a recovery code to restore admin elsewhere")
-            .activatable(true)
-            .build();
-        backup.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+        let backup = action_row("Back up originator key", "Save a recovery code to restore admin elsewhere");
         let net2 = net.clone();
         backup.connect_activated(move |_| {
             net2.request(IpcRequest::ExportOriginatorKey, |r| match r {
@@ -982,12 +902,7 @@ fn render_admin(b: &gtk::Box, s: &NetworkStatus, net: &Net, window: &adw::Applic
         });
         g.add(&backup);
     } else {
-        let restore = adw::ActionRow::builder()
-            .title("Restore originator access…")
-            .subtitle("Paste a recovery code to gain admin powers")
-            .activatable(true)
-            .build();
-        restore.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+        let restore = action_row("Restore originator access…", "Paste a recovery code to gain admin powers");
         let net2 = net.clone();
         let window2 = window.clone();
         restore.connect_activated(move |_| import_originator_dialog(&window2, &net2));
@@ -995,19 +910,12 @@ fn render_admin(b: &gtk::Box, s: &NetworkStatus, net: &Net, window: &adw::Applic
     }
     b.append(&g);
 
-    // Danger zone.
     let danger = adw::PreferencesGroup::new();
-    let row = adw::ActionRow::builder()
-        .title(if s.is_originator { "Delete network" } else { "Leave network" })
-        .subtitle(if s.is_originator {
-            "Dissolve the network for everyone"
-        } else {
-            "Leave on this device only"
-        })
-        .activatable(true)
-        .build();
+    let row = action_row(
+        if s.is_originator { "Delete network" } else { "Leave network" },
+        if s.is_originator { "Dissolve the network for everyone" } else { "Leave on this device only" },
+    );
     row.add_css_class("error");
-    row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
     let net2 = net.clone();
     let window2 = window.clone();
     let is_orig = s.is_originator;
@@ -1071,22 +979,48 @@ fn render_requests(b: &gtk::Box, net: &Net, pending: &Rc<RefCell<Vec<PendingJoin
     b.append(&g);
 }
 
-/// Build + push a per-member detail flyout (full info + kick).
-fn push_member_detail(
+/// Fill + open the per-member detail flyout.
+fn fill_member(
     ui: &Ui,
     m: &MemberView,
     is_originator: bool,
     net: &Net,
     window: &adw::ApplicationWindow,
 ) {
-    let content = padded_box();
+    let display = m
+        .label
+        .clone()
+        .or_else(|| m.hostname.clone())
+        .unwrap_or_else(|| short_id(&m.node_id));
+    let member_title = if m.is_self {
+        format!("{display} (this device)")
+    } else {
+        display.clone()
+    };
+    ui.member_title.set_title(&member_title);
+
+    clear_box(&ui.member_box);
     let g = adw::PreferencesGroup::new();
-    if let Some(l) = &m.label {
+
+    if m.is_self {
+        let name_row = adw::ActionRow::builder()
+            .title("Friendly name")
+            .subtitle(m.label.clone().unwrap_or_else(|| "(none)".into()))
+            .build();
+        let edit = icon_button("document-edit-symbolic", "Set this device's friendly name");
+        let window2 = window.clone();
+        let net2 = net.clone();
+        let cur = m.label.clone();
+        edit.connect_clicked(move |_| set_label_dialog(&window2, &net2, cur.clone()));
+        name_row.add_suffix(&edit);
+        g.add(&name_row);
+    } else if let Some(l) = &m.label {
         g.add(&property_row("Friendly name", l));
     }
+
     g.add(&property_row("Hostname", &m.hostname.clone().unwrap_or_else(|| "—".into())));
     g.add(&property_row("Status", if m.online { "Online" } else { "Offline" }));
-    if !m.online {
+    if !m.is_self && !m.online {
         g.add(&property_row("Last seen", &fmt_last_seen(m.last_seen)));
     }
     if let Some(ip) = &m.virtual_ip {
@@ -1102,7 +1036,7 @@ fn push_member_detail(
         row.add_suffix(&copy);
         g.add(&row);
     }
-    if m.online {
+    if !m.is_self && m.online {
         g.add(&property_row(
             "Connection",
             match m.direct {
@@ -1126,49 +1060,32 @@ fn push_member_detail(
     });
     id_row.add_suffix(&copy);
     g.add(&id_row);
-    content.append(&g);
+    ui.member_box.append(&g);
 
-    if is_originator {
+    if !m.is_self && is_originator {
         let danger = adw::PreferencesGroup::new();
-        let kick = adw::ActionRow::builder()
-            .title("Remove from network")
-            .subtitle("Kicks this device and drops its connection")
-            .activatable(true)
-            .build();
+        let kick = action_row("Remove from network", "Kicks this device and drops its connection");
         kick.add_css_class("error");
-        kick.add_suffix(&gtk::Image::from_icon_name("user-trash-symbolic"));
         let net2 = net.clone();
         let window2 = window.clone();
         let ui2 = ui.clone();
         let id = m.node_id.clone();
-        let name = m
-            .label
-            .clone()
-            .or_else(|| m.hostname.clone())
-            .unwrap_or_else(|| short_id(&m.node_id));
+        let name = display.clone();
         kick.connect_activated(move |_| confirm_kick(&window2, &net2, &ui2, &id, &name));
         danger.add(&kick);
-        content.append(&danger);
+        ui.member_box.append(&danger);
     }
 
-    let title = m
-        .label
-        .clone()
-        .or_else(|| m.hostname.clone())
-        .unwrap_or_else(|| short_id(&m.node_id));
-    let page = flyout_page(&title, &content, "member");
-    ui.nav.push(&page);
+    ui.open("member");
 }
 
-/// Build + push the join-ticket flyout (QR + key + copy).
-fn push_ticket(ui: &Ui, ticket: &str, net: &Net, window: &adw::ApplicationWindow) {
-    let content = padded_box();
+/// Fill + open the join-ticket flyout (QR + key + copy).
+fn fill_ticket(ui: &Ui, ticket: &str, net: &Net, window: &adw::ApplicationWindow) {
+    clear_box(&ui.ticket_box);
     if let Some(pic) = qr_picture(ticket) {
-        content.append(&pic);
+        ui.ticket_box.append(&pic);
     }
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    row.set_margin_start(12);
-    row.set_margin_end(12);
     let entry = gtk::Entry::builder().text(ticket).editable(false).hexpand(true).build();
     let copy = icon_button("edit-copy-symbolic", "Copy ticket");
     let ticket_owned = ticket.to_string();
@@ -1180,19 +1097,16 @@ fn push_ticket(ui: &Ui, ticket: &str, net: &Net, window: &adw::ApplicationWindow
     });
     row.append(&entry);
     row.append(&copy);
-    content.append(&row);
+    ui.ticket_box.append(&row);
 
     let hint = gtk::Label::new(Some(
         "Scan the QR from the other device, or copy the ticket and paste it into Join.",
     ));
     hint.add_css_class("dim-label");
     hint.set_wrap(true);
-    hint.set_margin_start(12);
-    hint.set_margin_end(12);
-    content.append(&hint);
+    ui.ticket_box.append(&hint);
 
-    let page = flyout_page("Join ticket", &content, "ticket");
-    ui.nav.push(&page);
+    ui.open("ticket");
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,15 +1131,21 @@ fn property_row(title: &str, value: &str) -> adw::ActionRow {
     row
 }
 
-/// An activatable row with a leading icon + trailing chevron (opens a flyout).
-fn flyout_row(title: &str, subtitle: &str, icon: &str) -> adw::ActionRow {
+/// An activatable row with a trailing chevron (drills into a flyout / action).
+fn action_row(title: &str, subtitle: &str) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
         .title(title)
         .subtitle(subtitle)
         .activatable(true)
         .build();
-    row.add_prefix(&gtk::Image::from_icon_name(icon));
     row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+    row
+}
+
+/// An activatable row with a leading icon + trailing chevron (opens a flyout).
+fn flyout_row(title: &str, subtitle: &str, icon: &str) -> adw::ActionRow {
+    let row = action_row(title, subtitle);
+    row.add_prefix(&gtk::Image::from_icon_name(icon));
     row
 }
 
@@ -1233,13 +1153,37 @@ fn flyout_row(title: &str, subtitle: &str, icon: &str) -> adw::ActionRow {
 // Dialogs
 // ---------------------------------------------------------------------------
 
-fn confirm_kick(
-    window: &adw::ApplicationWindow,
-    net: &Net,
-    ui: &Ui,
-    node_id: &str,
-    name: &str,
-) {
+fn rename_dialog(window: &adw::ApplicationWindow, net: &Net, current: &str) {
+    let entry = gtk::Entry::builder().text(current).build();
+    let dialog = adw::MessageDialog::builder()
+        .transient_for(window)
+        .heading("Rename network")
+        .body("The name is shared with all members of this network.")
+        .extra_child(&entry)
+        .build();
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("save", "Save");
+    dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("save"));
+    let net = net.clone();
+    dialog.connect_response(None, move |_, resp| {
+        if resp != "save" {
+            return;
+        }
+        let name = entry.text().trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        net.request(IpcRequest::SetNetworkName { name }, |r| match r {
+            Ok(IpcResponse::Ok) => Some(UiMsg::Toast("Network renamed".into())),
+            Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
+            _ => None,
+        });
+    });
+    dialog.present();
+}
+
+fn confirm_kick(window: &adw::ApplicationWindow, net: &Net, ui: &Ui, node_id: &str, name: &str) {
     let dialog = adw::MessageDialog::builder()
         .transient_for(window)
         .heading(format!("Remove “{name}”?"))
@@ -1260,7 +1204,7 @@ fn confirm_kick(
             Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
             _ => None,
         });
-        ui.nav.pop(); // back out of the (now-stale) member detail page
+        ui.close_flyout(); // back out of the now-stale member detail
     });
     dialog.present();
 }
@@ -1349,7 +1293,6 @@ fn create_dialog(window: &adw::ApplicationWindow, net: &Net) {
         }
         let name = entry.text().to_string();
         let name = if name.trim().is_empty() { "home".into() } else { name };
-        // The ticket is no longer auto-shown; view it later via "Show join ticket".
         net.request(IpcRequest::CreateNetwork { name }, |r| match r {
             Ok(IpcResponse::Ticket(_)) => Some(UiMsg::Toast("Network created".into())),
             Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(format!("create failed: {e}"))),
@@ -1511,18 +1454,14 @@ fn show_about(window: &adw::ApplicationWindow) {
     about.present();
 }
 
-/// Notify when a member transitions offline→online (skips the first render so we
-/// don't announce everyone on startup/reconnect).
+/// Notify when a member transitions offline→online (skips the first render).
 fn notify_newly_online(app: &adw::Application, prev: Option<&NetworkStatus>, new: &NetworkStatus) {
     let Some(prev) = prev else { return };
     for m in &new.members {
         if m.is_self || !m.online {
             continue;
         }
-        let was_online = prev
-            .members
-            .iter()
-            .any(|p| p.node_id == m.node_id && p.online);
+        let was_online = prev.members.iter().any(|p| p.node_id == m.node_id && p.online);
         if !was_online {
             let name = m
                 .label
