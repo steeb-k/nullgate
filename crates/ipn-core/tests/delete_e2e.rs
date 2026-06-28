@@ -47,6 +47,7 @@ async fn sees(e: &Engine, node_id: &str) -> bool {
 #[ignore = "opens real iroh endpoints; run with --ignored"]
 async fn deleting_network_kills_all_visibility_and_connections() {
     std::env::set_var("IPN_DISABLE_TUN", "1");
+    std::env::set_var("IPN_SECRETS_FILE_ONLY", "1");
 
     let a = Engine::start(scratch("a")).await.unwrap();
     let b = Engine::start(scratch("b")).await.unwrap();

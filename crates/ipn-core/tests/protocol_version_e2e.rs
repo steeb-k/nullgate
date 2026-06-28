@@ -20,6 +20,7 @@ fn scratch(name: &str) -> std::path::PathBuf {
 #[ignore = "opens real iroh endpoints; run with --ignored"]
 async fn version_mismatch_is_rejected_clearly() {
     std::env::set_var("IPN_DISABLE_TUN", "1");
+    std::env::set_var("IPN_SECRETS_FILE_ONLY", "1");
 
     let a = Engine::start(scratch("a")).await.unwrap();
     let b = Engine::start(scratch("b")).await.unwrap();

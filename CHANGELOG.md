@@ -4,6 +4,14 @@ All notable changes to IPN. Format follows [Keep a Changelog](https://keepachang
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+### Changed
+- **Secrets at rest now use the OS keystore.** The device key, network secret, and originator
+  master key are stored via `keyring` (Credential Manager / Keychain / Secret Service), with a
+  `0600`-file fallback for headless hosts and a marker that refuses to silently regenerate
+  identity when the keystore is unavailable. `network.cbor` no longer contains any secret bytes.
+  NOTE (pre-release): existing local networks must be re-created, since the old plaintext
+  on-disk secrets are not migrated.
+
 ### Fixed
 - **TCP MSS clamping.** TCP SYNs (both directions) are clamped to the tunnel's MSS so flows like
   RDP/SSH/file copy never produce segments too big for a QUIC datagram (which were silently

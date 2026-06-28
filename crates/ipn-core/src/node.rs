@@ -10,7 +10,7 @@
 //!
 //! Mirrors the proven setup in seed-sync-gtk's `seed-core::node`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Context;
 use iroh::{
@@ -50,7 +50,7 @@ impl IrohNode {
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("create data dir {}", data_dir.display()))?;
 
-        let secret_key = load_or_create_secret_key(&data_dir.join("node.key"))?;
+        let secret_key = load_or_create_secret_key(data_dir)?;
         let node_secret = secret_key.to_bytes();
         // The endpoint id is the public half of the device key; we need it to
         // build the mDNS service below, before the secret key is moved into the
@@ -132,23 +132,13 @@ impl IrohNode {
     }
 }
 
-/// Load the persisted device secret key, or generate and persist a new one.
-fn load_or_create_secret_key(path: &PathBuf) -> anyhow::Result<SecretKey> {
-    if let Ok(bytes) = std::fs::read(path) {
-        let arr: [u8; 32] = bytes
-            .as_slice()
-            .try_into()
-            .context("node.key must be exactly 32 bytes")?;
-        Ok(SecretKey::from_bytes(&arr))
-    } else {
-        let key = SecretKey::generate();
-        std::fs::write(path, key.to_bytes()).context("write node.key")?;
-        // Best-effort tighten permissions on unix (0600).
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-        }
-        Ok(key)
+/// Load this device's secret key from the OS keystore (file fallback), or
+/// generate and persist a new one. See [`crate::secrets`].
+fn load_or_create_secret_key(data_dir: &Path) -> anyhow::Result<SecretKey> {
+    if let Some(bytes) = crate::secrets::load(data_dir, "node-key")? {
+        return Ok(SecretKey::from_bytes(&bytes));
     }
+    let key = SecretKey::generate();
+    crate::secrets::store(data_dir, "node-key", &key.to_bytes()).context("store device key")?;
+    Ok(key)
 }

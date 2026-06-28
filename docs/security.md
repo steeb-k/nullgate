@@ -32,6 +32,15 @@ device can still scribble entries into the shared document, but its signature is
 of a current member, so every node — including its own — ignores them. (The
 `removed_member_cannot_forge` test proves this even over real replication.)
 
+## Secrets at rest
+The device key, the network secret, and the originator master key are stored in the OS keystore
+(Windows Credential Manager, macOS Keychain, Linux Secret Service) via the `keyring` crate. On a
+headless host with no keystore they fall back to `0600` files under `<data_dir>/secrets/`. A
+per-secret marker records that a secret is keystore-backed, so if the keystore is temporarily
+unavailable the daemon errors clearly rather than regenerating identity (which would silently
+evict the device). `network.cbor` holds only non-secret fields (name, subnet, originator pubkey).
+This assumes one daemon instance per machine/user account.
+
 ## Roster ordering and timestamps
 Entries carry a member-chosen timestamp used only to order a concurrent set, with the content
 hash as a tiebreak. Timestamps are a hint, not a trust anchor, so the fold hardens against

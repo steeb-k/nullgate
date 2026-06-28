@@ -58,7 +58,9 @@ const CONFIG_FILE: &str = "network.cbor";
 // Persisted configuration
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
+/// In-memory network config. The secret bytes live in the OS keystore (see
+/// [`crate::secrets`]); only the non-secret fields are written to disk.
+#[derive(Clone)]
 struct StoredConfig {
     name: String,
     subnet: [u8; 4],
@@ -67,6 +69,18 @@ struct StoredConfig {
     /// Present only on the originator's device (the exportable master authority).
     originator_secret: Option<[u8; 32]>,
 }
+
+/// The non-secret part of the config persisted to `network.cbor`.
+#[derive(Serialize, Deserialize)]
+struct OnDiskConfig {
+    name: String,
+    subnet: [u8; 4],
+    originator_id: Id,
+}
+
+/// Keystore key names for this device's network secrets (one network at a time).
+const KEY_NETWORK_SECRET: &str = "network-secret";
+const KEY_ORIGINATOR_SECRET: &str = "originator-secret";
 
 impl StoredConfig {
     fn secret(&self) -> NetworkSecret {
@@ -785,11 +799,14 @@ async fn soft_disconnect(inner: &Arc<Inner>) {
     // st.config is intentionally kept.
 }
 
-/// Fully leave a network: go offline, then forget the config (in memory + on disk).
+/// Fully leave a network: go offline, then forget the config (in memory, on disk,
+/// and in the keystore). The device key is kept (it's network-independent).
 async fn teardown(inner: &Arc<Inner>) {
     soft_disconnect(inner).await;
     inner.state.lock().await.config = None;
     let _ = std::fs::remove_file(config_path(&inner.data_dir));
+    crate::secrets::delete(&inner.data_dir, KEY_NETWORK_SECRET);
+    crate::secrets::delete(&inner.data_dir, KEY_ORIGINATOR_SECRET);
 }
 
 /// One maintenance pass: rebuild the roster from the doc, refresh route/presence,
@@ -1257,21 +1274,43 @@ fn config_path(data_dir: &Path) -> PathBuf {
 }
 
 fn load_config(data_dir: &Path) -> Result<Option<StoredConfig>> {
-    let path = config_path(data_dir);
-    match std::fs::read(&path) {
-        Ok(bytes) => Ok(Some(
-            ciborium::from_reader(bytes.as_slice()).context("decode network config")?,
-        )),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).context("read network config"),
-    }
+    let on_disk: OnDiskConfig = match std::fs::read(config_path(data_dir)) {
+        Ok(bytes) => ciborium::from_reader(bytes.as_slice()).context("decode network config")?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).context("read network config"),
+    };
+    // The secret lives in the keystore. If it's gone (e.g. keystore cleared),
+    // treat it as "no network" rather than running with a broken config.
+    let Some(secret) = crate::secrets::load(data_dir, KEY_NETWORK_SECRET)? else {
+        tracing::warn!("network config present but its secret is missing; ignoring it");
+        return Ok(None);
+    };
+    let originator_secret = crate::secrets::load(data_dir, KEY_ORIGINATOR_SECRET)?;
+    Ok(Some(StoredConfig {
+        name: on_disk.name,
+        subnet: on_disk.subnet,
+        secret,
+        originator_id: on_disk.originator_id,
+        originator_secret,
+    }))
 }
 
 fn save_config(data_dir: &Path, cfg: &StoredConfig) -> Result<()> {
     std::fs::create_dir_all(data_dir).ok();
+    let on_disk = OnDiskConfig {
+        name: cfg.name.clone(),
+        subnet: cfg.subnet,
+        originator_id: cfg.originator_id,
+    };
     let mut buf = Vec::new();
-    ciborium::into_writer(cfg, &mut buf).context("encode network config")?;
+    ciborium::into_writer(&on_disk, &mut buf).context("encode network config")?;
     std::fs::write(config_path(data_dir), buf).context("write network config")?;
+    // Secrets go to the OS keystore (file fallback handled inside `secrets`).
+    crate::secrets::store(data_dir, KEY_NETWORK_SECRET, &cfg.secret)?;
+    match cfg.originator_secret {
+        Some(s) => crate::secrets::store(data_dir, KEY_ORIGINATOR_SECRET, &s)?,
+        None => crate::secrets::delete(data_dir, KEY_ORIGINATOR_SECRET),
+    }
     Ok(())
 }
 

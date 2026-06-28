@@ -59,6 +59,9 @@ rand = "0.8"
 directories = "5"
 hostname = "0.4"
 tun-rs = { version = "2", features = ["async_tokio"] }
+# OS keystore for secrets at rest (Credential Manager / Keychain / Secret Service),
+# with a file fallback handled in code.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 
 # --- ipc / service ---
 interprocess = { version = "2", features = ["tokio"] }

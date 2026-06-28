@@ -6,14 +6,13 @@ move it into a release and add a `CHANGELOG.md` entry (see `docs/development.md`
 Legend: **★ recommended next** · ⚠️ known gap/risk in the current code · 💡 idea.
 
 ## ★ Recommended next (short list)
-1. ⚠️ **Store secrets in the OS keystore**, not plaintext files — at-rest security.
-2. **Originator key backup & recovery** (export/import recovery phrase) — the design promises a
-   portable master key, but it currently only lives in one device's config.
-3. **Self-host relay setting** — independence/privacy; you flagged this early.
-4. **"Connect" button per member** that launches the platform RDP/SSH client at the peer's IP —
+1. **Originator key backup & recovery** (export/import recovery phrase) — the design promises a
+   portable master key, but it currently only lives in one device's keystore.
+2. **Self-host relay setting** — independence/privacy; you flagged this early.
+3. **"Connect" button per member** that launches the platform RDP/SSH client at the peer's IP —
    biggest UX win for the actual use case.
 
-(Done: ⚠️ virtual-IP assignment race — IPs are now derived deterministically from the NodeId.)
+(Done: virtual-IP race → deterministic IPs; secrets → OS keystore.)
 
 ## Known issues / risks to investigate
 - ✅ **Virtual-IP assignment race — FIXED.** IPs are no longer chosen by the approver; each
@@ -22,10 +21,12 @@ Legend: **★ recommended next** · ⚠️ known gap/risk in the current code ·
   every node computes the identical, collision-free map and concurrent approvals can't clash.
   Covered by `roster` unit tests (`ips_are_unique_in_subnet_and_deterministic`,
   `concurrent_adds_get_distinct_ips`) and the e2e distinct-IP assertions.
-- ⚠️ **Secrets at rest are plaintext.** `node.key`, the network secret, and the originator
-  master key live in files under the data dir. Move them to the OS keystore (Windows DPAPI /
-  Credential Manager, macOS Keychain, Linux Secret Service via the `keyring` crate) with a
-  file fallback, mirroring seed-sync.
+- ✅ **Secrets at rest — FIXED.** The device key, network secret, and originator master key now
+  live in the OS keystore (`keyring`: Credential Manager / Keychain / Secret Service), with a
+  `0600`-file fallback for headless hosts. A per-secret `.in-keystore` marker prevents silently
+  regenerating identity when the keystore is briefly unavailable (it errors instead). The
+  on-disk `network.cbor` holds only non-secret fields. (Assumes one daemon instance per
+  machine/user; `IPN_SECRETS_FILE_ONLY=1` forces the file backend, used by tests.)
 - 🟡 **Roster ordering trusts wall-clock timestamps — partially mitigated.** Done: far-future
   timestamps are dropped (`MAX_FUTURE_SKEW_MS`), and a member can't sign an `Add` backdated to
   before its own admission. **Residual:** a current member could still backdate an `Add` into a

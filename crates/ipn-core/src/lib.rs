@@ -19,6 +19,7 @@ pub mod node;
 pub mod presence;
 pub mod roster;
 pub mod router;
+pub mod secrets;
 pub mod tun_device;
 
 pub use engine::{Engine, EngineEvent, MemberView, NetworkStatus};
