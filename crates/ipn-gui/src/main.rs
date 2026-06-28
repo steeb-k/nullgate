@@ -584,16 +584,39 @@ fn render_status(
     }
 
     let info = adw::PreferencesGroup::builder().title(&s.name).build();
+    let self_host = s
+        .members
+        .iter()
+        .find(|m| m.is_self)
+        .and_then(|m| m.hostname.clone())
+        .unwrap_or_default();
     let self_row = adw::ActionRow::builder()
-        .title("This device")
+        .title(s.self_label.clone().unwrap_or_else(|| "This device".into()))
         .subtitle(format!(
-            "{}{} · routing {}",
-            s.self_ip.clone().unwrap_or_else(|| "(no IP yet)".into()),
+            "{}{}{} · routing {}",
+            self_host,
+            s.self_ip
+                .clone()
+                .map(|ip| format!(" · {ip}"))
+                .unwrap_or_default(),
             if s.is_originator { " · originator" } else { "" },
             if s.routing { "on" } else { "off" }
         ))
         .build();
     {
+        // Set a friendly name (the hostname stays the real OS name).
+        let rename = gtk::Button::builder()
+            .icon_name("document-edit-symbolic")
+            .tooltip_text("Set this device's friendly name")
+            .valign(gtk::Align::Center)
+            .build();
+        rename.add_css_class("flat");
+        let window2 = window.clone();
+        let net2 = net.clone();
+        let current = s.self_label.clone();
+        rename.connect_clicked(move |_| set_name_dialog(&window2, &net2, current.clone()));
+        self_row.add_suffix(&rename);
+
         let id_copy = gtk::Button::builder()
             .icon_name("edit-copy-symbolic")
             .tooltip_text("Copy this device's node ID")
@@ -650,7 +673,21 @@ fn render_status(
         dot.set_valign(gtk::Align::Center);
         dot.set_tooltip_text(Some(if m.online { "Online" } else { "Offline" }));
 
-        let mut subtitle = m.virtual_ip.clone().unwrap_or_else(|| "(no IP)".into());
+        // Title: friendly label if set, else the real hostname. When a label is
+        // shown, the actual hostname still appears in the subtitle (source of truth).
+        let title = m
+            .label
+            .clone()
+            .or_else(|| m.hostname.clone())
+            .unwrap_or_else(|| short_id(&m.node_id));
+        let mut subtitle = String::new();
+        if m.label.is_some() {
+            if let Some(h) = &m.hostname {
+                subtitle.push_str(h);
+                subtitle.push_str(" · ");
+            }
+        }
+        subtitle.push_str(&m.virtual_ip.clone().unwrap_or_else(|| "(no IP)".into()));
         if let Some(addr) = &m.observed_addr {
             subtitle.push_str(" · ");
             subtitle.push_str(addr);
@@ -664,10 +701,7 @@ fn render_status(
             subtitle.push_str(&format!(" · last seen {}", fmt_last_seen(m.last_seen)));
         }
 
-        let row = adw::ActionRow::builder()
-            .title(m.hostname.clone().unwrap_or_else(|| short_id(&m.node_id)))
-            .subtitle(subtitle)
-            .build();
+        let row = adw::ActionRow::builder().title(title).subtitle(subtitle).build();
         row.add_prefix(&dot);
 
         if let Some(ip) = &m.virtual_ip {
@@ -1039,6 +1073,40 @@ fn show_recovery(window: &adw::ApplicationWindow, net: &Net, code: &str) {
         .build();
     dialog.add_response("close", "Close");
     dialog.set_default_response(Some("close"));
+    dialog.present();
+}
+
+fn set_name_dialog(window: &adw::ApplicationWindow, net: &Net, current: Option<String>) {
+    let entry = gtk::Entry::builder()
+        .text(current.unwrap_or_default())
+        .placeholder_text("Friendly name (leave blank to clear)")
+        .build();
+    let dialog = adw::MessageDialog::builder()
+        .transient_for(window)
+        .heading("Set this device's name")
+        .body(
+            "A friendly label other members see. The hostname (your real OS name) is always \
+             shown too and can't be changed here.",
+        )
+        .extra_child(&entry)
+        .build();
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("save", "Save");
+    dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("save"));
+    let net = net.clone();
+    dialog.connect_response(None, move |_, resp| {
+        if resp != "save" {
+            return;
+        }
+        let text = entry.text().to_string();
+        let label = if text.trim().is_empty() { None } else { Some(text) };
+        net.request(IpcRequest::SetLabel { label }, |r| match r {
+            Ok(IpcResponse::Ok) => Some(UiMsg::Toast("Name updated".into())),
+            Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
+            _ => None,
+        });
+    });
     dialog.present();
 }
 

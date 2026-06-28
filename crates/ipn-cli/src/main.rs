@@ -47,6 +47,8 @@ enum Cmd {
     Connect,
     /// Disconnect but keep the network saved (go offline).
     Disconnect,
+    /// Set this device's friendly label (omit the name to clear it).
+    SetName { name: Option<String> },
     /// Export the originator recovery code (originator only).
     ExportKey,
     /// Import an originator recovery code to gain originator powers.
@@ -72,6 +74,7 @@ async fn main() -> Result<()> {
         Cmd::Leave => IpcRequest::LeaveNetwork,
         Cmd::Connect => IpcRequest::Connect,
         Cmd::Disconnect => IpcRequest::Disconnect,
+        Cmd::SetName { name } => IpcRequest::SetLabel { label: name },
         Cmd::ExportKey => IpcRequest::ExportOriginatorKey,
         Cmd::ImportKey { code } => IpcRequest::ImportOriginatorKey { code },
     };
@@ -95,11 +98,19 @@ async fn main() -> Result<()> {
                 if m.is_self {
                     continue;
                 }
+                let host = m
+                    .hostname
+                    .clone()
+                    .unwrap_or_else(|| m.node_id[..16.min(m.node_id.len())].into());
+                let name = match m.label {
+                    Some(l) => format!("{l} ({host})"),
+                    None => host,
+                };
                 println!(
                     "  [{}] {} {} {}{}",
                     if m.online { "online " } else { "offline" },
                     m.virtual_ip.unwrap_or_else(|| "-".into()),
-                    m.hostname.unwrap_or_else(|| m.node_id[..16.min(m.node_id.len())].into()),
+                    name,
                     m.observed_addr.unwrap_or_default(),
                     match m.direct {
                         Some(true) => " (direct)",

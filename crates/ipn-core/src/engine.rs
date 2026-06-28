@@ -107,7 +107,10 @@ impl StoredConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemberView {
     pub node_id: String,
+    /// The device's actual current OS hostname (source of truth).
     pub hostname: Option<String>,
+    /// Optional friendly name the member set for itself.
+    pub label: Option<String>,
     pub virtual_ip: Option<String>,
     pub observed_addr: Option<String>,
     pub direct: Option<bool>,
@@ -124,6 +127,8 @@ pub struct NetworkStatus {
     pub frozen: bool,
     pub self_node_id: String,
     pub self_ip: Option<String>,
+    /// This device's own friendly label (for prefilling the "set name" UI).
+    pub self_label: Option<String>,
     pub is_originator: bool,
     /// Whether the TUN is up so RDP/SSH traffic is actually routed (needs elevation).
     pub routing: bool,
@@ -204,7 +209,9 @@ struct Inner {
     node: IrohNode,
     device_key: SigningKey,
     my_id: Id,
-    hostname: String,
+    /// This device's member-chosen friendly label (the OS hostname is read live,
+    /// never cached, so it always reflects the actual current hostname).
+    label: StdRwLock<Option<String>>,
     data_dir: PathBuf,
     state: Mutex<State>,
     events: broadcast::Sender<EngineEvent>,
@@ -251,17 +258,14 @@ impl Engine {
         let device_key = node.device_signing_key();
         let my_id = node.node_id_bytes();
         debug_assert_eq!(device_key.verifying_key().to_bytes(), my_id);
-        let hostname = hostname::get()
-            .ok()
-            .and_then(|h| h.into_string().ok())
-            .unwrap_or_else(|| "ipn-device".into());
+        let label = load_label(&data_dir);
 
         let (events, _) = broadcast::channel(64);
         let inner = Arc::new(Inner {
             node,
             device_key,
             my_id,
-            hostname,
+            label: StdRwLock::new(label),
             data_dir,
             state: Mutex::new(State {
                 config: None,
@@ -361,7 +365,7 @@ impl Engine {
             &originator,
             Op::Add {
                 node_id: self.inner.my_id,
-                hostname: self.inner.hostname.clone(),
+                hostname: current_hostname(),
                 ts: now_ms(),
             },
         );
@@ -418,7 +422,7 @@ impl Engine {
         write_msg(
             &mut send,
             &JoinRequest {
-                hostname: self.inner.hostname.clone(),
+                hostname: current_hostname(),
             },
         )
         .await?;
@@ -602,7 +606,7 @@ impl Engine {
             &originator,
             Op::Add {
                 node_id: self.inner.my_id,
-                hostname: self.inner.hostname.clone(),
+                hostname: current_hostname(),
                 ts: now_ms(),
             },
         );
@@ -707,6 +711,16 @@ impl Engine {
         .encode())
     }
 
+    /// Set (or clear, with `None`/empty) this device's friendly label. The label
+    /// is persisted and broadcast via presence; the OS hostname is never editable.
+    pub async fn set_label(&self, label: Option<String>) -> Result<()> {
+        let label = label.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        *self.inner.label.write().unwrap() = label.clone();
+        save_label(&self.inner.data_dir, label.as_deref());
+        let _ = self.inner.events.send(EngineEvent::Changed);
+        Ok(())
+    }
+
     /// Snapshot of the network for display.
     pub async fn status(&self) -> Result<NetworkStatus> {
         let st = self.inner.state.lock().await;
@@ -718,10 +732,15 @@ impl Engine {
             members.push(MemberView {
                 node_id: data_encoding::HEXLOWER.encode(id),
                 hostname: if is_self {
-                    Some(self.inner.hostname.clone())
+                    Some(current_hostname())
                 } else {
                     ps.and_then(|p| p.hostname.clone())
                         .or_else(|| Some(m.hostname.clone()))
+                },
+                label: if is_self {
+                    self.inner.label.read().unwrap().clone()
+                } else {
+                    ps.and_then(|p| p.label.clone())
                 },
                 virtual_ip: Some(m.virtual_ip.to_string()),
                 observed_addr: ps.and_then(|p| p.observed_addr.clone()),
@@ -742,6 +761,7 @@ impl Engine {
                 .roster
                 .member(&self.inner.my_id)
                 .map(|m| m.virtual_ip.to_string()),
+            self_label: self.inner.label.read().unwrap().clone(),
             is_originator: cfg.originator_secret.is_some(),
             routing: self.inner.tun.read().unwrap().is_some(),
             online: st.doc.is_some(),
@@ -786,7 +806,7 @@ async fn activate(inner: &Arc<Inner>, cfg: StoredConfig) -> Result<()> {
                         if p.verify(&net_id) && p.node_id != ti.my_id {
                             let mut st = ti.state.lock().await;
                             st.presence
-                                .record_heartbeat(p.node_id, p.hostname, p.ts);
+                                .record_heartbeat(p.node_id, p.hostname, p.label, p.ts);
                             drop(st);
                             let _ = ti.events.send(EngineEvent::Changed);
                         }
@@ -948,7 +968,8 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
         let p = Presence::signed(
             cfg.secret().network_id(),
             &inner.device_key,
-            inner.hostname.clone(),
+            current_hostname(),
+            inner.label.read().unwrap().clone(),
             now_ms(),
         );
         let mut buf = Vec::new();
@@ -1305,6 +1326,40 @@ fn short(id: &Id) -> String {
 
 fn config_path(data_dir: &Path) -> PathBuf {
     data_dir.join(CONFIG_FILE)
+}
+
+/// This device's **actual current** OS hostname, read fresh each call so it always
+/// reflects the real hostname (never cached, never member-editable).
+fn current_hostname() -> String {
+    hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "ipn-device".into())
+}
+
+fn label_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("label")
+}
+
+/// Load this device's friendly label, if set (a plain UTF-8 file).
+fn load_label(data_dir: &Path) -> Option<String> {
+    std::fs::read_to_string(label_path(data_dir))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Persist (or clear) this device's friendly label. Best-effort.
+fn save_label(data_dir: &Path, label: Option<&str>) {
+    let _ = std::fs::create_dir_all(data_dir);
+    match label {
+        Some(l) => {
+            let _ = std::fs::write(label_path(data_dir), l);
+        }
+        None => {
+            let _ = std::fs::remove_file(label_path(data_dir));
+        }
+    }
 }
 
 fn load_config(data_dir: &Path) -> Result<Option<StoredConfig>> {

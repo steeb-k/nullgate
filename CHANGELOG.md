@@ -5,6 +5,9 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 ### Changed
+- **Hostname is now the live OS hostname.** The name shown for a device is re-read from the OS on
+  every presence heartbeat (and for the local device on every status), so it always reflects the
+  *actual current* hostname and is never user-editable — it's the source of truth.
 - **Secrets at rest now use the OS keystore.** The device key, network secret, and originator
   master key are stored via `keyring` (Credential Manager / Keychain / Secret Service), with a
   `0600`-file fallback for headless hosts and a marker that refuses to silently regenerate
@@ -33,6 +36,10 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   address. New `roster` unit tests cover determinism and the concurrent case.
 
 ### Added
+- **Friendly device label.** Each member can set an optional friendly name for itself (GUI
+  "Set this device's name" pencil on the This-device row; CLI `set-name [name]`), broadcast over
+  signed presence. The real hostname and virtual IP are always shown alongside it. `MemberView`
+  gained `label`; `NetworkStatus` gained `self_label`.
 - **Pending join-requests panel.** Join requests now persist in a panel at the top of the main
   window (with Approve/Deny + the emoji code) instead of a one-shot dialog, so a missed or
   dismissed prompt can still be acted on; a desktop notification fires when one arrives, and

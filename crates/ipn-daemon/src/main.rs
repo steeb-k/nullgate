@@ -277,6 +277,10 @@ async fn handle_request(engine: &Engine, req: IpcRequest) -> IpcResponse {
             Ok(t) => IpcResponse::Ticket(t),
             Err(e) => to_err(e),
         },
+        IpcRequest::SetLabel { label } => match engine.set_label(label).await {
+            Ok(()) => IpcResponse::Ok,
+            Err(e) => to_err(e),
+        },
         IpcRequest::ExportOriginatorKey => match engine.export_originator_key().await {
             Ok(code) => IpcResponse::Recovery(code),
             Err(e) => to_err(e),

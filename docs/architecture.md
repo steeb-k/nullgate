@@ -40,10 +40,12 @@ an [iroh-docs](https://github.com/n0-computer/iroh-docs) document — a replicat
 store that every member syncs. Each node folds the entries into the current membership by
 applying role rules. See [security.md](security.md) for the full trust model.
 
-Presence (who's online, hostnames, last-seen) is broadcast separately over
-[iroh-gossip](https://github.com/n0-computer/iroh-gossip) on the private rendezvous topic; the
-public IP shown for a peer is the address your node actually observes for it (so a peer can't
-spoof its own).
+Presence (who's online, hostname, friendly label, last-seen) is broadcast separately over
+[iroh-gossip](https://github.com/n0-computer/iroh-gossip) on the private rendezvous topic, each
+heartbeat **signed** by the device. The **hostname** is the device's *actual current* OS hostname
+(re-read on every heartbeat — it tracks the real machine name and isn't user-editable); the
+**label** is an optional friendly name the member sets for itself. The public IP shown for a peer
+is the address your node actually observes for it (so a peer can't spoof its own).
 
 ## Components (crates)
 - `ipn-core` — the engine: iroh node, signed roster, admission + emoji verification, presence,

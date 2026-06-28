@@ -106,4 +106,32 @@ async fn create_join_and_see_each_other() {
     assert!(a_ip.starts_with("10.99.0."), "A IP in subnet: {a_ip}");
     assert!(b_ip.starts_with("10.99.0."), "B IP in subnet: {b_ip}");
     assert_ne!(a_ip, b_ip, "members get distinct IPs");
+
+    // B's view of A carries A's real (non-empty) hostname over presence.
+    let a_from_b = sb.members.iter().find(|m| !m.is_self).unwrap();
+    assert!(
+        a_from_b.hostname.as_deref().is_some_and(|h| !h.is_empty()),
+        "A's actual hostname should propagate to B"
+    );
+
+    // A sets a friendly label; it propagates to B over presence (the hostname is
+    // unaffected — still the real OS name).
+    a.set_label(Some("Alpha".into())).await.unwrap();
+    let labeled = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let sb = b.status().await.unwrap();
+            if let Some(a_view) = sb.members.iter().find(|m| !m.is_self) {
+                if a_view.label.as_deref() == Some("Alpha") {
+                    return a_view.clone();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .expect("A's label did not propagate to B");
+    assert!(
+        labeled.hostname.as_deref().is_some_and(|h| !h.is_empty()),
+        "hostname remains the real OS name alongside the label"
+    );
 }

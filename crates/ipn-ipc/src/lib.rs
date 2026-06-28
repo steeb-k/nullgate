@@ -70,6 +70,9 @@ pub enum IpcRequest {
     /// Disconnect from the network but keep it saved (go offline). Idempotent.
     Disconnect,
     GetTicket,
+    /// Set (or clear, with `None`) this device's friendly label. The hostname is
+    /// always the real OS hostname and is never settable.
+    SetLabel { label: Option<String> },
     /// Export the originator master key as a recovery code (originator only).
     ExportOriginatorKey,
     /// Import an originator recovery code to gain originator powers on this network.
