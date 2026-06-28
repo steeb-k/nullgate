@@ -32,8 +32,19 @@ enum UiMsg {
     },
     Recovery(String),
     Toast(String),
+    /// Re-render the current status (e.g. after a pending-join change).
+    Refresh,
     DaemonDown,
     VersionMismatch { daemon: u32, gui: u32 },
+}
+
+/// A join request awaiting the user's decision, kept so it survives a missed/
+/// dismissed prompt and can be approved later from the main window.
+#[derive(Clone)]
+struct PendingJoin {
+    node_id: String,
+    hostname: String,
+    sas: Vec<String>,
 }
 
 /// Everything needed to fire IPC requests off the GTK thread.
@@ -63,6 +74,11 @@ impl Net {
     /// Push a transient toast to the UI from the GTK thread (synchronous callers).
     fn toast(&self, msg: impl Into<String>) {
         let _ = self.tx.try_send(UiMsg::Toast(msg.into()));
+    }
+
+    /// Ask the UI to re-render the current status.
+    fn refresh(&self) {
+        let _ = self.tx.try_send(UiMsg::Refresh);
     }
 
     /// Long-lived subscription to daemon events, reconnecting if it restarts.
@@ -295,6 +311,8 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
     // Last status, kept so a timer can re-render to keep relative times ("last
     // seen") live, and to detect members coming online for notifications.
     let state: std::rc::Rc<std::cell::RefCell<Option<NetworkStatus>>> = Default::default();
+    // Pending join requests awaiting a decision (persist beyond the notification).
+    let pending: std::rc::Rc<std::cell::RefCell<Vec<PendingJoin>>> = Default::default();
 
     {
         let content = content.clone();
@@ -302,18 +320,28 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
         let net = net.clone();
         let toast_overlay = toast_overlay.clone();
         let state = state.clone();
+        let pending = pending.clone();
         let app_n = app.clone();
         glib::spawn_future_local(async move {
             while let Ok(msg) = rx.recv().await {
                 match msg {
                     UiMsg::Status(Some(s)) => {
                         notify_newly_online(&app_n, state.borrow().as_ref(), &s);
+                        // Drop pending requests for devices that are now members.
+                        pending
+                            .borrow_mut()
+                            .retain(|p| !s.members.iter().any(|m| m.node_id == p.node_id));
                         *state.borrow_mut() = Some(s.clone());
-                        render_status(&content, &s, &net, &window);
+                        render_status(&content, &s, &net, &window, &pending);
                     }
                     UiMsg::Status(None) => {
                         *state.borrow_mut() = None;
                         render_empty(&content)
+                    }
+                    UiMsg::Refresh => {
+                        if let Some(s) = state.borrow().as_ref() {
+                            render_status(&content, s, &net, &window, &pending);
+                        }
                     }
                     UiMsg::DaemonDown => {
                         *state.borrow_mut() = None;
@@ -330,7 +358,26 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
                         node_id,
                         hostname,
                         sas,
-                    } => show_join_request(&window, &net, &node_id, &hostname, &sas),
+                    } => {
+                        // Record it, alert the user, and surface it in the panel
+                        // (so a missed prompt can still be approved).
+                        {
+                            let mut p = pending.borrow_mut();
+                            if !p.iter().any(|x| x.node_id == node_id) {
+                                p.push(PendingJoin {
+                                    node_id: node_id.clone(),
+                                    hostname: hostname.clone(),
+                                    sas,
+                                });
+                            }
+                        }
+                        let n = gtk::gio::Notification::new("iroh-private-network");
+                        n.set_body(Some(&format!("“{hostname}” wants to join — approve in IPN")));
+                        app_n.send_notification(None, &n);
+                        if let Some(s) = state.borrow().as_ref() {
+                            render_status(&content, s, &net, &window, &pending);
+                        }
+                    }
                     UiMsg::Toast(t) => toast_overlay.add_toast(adw::Toast::new(&t)),
                 }
             }
@@ -344,9 +391,10 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
         let window = window.clone();
         let net = net.clone();
         let state = state.clone();
+        let pending = pending.clone();
         glib::timeout_add_seconds_local(20, move || {
             if let Some(s) = state.borrow().as_ref() {
-                render_status(&content, s, &net, &window);
+                render_status(&content, s, &net, &window, &pending);
             }
             glib::ControlFlow::Continue
         });
@@ -450,7 +498,13 @@ fn render_empty(content: &gtk::Box) {
     content.append(&status);
 }
 
-fn render_status(content: &gtk::Box, s: &NetworkStatus, net: &Net, window: &adw::ApplicationWindow) {
+fn render_status(
+    content: &gtk::Box,
+    s: &NetworkStatus,
+    net: &Net,
+    window: &adw::ApplicationWindow,
+    pending: &std::rc::Rc<std::cell::RefCell<Vec<PendingJoin>>>,
+) {
     clear_box(content);
 
     if !s.online {
@@ -465,6 +519,68 @@ fn render_status(content: &gtk::Box, s: &NetworkStatus, net: &Net, window: &adw:
             .revealed(true)
             .build();
         content.append(&banner);
+    }
+
+    // Pending join requests (persist until approved/denied) — shown up top.
+    {
+        let plist = pending.borrow();
+        if !plist.is_empty() {
+            let pg = adw::PreferencesGroup::builder()
+                .title("Pending join requests")
+                .description("Approve only if the emoji code matches the joining device's screen.")
+                .build();
+            for req in plist.iter() {
+                let row = adw::ActionRow::builder()
+                    .title(format!("“{}” wants to join", req.hostname))
+                    .subtitle(req.sas.join("  "))
+                    .build();
+                let deny = gtk::Button::builder()
+                    .label("Deny")
+                    .valign(gtk::Align::Center)
+                    .build();
+                deny.add_css_class("flat");
+                let approve = gtk::Button::builder()
+                    .label("Approve")
+                    .valign(gtk::Align::Center)
+                    .build();
+                approve.add_css_class("suggested-action");
+
+                let net_a = net.clone();
+                let pending_a = pending.clone();
+                let id_a = req.node_id.clone();
+                approve.connect_clicked(move |_| {
+                    pending_a.borrow_mut().retain(|p| p.node_id != id_a);
+                    net_a.request(
+                        IpcRequest::ApproveJoin { node_id: id_a.clone() },
+                        |r| match r {
+                            Ok(IpcResponse::Ok) => Some(UiMsg::Toast("Approved".into())),
+                            Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
+                            _ => None,
+                        },
+                    );
+                    net_a.refresh();
+                });
+                let net_d = net.clone();
+                let pending_d = pending.clone();
+                let id_d = req.node_id.clone();
+                deny.connect_clicked(move |_| {
+                    pending_d.borrow_mut().retain(|p| p.node_id != id_d);
+                    net_d.request(
+                        IpcRequest::DenyJoin { node_id: id_d.clone() },
+                        |r| match r {
+                            Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
+                            _ => None,
+                        },
+                    );
+                    net_d.toast("Join denied");
+                    net_d.refresh();
+                });
+                row.add_suffix(&deny);
+                row.add_suffix(&approve);
+                pg.add(&row);
+            }
+            content.append(&pg);
+        }
     }
 
     let info = adw::PreferencesGroup::builder().title(&s.name).build();
@@ -961,42 +1077,6 @@ fn show_join_sas(window: &adw::ApplicationWindow, sas: &[String]) {
         .extra_child(&sas_label(sas))
         .build();
     dialog.add_response("ok", "OK");
-    dialog.present();
-}
-
-fn show_join_request(
-    window: &adw::ApplicationWindow,
-    net: &Net,
-    node_id: &str,
-    hostname: &str,
-    sas: &[String],
-) {
-    let dialog = adw::MessageDialog::builder()
-        .transient_for(window)
-        .heading(format!("“{hostname}” wants to join"))
-        .body("Approve only if these emojis match the joining device's screen.")
-        .extra_child(&sas_label(sas))
-        .build();
-    dialog.add_response("deny", "Deny");
-    dialog.add_response("approve", "Approve");
-    dialog.set_response_appearance("approve", adw::ResponseAppearance::Suggested);
-    let net = net.clone();
-    let node_id = node_id.to_string();
-    dialog.connect_response(None, move |_, resp| {
-        let req = if resp == "approve" {
-            IpcRequest::ApproveJoin {
-                node_id: node_id.clone(),
-            }
-        } else {
-            IpcRequest::DenyJoin {
-                node_id: node_id.clone(),
-            }
-        };
-        net.request(req, |r| match r {
-            Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
-            _ => None,
-        });
-    });
     dialog.present();
 }
 

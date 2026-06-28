@@ -33,6 +33,10 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   address. New `roster` unit tests cover determinism and the concurrent case.
 
 ### Added
+- **Pending join-requests panel.** Join requests now persist in a panel at the top of the main
+  window (with Approve/Deny + the emoji code) instead of a one-shot dialog, so a missed or
+  dismissed prompt can still be acted on; a desktop notification fires when one arrives, and
+  entries clear once the device becomes a member.
 - **GUI polish.** An **About** dialog (version/license) in a new header menu; the window now
   **remembers its size**; **success toasts** for copy/remove/freeze actions; the **Join ticket
   field is validated** (must look like `ipn1…`); a **copy button for this device's node ID**;
