@@ -634,6 +634,46 @@ fn render_status(
     }
     info.add(&self_row);
 
+    // Diagnostics (collapsible): home relay + connection path summary.
+    {
+        let diag = adw::ExpanderRow::builder().title("Diagnostics").build();
+        let relay = adw::ActionRow::builder()
+            .title("Home relay")
+            .subtitle(s.home_relay.clone().unwrap_or_else(|| "—".into()))
+            .build();
+        relay.add_css_class("property");
+        diag.add_row(&relay);
+
+        let direct = s
+            .members
+            .iter()
+            .filter(|m| !m.is_self && m.online && m.direct == Some(true))
+            .count();
+        let relayed = s
+            .members
+            .iter()
+            .filter(|m| !m.is_self && m.online && m.direct == Some(false))
+            .count();
+        let conns = adw::ActionRow::builder()
+            .title("Connections")
+            .subtitle(format!("{direct} direct · {relayed} via relay"))
+            .build();
+        conns.add_css_class("property");
+        diag.add_row(&conns);
+
+        let routing = adw::ActionRow::builder()
+            .title("Routing (TUN)")
+            .subtitle(if s.routing {
+                "on — carrying traffic"
+            } else {
+                "off — needs the elevated daemon"
+            })
+            .build();
+        routing.add_css_class("property");
+        diag.add_row(&routing);
+        info.add(&diag);
+    }
+
     if s.is_originator {
         let freeze = gtk::Switch::builder()
             .active(s.frozen)

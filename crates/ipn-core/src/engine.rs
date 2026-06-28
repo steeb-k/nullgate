@@ -135,6 +135,8 @@ pub struct NetworkStatus {
     /// Whether the daemon is currently connected to the network (vs. disconnected
     /// via "Quit", but still holding the config).
     pub online: bool,
+    /// This device's home relay URL, if one is established (diagnostics).
+    pub home_relay: Option<String>,
     pub members: Vec<MemberView>,
 }
 
@@ -765,6 +767,13 @@ impl Engine {
             is_originator: cfg.originator_secret.is_some(),
             routing: self.inner.tun.read().unwrap().is_some(),
             online: st.doc.is_some(),
+            home_relay: self
+                .inner
+                .node
+                .addr()
+                .relay_urls()
+                .next()
+                .map(|u| u.to_string()),
             members,
         })
     }

@@ -36,6 +36,9 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   address. New `roster` unit tests cover determinism and the concurrent case.
 
 ### Added
+- **Diagnostics view.** A collapsible "Diagnostics" section on the main screen shows this device's
+  home relay, a direct-vs-relay connection summary, and TUN routing state. `NetworkStatus` gained
+  `home_relay`.
 - **Friendly device label.** Each member can set an optional friendly name for itself (GUI
   "Set this device's name" pencil on the This-device row; CLI `set-name [name]`), broadcast over
   signed presence. The real hostname and virtual IP are always shown alongside it. `MemberView`
