@@ -6,13 +6,15 @@ move it into a release and add a `CHANGELOG.md` entry (see `docs/development.md`
 Legend: **★ recommended next** · ⚠️ known gap/risk in the current code · 💡 idea.
 
 ## ★ Recommended next (short list)
-1. **"Connect" button per member** that launches the platform RDP/SSH client at the peer's IP —
-   biggest UX win for the actual use case.
-2. **Self-host relay setting** — independence/privacy. Targeted for **nearer release** (not
-   urgent while n0's public relays work).
+IPN is a **general-purpose ad-hoc VPN** (not RDP-specific), so current focus is **GUI &
+usability** polish — see the "UX / product" and "Nice-to-haves / quick wins" sections.
+
+- **Self-host relay setting** — independence/privacy. Kept in **planning** (not urgent while
+  n0's public relays work).
 
 (Done: virtual-IP race → deterministic IPs; secrets → OS keystore; originator key backup &
-recovery → export/import recovery code in GUI + CLI.)
+recovery → export/import recovery code in GUI + CLI. Dropped: per-member RDP/SSH "Connect"
+launcher — out of scope now that IPN is a general VPN.)
 
 ## Known issues / risks to investigate
 - ✅ **Virtual-IP assignment race — FIXED.** IPs are no longer chosen by the approver; each
@@ -79,7 +81,8 @@ recovery → export/import recovery code in GUI + CLI.)
 - A **pending join requests** panel — today the approval is a transient dialog; if dismissed or
   missed there's no way to re-approve.
 - Desktop notifications (join request received, member came online).
-- Per-member quick actions: **Connect (RDP/SSH)** launcher, copy address (done), rename.
+- Per-member quick actions: copy address (done), rename. (Dropped the RDP/SSH launcher — IPN is a
+  general VPN, so users point their own tools at the peer IP.)
 - A diagnostics/status view: relay-in-use, direct-vs-relay (shown), throughput, NAT info; expose
   the existing `conn_probe` logic in-app.
 - Friendlier first-run / onboarding; clearer empty and error states.
