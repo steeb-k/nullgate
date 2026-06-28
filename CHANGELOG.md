@@ -36,6 +36,9 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   address. New `roster` unit tests cover determinism and the concurrent case.
 
 ### Added
+- **Rename the network (shared).** The network name can be changed after creation and propagates
+  to all members via the signed roster (a new `SetName` op; any current member, last-writer-wins).
+  CLI `ipn-cli rename <name>`; the GUI exposes it inline (pencil).
 - **Header shows the network + state.** The title bar now displays the current network name and a
   "N device(s) · connected/disconnected" subtitle (or the offline/mismatch state).
 - **Ctrl+Q** quits IPN (disconnect + exit), same as the tray's "Quit IPN".

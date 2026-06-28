@@ -713,6 +713,28 @@ impl Engine {
         .encode())
     }
 
+    /// Rename the network. The name is shared: it's published to the signed roster
+    /// (any current member may set it, last-writer-wins) so every device converges
+    /// to the same name.
+    pub async fn set_network_name(&self, name: String) -> Result<()> {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            bail!("network name can't be empty");
+        }
+        let net_id = {
+            let st = self.inner.state.lock().await;
+            st.config.as_ref().context("no network")?.secret().network_id()
+        };
+        let entry = sign(
+            net_id,
+            &self.inner.device_key,
+            Op::SetName { name, ts: now_ms() },
+        );
+        publish(&self.inner, &entry).await?;
+        let _ = self.inner.events.send(EngineEvent::Changed);
+        Ok(())
+    }
+
     /// Set (or clear, with `None`/empty) this device's friendly label. The label
     /// is persisted and broadcast via presence; the OS hostname is never editable.
     pub async fn set_label(&self, label: Option<String>) -> Result<()> {
@@ -755,7 +777,12 @@ impl Engine {
         }
         members.sort_by(|a, b| b.online.cmp(&a.online).then(a.node_id.cmp(&b.node_id)));
         Ok(NetworkStatus {
-            name: cfg.name.clone(),
+            // Prefer the shared roster name; fall back to the local config name.
+            name: st
+                .roster
+                .name()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| cfg.name.clone()),
             subnet: cfg.subnet().to_string(),
             frozen: st.roster.frozen(),
             self_node_id: data_encoding::HEXLOWER.encode(&self.inner.my_id),

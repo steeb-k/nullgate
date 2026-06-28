@@ -70,6 +70,8 @@ pub enum IpcRequest {
     /// Disconnect from the network but keep it saved (go offline). Idempotent.
     Disconnect,
     GetTicket,
+    /// Rename the network (shared across members via the signed roster).
+    SetNetworkName { name: String },
     /// Set (or clear, with `None`) this device's friendly label. The hostname is
     /// always the real OS hostname and is never settable.
     SetLabel { label: Option<String> },

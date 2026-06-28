@@ -47,6 +47,8 @@ enum Cmd {
     Connect,
     /// Disconnect but keep the network saved (go offline).
     Disconnect,
+    /// Rename the network (shared across all members).
+    Rename { name: String },
     /// Set this device's friendly label (omit the name to clear it).
     SetName { name: Option<String> },
     /// Export the originator recovery code (originator only).
@@ -74,6 +76,7 @@ async fn main() -> Result<()> {
         Cmd::Leave => IpcRequest::LeaveNetwork,
         Cmd::Connect => IpcRequest::Connect,
         Cmd::Disconnect => IpcRequest::Disconnect,
+        Cmd::Rename { name } => IpcRequest::SetNetworkName { name },
         Cmd::SetName { name } => IpcRequest::SetLabel { label: name },
         Cmd::ExportKey => IpcRequest::ExportOriginatorKey,
         Cmd::ImportKey { code } => IpcRequest::ImportOriginatorKey { code },

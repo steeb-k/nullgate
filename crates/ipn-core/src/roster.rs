@@ -68,12 +68,18 @@ pub enum Op {
     Remove { node_id: Id, ts: u64 },
     /// Freeze (or unfreeze) the membership roll. Originator-only.
     Freeze { frozen: bool, ts: u64 },
+    /// Set the network's display name. Any current member may set it;
+    /// last-writer-wins (it's a cosmetic, shared label).
+    SetName { name: String, ts: u64 },
 }
 
 impl Op {
     fn ts(&self) -> u64 {
         match self {
-            Op::Add { ts, .. } | Op::Remove { ts, .. } | Op::Freeze { ts, .. } => *ts,
+            Op::Add { ts, .. }
+            | Op::Remove { ts, .. }
+            | Op::Freeze { ts, .. }
+            | Op::SetName { ts, .. } => *ts,
         }
     }
 }
@@ -175,6 +181,8 @@ pub struct Member {
 pub struct Roster {
     members: BTreeMap<Id, Member>,
     frozen: bool,
+    /// Shared display name (latest authorized `SetName`), if any.
+    name: Option<String>,
 }
 
 impl Roster {
@@ -218,6 +226,13 @@ impl Roster {
                         admitted_ts.remove(node_id);
                     }
                 }
+                Op::SetName { name, .. } => {
+                    // Any current member (or the originator) may rename; entries are
+                    // processed in (ts, id) order, so the last authorized one wins.
+                    if e.signer == cfg.originator_id || roster.members.contains_key(&e.signer) {
+                        roster.name = Some(name.clone());
+                    }
+                }
                 Op::Add {
                     node_id, hostname, ..
                 } => {
@@ -252,6 +267,11 @@ impl Roster {
         // what eliminates the concurrent-approval IP race.
         assign_ips(&mut roster.members, cfg.subnet);
         roster
+    }
+
+    /// The shared display name, if any member has set one.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
     pub fn is_member(&self, id: &Id) -> bool {
@@ -678,5 +698,21 @@ mod tests {
         let r = Roster::build(&cfg, &entries);
         assert!(!r.is_member(&id(&early)), "backdated vouch (before voucher joined) rejected");
         assert!(r.is_member(&id(&late)), "valid vouch accepted");
+    }
+
+    #[test]
+    fn set_name_last_writer_wins_and_requires_membership() {
+        let (cfg, _om, devo, mut entries) = setup(); // devo is a genesis member
+        let outsider = key(50);
+        entries.push(sign(cfg.network_id, &devo, Op::SetName { name: "Home".into(), ts: 10 }));
+        entries.push(sign(cfg.network_id, &devo, Op::SetName { name: "Lab".into(), ts: 20 }));
+        // A non-member's rename (even though it's the latest) is ignored.
+        entries.push(sign(
+            cfg.network_id,
+            &outsider,
+            Op::SetName { name: "Hacked".into(), ts: 30 },
+        ));
+        let r = Roster::build(&cfg, &entries);
+        assert_eq!(r.name(), Some("Lab"));
     }
 }
