@@ -91,6 +91,26 @@ Legend: **★ recommended next** · ⚠️ known gap/risk in the current code ·
 - Property/fuzz tests for the roster fold against adversarial entry sets.
 - Wire `cargo clippy` + `cargo fmt --check` into the dev workflow; clear the existing GUI warning.
 
+## Nice-to-haves / quick wins (low effort)
+Polish and small ergonomics — likely an afternoon each or less.
+- Add a `LICENSE` file (Cargo.toml declares GPL-3.0-or-later; the file itself is missing) and
+  include it in the release bundles.
+- `--version` on `ipn`, `ipn-daemon`, `ipn-cli`; show the version in the GUI (header/About).
+- An **About** dialog (version, repo link, license, credits).
+- Clear the existing `ipn-gui` compiler warning; add a `cargo fmt`/`clippy` clean pass.
+- Toasts confirming actions ("Ticket copied", "Member removed", "Network frozen").
+- Validate the Join ticket field (reject input that isn't an `ipn1…` ticket, with a clear hint).
+- Disable a button while its action is in flight (avoid double-submits).
+- Remember window size/position between runs.
+- Show this device's own NodeId somewhere + a copy button (useful for `add-key`/debugging).
+- App/window icon; a Linux desktop icon (the `.desktop` exists, ship an icon with it); a
+  Windows Start-menu shortcut in the bundle.
+- Dev convenience scripts: `scripts/run-dev` (start daemon + GUI) and `scripts/test`
+  (unit + all ignored e2e) for quick local checks.
+- A short top-level `CONTRIBUTING.md` that points at `docs/development.md`.
+- A relative "last seen" that updates live without needing a roster change.
+- Tooltips/legend for the status dot and direct-vs-relay labels.
+
 ## Maybe / ideas
 - 💡 More than one network per device at once.
 - 💡 Per-peer "last seen" history / connection-quality graph.
