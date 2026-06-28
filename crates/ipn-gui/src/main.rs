@@ -309,6 +309,7 @@ fn build_ui(
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&adw::WindowTitle::new("IPN", "Iroh Private Network")));
 
+    // "+" create/join — only shown when not in a network (toggled below).
     let add_btn = gtk::MenuButton::builder()
         .icon_name("list-add-symbolic")
         .tooltip_text("Create or join a network")
@@ -327,40 +328,21 @@ fn build_ui(
     pop_box.append(&join_btn);
     popover.set_child(Some(&pop_box));
     add_btn.set_popover(Some(&popover));
-
-    let menu_btn = gtk::MenuButton::builder()
-        .icon_name("open-menu-symbolic")
-        .tooltip_text("Menu")
-        .build();
-    let menu_pop = gtk::Popover::new();
-    let menu_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    menu_box.set_margin_top(8);
-    menu_box.set_margin_bottom(8);
-    menu_box.set_margin_start(8);
-    menu_box.set_margin_end(8);
-    let about_btn = gtk::Button::with_label("About IPN");
-    about_btn.add_css_class("flat");
-    menu_box.append(&about_btn);
-    menu_pop.set_child(Some(&menu_box));
-    menu_btn.set_popover(Some(&menu_pop));
-    {
-        let window = window.clone();
-        about_btn.connect_clicked(move |_| {
-            menu_pop.popdown();
-            show_about(&window);
-        });
-    }
+    add_btn.set_visible(false); // shown only in the no-network state
     header.pack_start(&add_btn);
-    header.pack_end(&menu_btn);
 
-    // --- main page body ---
+    // --- main page body (header + scrolling content) ---
     let main_box = padded_box();
     let clamp = adw::Clamp::builder().maximum_size(520).child(&main_box).build();
     let main_scroller = gtk::ScrolledWindow::builder().child(&clamp).vexpand(true).build();
+    let main_toolbar = adw::ToolbarView::new();
+    main_toolbar.add_top_bar(&header);
+    main_toolbar.set_content(Some(&main_scroller));
 
     // --- flyout: an overlay sidebar (kept collapsed → always overlays the content
-    // with a scrim + slide, the window visible behind it). A stack swaps which
-    // panel fills it. ---
+    // with a scrim + slide, the window visible behind it). It's the TOP-LEVEL
+    // widget so the flyout spans the full window height — over the header too,
+    // like SEED — rather than sitting below it. A stack swaps which panel fills it. ---
     let split = adw::OverlaySplitView::new();
     split.set_collapsed(true);
     split.set_sidebar_position(gtk::PackType::End);
@@ -368,7 +350,7 @@ fn build_ui(
     split.set_min_sidebar_width(300.0);
     split.set_max_sidebar_width(460.0);
     split.set_sidebar_width_fraction(0.72);
-    split.set_content(Some(&main_scroller));
+    split.set_content(Some(&main_toolbar));
 
     let admin_box = padded_box();
     let diag_box = padded_box();
@@ -416,12 +398,8 @@ fn build_ui(
     stack.add_named(&member_panel, Some("member"));
     split.set_sidebar(Some(&stack));
 
-    let main_toolbar = adw::ToolbarView::new();
-    main_toolbar.add_top_bar(&header);
-    main_toolbar.set_content(Some(&split));
-
     let toast_overlay = adw::ToastOverlay::new();
-    toast_overlay.set_child(Some(&main_toolbar));
+    toast_overlay.set_child(Some(&split));
     window.set_content(Some(&toast_overlay));
 
     let ui = Ui {
@@ -468,10 +446,12 @@ fn build_ui(
         let state = state.clone();
         let pending = pending.clone();
         let app_n = app.clone();
+        let add_btn = add_btn.clone();
         glib::spawn_future_local(async move {
             while let Ok(msg) = rx.recv().await {
                 match msg {
                     UiMsg::Status(Some(s)) => {
+                        add_btn.set_visible(false); // already in a network
                         notify_newly_online(&app_n, state.borrow().as_ref(), &s);
                         pending
                             .borrow_mut()
@@ -480,6 +460,7 @@ fn build_ui(
                         render_all(&ui, &s, &net, &window, &pending);
                     }
                     UiMsg::Status(None) => {
+                        add_btn.set_visible(true); // no network — offer create/join
                         *state.borrow_mut() = None;
                         render_placeholder(&ui, &empty_page(&net, &window));
                     }
@@ -489,10 +470,12 @@ fn build_ui(
                         }
                     }
                     UiMsg::DaemonDown => {
+                        add_btn.set_visible(false);
                         *state.borrow_mut() = None;
                         render_placeholder(&ui, &daemon_down_page());
                     }
                     UiMsg::VersionMismatch { daemon, gui } => {
+                        add_btn.set_visible(false);
                         *state.borrow_mut() = None;
                         render_placeholder(&ui, &version_mismatch_page(daemon, gui));
                     }
@@ -756,6 +739,13 @@ fn render_main(
         let row = flyout_row("Diagnostics", "Relay, connection paths, routing", "network-wired-symbolic");
         let ui2 = ui.clone();
         row.connect_activated(move |_| ui2.open("diagnostics"));
+        controls.add(&row);
+    }
+    {
+        // About opens the standard dialog (not a flyout).
+        let row = flyout_row("About IPN", &format!("Version {}", env!("CARGO_PKG_VERSION")), "help-about-symbolic");
+        let window2 = window.clone();
+        row.connect_activated(move |_| show_about(&window2));
         controls.add(&row);
     }
     ui.main_box.append(&controls);

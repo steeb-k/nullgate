@@ -8,14 +8,15 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 - **GUI redesigned (SEED-style).** A static "IPN / Iroh Private Network" titlebar; a stylesheet
   borrowed from seed-sync-gtk (frameless header that merges into the window background, with a
   Windows-11 layer — Segoe UI, accent, rounded controls, native-style window buttons). Sub-menus
-  are **overlay flyouts** (`adw::OverlaySplitView`, kept collapsed) that slide in over the content
-  with a scrim — the window stays visible behind them — rather than full-page swaps. The main
-  screen is a control group — **Administration (top) → Show join ticket → Diagnostics (bottom)**,
-  with Join requests surfaced above when present — over a **Members** list at the bottom (this
-  device included, shown first). Clicking a member opens a **detail flyout** (full info + copy +
-  the kick button); clicking "this device" lets you set its friendly name. **Renaming the network
-  lives under Administration** (shared across members) and is off the main screen. The join ticket
-  is no longer auto-shown on create — view it anytime via "Show join ticket".
+  are **overlay flyouts** (`adw::OverlaySplitView`, kept collapsed) that slide in over the **full
+  window height** (over the header too) with a scrim — the window stays visible behind them —
+  rather than full-page swaps. The main screen is a control group — **Administration (top) → Show
+  join ticket → Diagnostics → About (bottom)** (About opens the usual dialog), with Join requests
+  surfaced above when present — over a **Members** list at the bottom (this device included, shown
+  first). Clicking a member opens a **detail flyout** (full info + copy + the kick button);
+  clicking "this device" lets you set its friendly name. **Renaming the network lives under
+  Administration** (shared across members). The **"+" create/join button is hidden once you're in
+  a network**, and the hamburger menu is gone. The join ticket is no longer auto-shown on create.
 - **Hostname is now the live OS hostname.** The name shown for a device is re-read from the OS on
   every presence heartbeat (and for the local device on every status), so it always reflects the
   *actual current* hostname and is never user-editable — it's the source of truth.
