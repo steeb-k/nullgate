@@ -3,3 +3,7 @@
 # PowerShell + Rust: normalize to LF in the repo; Git renders natively on checkout.
 *.ps1 text
 *.rs text
+# Binary assets — never EOL-normalize.
+*.png binary
+*.xcf binary
+*.ico binary
