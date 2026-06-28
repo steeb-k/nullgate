@@ -71,8 +71,9 @@ Legend: **★ recommended next** · ⚠️ known gap/risk in the current code ·
 - Per-member quick actions: **Connect (RDP/SSH)** launcher, copy address (done), rename.
 - A diagnostics/status view: relay-in-use, direct-vs-relay (shown), throughput, NAT info; expose
   the existing `conn_probe` logic in-app.
-- Launch on login / autostart (tray + minimize-to-tray + app icon are done).
 - Friendlier first-run / onboarding; clearer empty and error states.
+
+(Done: app icon, system tray, minimize-to-tray, "Quit IPN" disconnects then exits.)
 
 ## Platforms
 - macOS packaging (notarized `.app` or `curl|sh`; daemon as launchd / Network Extension).
@@ -81,6 +82,10 @@ Legend: **★ recommended next** · ⚠️ known gap/risk in the current code ·
 ## Packaging / installers / ops
 - Real installers (see `docs/releasing.md` "Planned installers"): Windows MSI + code signing,
   Linux `.deb`/AppImage/Flatpak + a systemd unit, macOS notarized app, Android APK.
+- **Launch on login (autostart), starting minimized to the tray** — register from the installer
+  (Windows: Run key / Startup shortcut; Linux: XDG autostart `.desktop`; macOS: LoginItem).
+  Needs the GUI start-hidden flag (see quick-wins).
+- A Windows Start-menu shortcut in the bundle.
 - Auto-update mechanism (and a way to view/rotate logs).
 - Log to a file with rotation; a "view logs" affordance in the GUI.
 
@@ -95,13 +100,13 @@ Legend: **★ recommended next** · ⚠️ known gap/risk in the current code ·
 Polish and small ergonomics — likely an afternoon each or less.
 - `--version` on `ipn`, `ipn-daemon`, `ipn-cli`; show the version in the GUI (header/About).
 - An **About** dialog (version, repo link, license, credits).
-- Clear the existing `ipn-gui` compiler warning; add a `cargo fmt`/`clippy` clean pass.
+- A `cargo fmt` / `clippy` clean pass.
 - Toasts confirming actions ("Ticket copied", "Member removed", "Network frozen").
 - Validate the Join ticket field (reject input that isn't an `ipn1…` ticket, with a clear hint).
 - Disable a button while its action is in flight (avoid double-submits).
 - Remember window size/position between runs.
 - Show this device's own NodeId somewhere + a copy button (useful for `add-key`/debugging).
-- A Windows Start-menu shortcut in the bundle (app/window icon + Linux desktop icon are done).
+- GUI start-hidden / `--minimized` flag (lets autostart launch straight to the tray).
 - Dev convenience scripts: `scripts/run-dev` (start daemon + GUI) and `scripts/test`
   (unit + all ignored e2e) for quick local checks.
 - A short top-level `CONTRIBUTING.md` that points at `docs/development.md`.
