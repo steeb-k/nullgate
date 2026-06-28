@@ -30,6 +30,14 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   on-disk secrets are not migrated.
 
 ### Fixed
+- **Declined join now resets the joiner to no-network.** The joiner was provisionally activated
+  before the decision and a decline (or handshake failure) left it lingering "in" the network
+  (showing the originator as a member, unable to retry). It now tears the activation back down on
+  any post-activation failure. New `join_denied_e2e` smoke test.
+- **GUI notifications are readable on Linux.** The message is now in the notification **title**
+  (many Linux daemons hide/clip the body, so it previously showed only the app name). Also dropped
+  the redundant "no network" toast at startup, and the **Join-requests flyout shows the emoji code
+  large** (matching the joiner's "Verify this code" screen).
 - **GUI focus no longer jumps / clicks no longer get stolen.** The main page was torn down and
   rebuilt on every status push from the daemon (every couple seconds), which reset keyboard focus
   (to "Administration") and could eat a click landing mid-rebuild. The UI now re-renders only when

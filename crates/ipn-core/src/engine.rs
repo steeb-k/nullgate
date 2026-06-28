@@ -399,50 +399,16 @@ impl Engine {
         };
         activate(&self.inner, cfg.clone()).await?;
 
-        // Dial the bootstrap member on the join ALPN (full address from the ticket).
-        let conn = self
-            .inner
-            .node
-            .endpoint
-            .connect(ticket.bootstrap.clone(), JOIN_ALPN)
-            .await
-            .context("dial bootstrap member")?;
-        let psk = secret.psk();
-        let verified = admission::dial(
-            &conn,
-            self.inner.my_id,
-            &psk,
-            self.inner.protocol_version.load(Ordering::SeqCst),
-        )
-        .await?;
-        let _ = self.inner.events.send(EngineEvent::JoinSas {
-            sas: verified.sas.iter().map(|s| s.to_string()).collect(),
-        });
-
-        // Send our join request and wait for the member's decision.
-        let (mut send, mut recv) = conn.open_bi().await.context("open join stream")?;
-        write_msg(
-            &mut send,
-            &JoinRequest {
-                hostname: current_hostname(),
-            },
-        )
-        .await?;
-        let resp: JoinResponse = read_msg(&mut recv).await.context("read join response")?;
-        match resp {
-            JoinResponse::Approved => {
-                save_config(&self.inner.data_dir, &cfg)?;
-                self.inner.state.lock().await.config = Some(cfg);
-                // Pull the roster from the member who admitted us. Our virtual IP
-                // is derived from our NodeId once we appear in the synced roster;
-                // the periodic tick then brings up routing.
-                if let Some(doc) = self.inner.state.lock().await.doc.clone() {
-                    let _ = doc.start_sync(vec![ticket.bootstrap.clone()]).await;
-                }
-                let _ = self.inner.events.send(EngineEvent::Changed);
-                Ok(())
+        // From here on the device is provisionally activated. If the handshake
+        // fails OR the member declines, tear everything back down so a rejected
+        // device returns cleanly to the no-network state (config cleared, presence
+        // task aborted) rather than lingering "in" the network.
+        match join_handshake(&self.inner, &cfg, &ticket).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                teardown(&self.inner).await;
+                Err(e)
             }
-            JoinResponse::Denied => bail!("the member declined the join request"),
         }
     }
 
@@ -1156,6 +1122,53 @@ async fn handle_join_incoming(inner: Arc<Inner>, conn: Connection) {
     let _ = send.finish();
     let _ = inner.events.send(EngineEvent::Changed);
     let _ = conn.closed().await;
+}
+
+/// The joiner-side handshake (after provisional activation): dial the bootstrap
+/// member, run admission + SAS, request to join, and act on the decision. Returns
+/// `Err` on decline or any failure so the caller can tear the activation down.
+async fn join_handshake(inner: &Arc<Inner>, cfg: &StoredConfig, ticket: &Ticket) -> Result<()> {
+    let secret = cfg.secret();
+    let conn = inner
+        .node
+        .endpoint
+        .connect(ticket.bootstrap.clone(), JOIN_ALPN)
+        .await
+        .context("dial bootstrap member")?;
+    let psk = secret.psk();
+    let verified = admission::dial(
+        &conn,
+        inner.my_id,
+        &psk,
+        inner.protocol_version.load(Ordering::SeqCst),
+    )
+    .await?;
+    let _ = inner.events.send(EngineEvent::JoinSas {
+        sas: verified.sas.iter().map(|s| s.to_string()).collect(),
+    });
+
+    let (mut send, mut recv) = conn.open_bi().await.context("open join stream")?;
+    write_msg(
+        &mut send,
+        &JoinRequest {
+            hostname: current_hostname(),
+        },
+    )
+    .await?;
+    let resp: JoinResponse = read_msg(&mut recv).await.context("read join response")?;
+    match resp {
+        JoinResponse::Approved => {
+            // Persist now that we're admitted, and pull the roster from the member
+            // who admitted us (our virtual IP is derived once we appear in it).
+            save_config(&inner.data_dir, cfg)?;
+            if let Some(doc) = inner.state.lock().await.doc.clone() {
+                let _ = doc.start_sync(vec![ticket.bootstrap.clone()]).await;
+            }
+            let _ = inner.events.send(EngineEvent::Changed);
+            Ok(())
+        }
+        JoinResponse::Denied => bail!("the member declined the join request"),
+    }
 }
 
 /// Write a signed `Add` vouching the joiner in (web-of-trust). The joiner's IP is

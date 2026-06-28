@@ -506,8 +506,8 @@ fn build_ui(
                                 });
                             }
                         }
-                        let n = gtk::gio::Notification::new("iroh-private-network");
-                        n.set_body(Some(&format!("“{hostname}” wants to join — approve in IPN")));
+                        let n = gtk::gio::Notification::new(&format!("“{hostname}” wants to join"));
+                        n.set_body(Some("Open IPN to approve or deny."));
                         app_n.send_notification(None, &n);
                         if let Some(s) = state.borrow().as_ref() {
                             render_if_changed(&ui, s, &net, &window, &pending, &last_sig);
@@ -549,9 +549,11 @@ fn build_ui(
             save_window_size(w);
             w.set_visible(false);
             if !notified.replace(true) {
-                let n = gtk::gio::Notification::new("iroh-private-network");
+                // Put the message in the title — many Linux notification daemons
+                // show the title prominently and hide/clip the body.
+                let n = gtk::gio::Notification::new("IPN is still running in the tray");
                 n.set_body(Some(
-                    "Still running in the tray — click the tray icon to reopen, or “Quit IPN” to disconnect.",
+                    "Click the tray icon to reopen, or “Quit IPN” to disconnect.",
                 ));
                 app.send_notification(Some("ipn-tray"), &n);
             }
@@ -578,10 +580,9 @@ fn build_ui(
         });
     }
 
-    net.request(IpcRequest::Connect, |r| match r {
-        Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
-        _ => None,
-    });
+    // Best-effort reconnect to a saved network; ignore errors (e.g. "no network" —
+    // the empty screen already conveys that, so no toast).
+    net.request(IpcRequest::Connect, |_| None);
 
     if start_minimized {
         window.set_visible(false);
@@ -997,17 +998,38 @@ fn render_requests(b: &gtk::Box, net: &Net, pending: &Rc<RefCell<Vec<PendingJoin
         );
         return;
     }
-    let g = adw::PreferencesGroup::builder()
-        .description("Approve only if the emoji code matches the joining device's screen.")
-        .build();
-    for req in plist.iter() {
-        let row = adw::ActionRow::builder()
-            .title(format!("“{}” wants to join", req.hostname))
-            .subtitle(req.sas.join("  "))
-            .build();
-        let deny = gtk::Button::builder().label("Deny").valign(gtk::Align::Center).build();
-        deny.add_css_class("flat");
-        let approve = gtk::Button::builder().label("Approve").valign(gtk::Align::Center).build();
+    let hint = gtk::Label::new(Some(
+        "Approve only if the emoji code matches the joining device's screen.",
+    ));
+    hint.add_css_class("dim-label");
+    hint.set_wrap(true);
+    hint.set_justify(gtk::Justification::Center);
+    hint.set_halign(gtk::Align::Center);
+    b.append(&hint);
+
+    for (i, req) in plist.iter().enumerate() {
+        if i > 0 {
+            b.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        }
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        card.set_margin_top(8);
+        card.set_margin_bottom(8);
+
+        let who = gtk::Label::new(Some(&format!("“{}” wants to join", req.hostname)));
+        who.add_css_class("title-3");
+        who.set_halign(gtk::Align::Center);
+        who.set_wrap(true);
+        card.append(&who);
+
+        // Big emojis, matching the joiner's "Verify this code" page.
+        card.append(&sas_label(&req.sas));
+
+        let btns = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        btns.set_halign(gtk::Align::Center);
+        let deny = gtk::Button::with_label("Deny");
+        deny.add_css_class("pill");
+        let approve = gtk::Button::with_label("Approve");
+        approve.add_css_class("pill");
         approve.add_css_class("suggested-action");
 
         let net_a = net.clone();
@@ -1031,11 +1053,11 @@ fn render_requests(b: &gtk::Box, net: &Net, pending: &Rc<RefCell<Vec<PendingJoin
             net_d.toast("Join denied");
             net_d.refresh();
         });
-        row.add_suffix(&deny);
-        row.add_suffix(&approve);
-        g.add(&row);
+        btns.append(&deny);
+        btns.append(&approve);
+        card.append(&btns);
+        b.append(&card);
     }
-    b.append(&g);
 }
 
 /// Fill + open the per-member detail flyout.
@@ -1527,8 +1549,7 @@ fn notify_newly_online(app: &adw::Application, prev: Option<&NetworkStatus>, new
                 .clone()
                 .or_else(|| m.hostname.clone())
                 .unwrap_or_else(|| short_id(&m.node_id));
-            let n = gtk::gio::Notification::new("iroh-private-network");
-            n.set_body(Some(&format!("{name} came online")));
+            let n = gtk::gio::Notification::new(&format!("{name} came online"));
             app.send_notification(None, &n);
         }
     }
