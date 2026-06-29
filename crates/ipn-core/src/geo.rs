@@ -33,31 +33,31 @@ impl GeoDb {
         Ok(Self { reader })
     }
 
-    /// Resolve an IPv4 address to a `"City, Country"` string (best-effort).
+    /// Resolve an IPv4 address to a `"City, State, Country"` string (best-effort;
+    /// drops whichever parts are missing, e.g. `"City, Country"`).
     pub fn lookup(&self, ip: Ipv4Addr) -> Option<String> {
         let v: serde_json::Value = self.reader.lookup(IpAddr::V4(ip)).ok()?;
-        // Handle both the flat DB-IP schema (`city`, `country_code`) and the
-        // GeoLite2-nested schema (`city.names.en`, `country.iso_code`).
+        // Handle both the flat DB-IP schema (`city`, `state1`, `country_code`) and
+        // the GeoLite2-nested schema (`city.names.en`, `country.iso_code`).
         let city = json_str(&v, &["city", "names", "en"]).or_else(|| json_str(&v, &["city"]));
+        let state = json_str(&v, &["state1"]);
         let cc =
             json_str(&v, &["country", "iso_code"]).or_else(|| json_str(&v, &["country_code"]));
         let country = cc.as_deref().map(country_name);
-        match (city, country) {
-            (Some(c), Some(co)) => Some(format!("{c}, {co}")),
-            (Some(c), None) => Some(c),
-            (None, Some(co)) => Some(co),
-            (None, None) => None,
-        }
+        let parts: Vec<String> = [city, state, country].into_iter().flatten().collect();
+        (!parts.is_empty()).then(|| parts.join(", "))
     }
 }
 
-/// Pull a (possibly nested) string out of a JSON value by key path.
+/// Pull a (possibly nested) non-empty string out of a JSON value by key path.
 fn json_str(v: &serde_json::Value, path: &[&str]) -> Option<String> {
     let mut cur = v;
     for k in path {
         cur = cur.get(k)?;
     }
-    cur.as_str().map(|s| s.to_string())
+    cur.as_str()
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// ISO 3166-1 alpha-2 code → English country name (falls back to the code).
