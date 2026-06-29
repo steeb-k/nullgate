@@ -10,7 +10,10 @@
 //! "Open IPN" — re-shows it. "Quit IPN" sends on `quit_tx`; the GTK side then
 //! disconnects from the network and exits.
 
-const TRAY_PNG: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../img/trayicon.png"));
+// Default tray icon: the color variant. (A monochrome option, icon-tray-mono.png,
+// exists for a future Settings toggle.)
+const TRAY_PNG: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../img/icon-tray-color.png"));
 
 #[cfg(any(windows, target_os = "macos"))]
 pub fn install(

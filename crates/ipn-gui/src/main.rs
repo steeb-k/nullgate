@@ -47,6 +47,11 @@ enum UiMsg {
     Refresh,
     DaemonDown,
     VersionMismatch { daemon: u32, gui: u32 },
+    /// The daemon came back on a newer app version (an auto-update was applied),
+    /// so this GUI is stale — relaunch to match. Linux/macOS only; on Windows the
+    /// installer's Restart Manager closes + replaces + restarts the GUI instead.
+    #[cfg_attr(windows, allow(dead_code))]
+    UpdateApplied,
 }
 
 /// A join request awaiting the user's decision, kept so it survives a missed/
@@ -126,7 +131,11 @@ async fn stream_events(socket: &std::path::Path, tx: &async_channel::Sender<UiMs
         let Some(frame) = read_frame(&mut reader).await? else {
             return Ok(());
         };
-        if let Message::Response(IpcResponse::Hello { version }) = frame.body {
+        if let Message::Response(IpcResponse::Hello {
+            version,
+            app_version,
+        }) = frame.body
+        {
             if version != ipn_ipc::PROTO_VERSION {
                 let _ = tx
                     .send(UiMsg::VersionMismatch {
@@ -136,6 +145,17 @@ async fn stream_events(socket: &std::path::Path, tx: &async_channel::Sender<UiMs
                     .await;
                 return Ok(());
             }
+            // After an auto-update the daemon restarts on a newer app version while
+            // this GUI is still the old binary; relaunch ourselves to match (the
+            // binary was swapped in place). Windows handles GUI restart via the
+            // installer's Restart Manager, so we don't self-relaunch there.
+            #[cfg(not(windows))]
+            if !app_version.is_empty() && app_version != env!("CARGO_PKG_VERSION") {
+                let _ = tx.send(UiMsg::UpdateApplied).await;
+                return Ok(());
+            }
+            #[cfg(windows)]
+            let _ = &app_version;
             break;
         }
     }
@@ -510,6 +530,7 @@ fn build_ui(
                         last_sig.borrow_mut().clear();
                         render_placeholder(&ui, &version_mismatch_page(daemon, gui));
                     }
+                    UiMsg::UpdateApplied => restart_self(&window),
                     UiMsg::Ticket(t) => fill_ticket(&ui, &t, &net, &window),
                     UiMsg::Recovery(code) => show_recovery(&window, &net, &code),
                     UiMsg::JoinSas(sas) => show_join_sas(&window, &sas),
@@ -633,6 +654,59 @@ fn build_ui(
         window.set_visible(false);
     } else {
         window.present();
+    }
+
+    // Windows: tell the OS to relaunch us with the right state if the installer's
+    // Restart Manager closes us during an MSI update. Keep the registered command
+    // line in sync with whether we're showing or hidden in the tray.
+    #[cfg(windows)]
+    {
+        register_restart(start_minimized);
+        window.connect_visible_notify(|w| register_restart(!w.is_visible()));
+    }
+}
+
+/// Relaunch this GUI from disk (Linux/macOS), preserving tray-minimized state, then
+/// exit so the new instance takes over. Used after an auto-update swapped the binary
+/// in place. A tiny `sh` shim waits for this PID to exit first so the new instance
+/// doesn't collide with the (single-instance) old one.
+#[cfg(not(windows))]
+fn restart_self(window: &adw::ApplicationWindow) {
+    let minimized = !window.is_visible();
+    if let Ok(exe) = std::env::current_exe() {
+        let flag = if minimized { " --minimized" } else { "" };
+        let script = format!(
+            "while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; exec \"{exe}\"{flag}",
+            pid = std::process::id(),
+            exe = exe.display(),
+        );
+        let _ = std::process::Command::new("sh").arg("-c").arg(script).spawn();
+    }
+    std::process::exit(0);
+}
+
+/// Windows restarts the GUI via the installer's Restart Manager (see
+/// `register_restart`), so there's nothing to do here.
+#[cfg(windows)]
+fn restart_self(_window: &adw::ApplicationWindow) {}
+
+/// Register (or refresh) the Windows Restart Manager relaunch command line so the
+/// MSI updater closes, replaces, and **restarts** the GUI with the correct state.
+/// `RESTART_NO_CRASH | RESTART_NO_HANG` so it only relaunches for a patch/reboot,
+/// not on a crash loop.
+#[cfg(windows)]
+fn register_restart(minimized: bool) {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn RegisterApplicationRestart(pwz_commandline: *const u16, dw_flags: u32) -> i32;
+    }
+    unsafe {
+        if minimized {
+            let args: Vec<u16> = "--minimized".encode_utf16().chain(std::iter::once(0)).collect();
+            let _ = RegisterApplicationRestart(args.as_ptr(), 0x1 | 0x2);
+        } else {
+            let _ = RegisterApplicationRestart(std::ptr::null(), 0x1 | 0x2);
+        }
     }
 }
 

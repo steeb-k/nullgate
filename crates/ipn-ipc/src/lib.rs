@@ -86,8 +86,15 @@ pub enum IpcRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IpcResponse {
-    /// The daemon's IPC protocol version (reply to [`IpcRequest::Hello`]).
-    Hello { version: u32 },
+    /// The daemon's IPC protocol version + its app (semver) version (reply to
+    /// [`IpcRequest::Hello`]). `app_version` lets the GUI notice it has gone stale
+    /// after an auto-update and relaunch itself. `default` for back-compat with an
+    /// older daemon that didn't send it.
+    Hello {
+        version: u32,
+        #[serde(default)]
+        app_version: String,
+    },
     /// `None` when this device isn't in a network yet.
     Status(Option<NetworkStatus>),
     Ticket(String),

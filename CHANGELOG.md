@@ -3,6 +3,18 @@
 All notable changes to IPN. Format follows [Keep a Changelog](https://keepachangelog.com).
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
+## [Unreleased]
+### Added
+- **The GUI restarts itself after an auto-update** so you're not left on the old version. The
+  daemon now reports its app version over IPC; when it comes back newer, the GUI relaunches —
+  Linux/macOS re-exec the (in-place-swapped) binary, Windows uses the installer's Restart Manager
+  (`RegisterApplicationRestart`) to close/replace/restart it. Tray-minimized state is preserved
+  (it reopens minimized if it was minimized, otherwise on screen).
+
+### Changed
+- **Default tray icon is now the color icon** (`icon-tray-color.png`). A monochrome variant
+  (`icon-tray-mono.png`) is bundled for a future Settings toggle.
+
 ## [0.1.1]
 ### Added
 - **Launch on login, minimized to the tray.** Installs an auto-start entry so the GUI comes up

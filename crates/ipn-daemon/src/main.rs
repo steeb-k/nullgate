@@ -225,6 +225,7 @@ async fn handle_request(engine: &Engine, req: IpcRequest) -> IpcResponse {
     match req {
         IpcRequest::Hello { .. } => IpcResponse::Hello {
             version: ipn_ipc::PROTO_VERSION,
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
         },
         IpcRequest::GetStatus => IpcResponse::Status(engine.status().await.ok()),
         IpcRequest::CreateNetwork { name } => {
