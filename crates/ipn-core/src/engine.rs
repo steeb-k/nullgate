@@ -843,7 +843,8 @@ async fn activate(inner: &Arc<Inner>, cfg: StoredConfig) -> Result<()> {
                     if let Ok(p) = ciborium::from_reader::<Presence, _>(m.content.as_ref()) {
                         if p.verify(&net_id) && p.node_id != ti.my_id {
                             let mut st = ti.state.lock().await;
-                            st.presence.record_heartbeat(p.node_id, p.hostname, p.ts);
+                            st.presence
+                                .record_heartbeat(p.node_id, p.hostname, p.public_ip, p.ts);
                             drop(st);
                             let _ = ti.events.send(EngineEvent::Changed);
                         }
@@ -1002,10 +1003,17 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
         (st.gossip_sender.clone(), peers)
     };
     if let Some(sender) = sender {
+        // Advertise our own public IP (same source the self view uses) so peers
+        // can show it even over a relay path where they can't observe it directly.
+        let public_ip = {
+            let addr = inner.node.addr();
+            split_local_public(addr.ip_addrs().copied()).1
+        };
         let p = Presence::signed(
             cfg.secret().network_id(),
             &inner.device_key,
             current_hostname(),
+            public_ip,
             now_ms(),
         );
         let mut buf = Vec::new();

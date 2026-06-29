@@ -42,6 +42,10 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   on-disk secrets are not migrated.
 
 ### Fixed
+- **Public IP now shows for other members.** Each device **advertises its own public IP** in the
+  signed presence heartbeat (the same value it shows for itself), so peers display it even over a
+  relay path — previously it was only filled in when iroh happened to observe a direct internet
+  path, so it was usually blank.
 - **Joiner doesn't show the network until accepted.** Activation is deferred until the join is
   approved, so a pending joiner stays on the empty screen and a decline leaves it there (no stale
   network view, no close/reopen needed).

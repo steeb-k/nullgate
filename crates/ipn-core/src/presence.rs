@@ -20,14 +20,17 @@ use crate::roster::Id;
 
 const DOMAIN: &str = "ipn-presence-v1";
 
-/// A signed presence heartbeat broadcast by a member. Carries only the device's
-/// **actual current** OS hostname (the shared identifier); friendly names are a
-/// per-client local nickname, never broadcast.
+/// A signed presence heartbeat broadcast by a member. Carries the device's
+/// **actual current** OS hostname (the shared identifier) and its self-known
+/// **public IP** (advertised so peers can show it even over a relay path).
+/// Friendly names are a per-client local nickname and are never broadcast.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Presence {
     pub network_id: Id,
     pub node_id: Id,
     pub hostname: String,
+    /// The member's own public/internet-facing IP, as it knows it (advertised).
+    pub public_ip: Option<String>,
     /// Milliseconds since the Unix epoch when this heartbeat was produced.
     pub ts: u64,
     pub signature: Vec<u8>,
@@ -35,13 +38,20 @@ pub struct Presence {
 
 impl Presence {
     /// Create and sign a presence heartbeat with this device's key.
-    pub fn signed(network_id: Id, key: &SigningKey, hostname: String, ts: u64) -> Self {
+    pub fn signed(
+        network_id: Id,
+        key: &SigningKey,
+        hostname: String,
+        public_ip: Option<String>,
+        ts: u64,
+    ) -> Self {
         let node_id = key.verifying_key().to_bytes();
-        let sig = key.sign(&signing_bytes(&network_id, &node_id, &hostname, ts));
+        let sig = key.sign(&signing_bytes(&network_id, &node_id, &hostname, &public_ip, ts));
         Self {
             network_id,
             node_id,
             hostname,
+            public_ip,
             ts,
             signature: sig.to_bytes().to_vec(),
         }
@@ -60,20 +70,33 @@ impl Presence {
             return false;
         };
         vk.verify_strict(
-            &signing_bytes(&self.network_id, &self.node_id, &self.hostname, self.ts),
+            &signing_bytes(
+                &self.network_id,
+                &self.node_id,
+                &self.hostname,
+                &self.public_ip,
+                self.ts,
+            ),
             &sig,
         )
         .is_ok()
     }
 }
 
-fn signing_bytes(network_id: &Id, node_id: &Id, hostname: &str, ts: u64) -> Vec<u8> {
+fn signing_bytes(
+    network_id: &Id,
+    node_id: &Id,
+    hostname: &str,
+    public_ip: &Option<String>,
+    ts: u64,
+) -> Vec<u8> {
     #[derive(Serialize)]
     struct View<'a> {
         domain: &'static str,
         network_id: &'a Id,
         node_id: &'a Id,
         hostname: &'a str,
+        public_ip: &'a Option<String>,
         ts: u64,
     }
     let mut buf = Vec::new();
@@ -83,6 +106,7 @@ fn signing_bytes(network_id: &Id, node_id: &Id, hostname: &str, ts: u64) -> Vec<
             network_id,
             node_id,
             hostname,
+            public_ip,
             ts,
         },
         &mut buf,
@@ -119,11 +143,21 @@ pub struct PresenceTracker {
 
 impl PresenceTracker {
     /// Record a verified heartbeat (monotonic: older timestamps are ignored).
-    pub fn record_heartbeat(&mut self, node_id: Id, hostname: String, ts: u64) {
+    pub fn record_heartbeat(
+        &mut self,
+        node_id: Id,
+        hostname: String,
+        public_ip: Option<String>,
+        ts: u64,
+    ) {
         let e = self.peers.entry(node_id).or_default();
         if ts >= e.last_seen {
             e.last_seen = ts;
             e.hostname = Some(hostname);
+            // The peer advertises its own public IP; prefer it when present.
+            if public_ip.is_some() {
+                e.public_ip = public_ip;
+            }
         }
     }
 
@@ -186,7 +220,7 @@ mod tests {
     fn presence_signs_and_verifies() {
         let net = [9u8; 32];
         let k = key(5);
-        let p = Presence::signed(net, &k, "laptop".into(), 1000);
+        let p = Presence::signed(net, &k, "laptop".into(), Some("1.2.3.4".into()), 1000);
         assert!(p.verify(&net));
         // Wrong network rejected.
         assert!(!p.verify(&[8u8; 32]));
@@ -195,15 +229,19 @@ mod tests {
     #[test]
     fn tampered_presence_fails() {
         let net = [9u8; 32];
-        let mut p = Presence::signed(net, &key(5), "laptop".into(), 1000);
+        let mut p = Presence::signed(net, &key(5), "laptop".into(), None, 1000);
         p.hostname = "imposter".into();
         assert!(!p.verify(&net));
+        // The advertised public IP is signed too.
+        let mut q = Presence::signed(net, &key(5), "laptop".into(), Some("1.2.3.4".into()), 1000);
+        q.public_ip = Some("9.9.9.9".into());
+        assert!(!q.verify(&net));
     }
 
     #[test]
     fn forged_node_id_fails() {
         let net = [9u8; 32];
-        let mut p = Presence::signed(net, &key(5), "laptop".into(), 1000);
+        let mut p = Presence::signed(net, &key(5), "laptop".into(), None, 1000);
         p.node_id = key(6).verifying_key().to_bytes(); // claim someone else
         assert!(!p.verify(&net));
     }
@@ -212,10 +250,11 @@ mod tests {
     fn tracker_keeps_latest_heartbeat() {
         let mut t = PresenceTracker::default();
         let id = key(5).verifying_key().to_bytes();
-        t.record_heartbeat(id, "old".into(), 100);
-        t.record_heartbeat(id, "new".into(), 200);
-        t.record_heartbeat(id, "stale".into(), 150); // ignored
+        t.record_heartbeat(id, "old".into(), None, 100);
+        t.record_heartbeat(id, "new".into(), Some("1.2.3.4".into()), 200);
+        t.record_heartbeat(id, "stale".into(), None, 150); // ignored
         assert_eq!(t.get(&id).unwrap().hostname.as_deref(), Some("new"));
+        assert_eq!(t.get(&id).unwrap().public_ip.as_deref(), Some("1.2.3.4"));
         assert_eq!(t.get(&id).unwrap().last_seen, 200);
     }
 }
