@@ -13,7 +13,11 @@
 # the Windows LocalSystem service + SYSTEM scheduled task. The GUI runs as your
 # normal user and talks to the daemon over /tmp/ipn.sock. Install/update/uninstall
 # need root; this re-execs itself with sudo when not already root.
-set -euo pipefail
+# Note: NO `pipefail`. Extraction pipelines use early-closing consumers
+# (grep -m1 / head -n1) that make curl/find exit with EPIPE (e.g. curl's code 23);
+# under pipefail that aborts the script even though the value was read fine. We
+# guard results with `[ -n … ]` and use `|| die` on the standalone critical ops.
+set -eu
 
 REPO="${IPN_BINARIES_REPO:-steeb-k/iroh-private-network}"
 ASSET_RE='https://[^"]+linux-x86_64\.tar\.gz'

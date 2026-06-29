@@ -12,7 +12,11 @@
 # LaunchDaemon (not a per-user agent): the app goes to /Applications, the daemon +
 # auto-update run as root LaunchDaemons, and the tray GUI runs per-user as an Aqua
 # LaunchAgent. install/update/uninstall need root; this re-execs with sudo.
-set -euo pipefail
+# Note: NO `pipefail`. Extraction pipelines use early-closing consumers
+# (grep -m1 / head -n1) that make curl/find exit with EPIPE (e.g. curl's code 23);
+# under pipefail that aborts the script even though the value was read fine. We
+# guard results with `[ -n … ]` and use `|| die` on the standalone critical ops.
+set -eu
 
 REPO="${IPN_BINARIES_REPO:-steeb-k/iroh-private-network}"
 case "$(uname -m)" in arm64) HOST=arm64 ;; *) HOST=x86_64 ;; esac

@@ -11,6 +11,10 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   so a reboot brings the tray up with the network live; click the tray icon to open the window.
 
 ### Fixed
+- **Linux/macOS updater aborted with exit 23.** `ipnctl --update` used `set -o pipefail` with
+  `curl | grep -m1 …` extraction pipelines; the early-closing consumer made curl exit with EPIPE
+  (code 23), which `pipefail` propagated and `set -e` turned into an abort — even though the value
+  was read fine. Dropped `pipefail` (results are guarded; critical ops use `|| die`).
 - **No console window on Windows** alongside the GUI (release builds are a GUI-subsystem binary).
 - **Friendly name updates immediately** in the open member-detail flyout when set (no need to
   close and reopen it).
