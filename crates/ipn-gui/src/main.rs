@@ -169,6 +169,30 @@ async fn stream_events(socket: &std::path::Path, tx: &async_channel::Sender<UiMs
 /// Install the app stylesheet: a base "frameless" look on every platform, plus a
 /// Windows 11-leaning layer (Segoe UI, accent, rounding) on Windows. (Borrowed
 /// from seed-sync-gtk; macOS has no extra sheet there either.)
+/// Register the bundled app icon (`icon-spin.png`) into the icon theme under
+/// `APP_ID`, so `application_icon(APP_ID)` resolves on every platform (Windows'
+/// GTK theme has no entry for it otherwise). Also sets it as the default window
+/// icon. Best-effort.
+fn install_app_icon() {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
+    let Some(dirs) = directories::BaseDirs::new() else {
+        return;
+    };
+    // Windows: %LOCALAPPDATA%\ipn\icons ; Linux: ~/.cache/ipn/icons
+    let base = dirs.cache_dir().join("ipn").join("icons");
+    let apps = base.join("hicolor").join("512x512").join("apps");
+    if std::fs::create_dir_all(&apps).is_ok() {
+        let dest = apps.join(format!("{APP_ID}.png"));
+        if !dest.exists() {
+            let _ = std::fs::write(&dest, include_bytes!("../../../img/icon-spin.png"));
+        }
+        gtk::IconTheme::for_display(&display).add_search_path(&base);
+    }
+    gtk::Window::set_default_icon_name(APP_ID);
+}
+
 fn load_css() {
     let Some(display) = gtk::gdk::Display::default() else {
         return;
@@ -295,6 +319,7 @@ fn build_ui(
     start_minimized: bool,
 ) {
     load_css();
+    install_app_icon();
 
     let (win_w, win_h) = load_window_size();
     let window = adw::ApplicationWindow::builder()
@@ -816,8 +841,13 @@ fn render_main(
         controls.add(&row);
     }
     {
-        // About opens the standard dialog (not a flyout).
-        let row = flyout_row("About IPN", &format!("Version {}", env!("CARGO_PKG_VERSION")), "help-about-symbolic");
+        // About opens the standard dialog (not a flyout) — no chevron suffix.
+        let row = adw::ActionRow::builder()
+            .title("About IPN")
+            .subtitle(&format!("Version {}", env!("CARGO_PKG_VERSION")))
+            .activatable(true)
+            .build();
+        row.add_prefix(&gtk::Image::from_icon_name("help-about-symbolic"));
         let window2 = window.clone();
         row.connect_activated(move |_| show_about(&window2));
         controls.add(&row);
@@ -1561,14 +1591,18 @@ fn show_join_sas(window: &adw::ApplicationWindow, sas: &[String]) {
 }
 
 fn show_about(window: &adw::ApplicationWindow) {
+    // No `comments` → no "Details" page. `website`/`issue_url` add the "Website"
+    // and "Report an Issue" links on the main page. (These repo URLs become live
+    // once the project is public.)
     let about = adw::AboutWindow::builder()
         .transient_for(window)
-        .application_name("iroh-private-network")
+        .application_name("Iroh Private Network")
         .application_icon(APP_ID)
         .version(env!("CARGO_PKG_VERSION"))
-        .developer_name("steeb_k")
+        .developer_name("kznjk")
         .license_type(gtk::License::Gpl30)
-        .comments("A peer-to-peer private VPN over iroh — connect your own devices into a private LAN.")
+        .website("https://github.com/steeb-k/iroh-private-network")
+        .issue_url("https://github.com/steeb-k/iroh-private-network/issues")
         .build();
     about.present();
 }

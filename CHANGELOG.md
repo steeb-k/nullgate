@@ -5,6 +5,11 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 ### Changed
+- **About dialog cleaned up.** Shows the app icon and the name "Iroh Private Network", developer
+  "kznjk", and **Website** + **Report an Issue** links (to the GitHub repo / issues); the
+  "Details" page is gone. The About row no longer shows a "›" chevron (it opens a dialog, not a
+  flyout). The bundled `icon-spin` is registered into the icon theme at startup so it appears in
+  the About dialog and as the window icon on all platforms.
 - **Friendly names are now local nicknames.** A nickname is set by *each client for other
   members* and stored **locally** (never broadcast); the **hostname** is the shared identifier.
   (Replaces the old self-set, broadcast label.) Set it from a member's detail page; CLI
