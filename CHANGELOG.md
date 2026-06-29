@@ -4,6 +4,12 @@ All notable changes to IPN. Format follows [Keep a Changelog](https://keepachang
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [0.1.1]
+### Added
+- **Launch on login, minimized to the tray.** Installs an auto-start entry so the GUI comes up
+  hidden in the tray at each login — Windows (per-machine Run key in the MSI), Linux (XDG
+  autostart, already added by `ipnctl`), macOS (login LaunchAgent). The daemon already auto-starts,
+  so a reboot brings the tray up with the network live; click the tray icon to open the window.
+
 ### Fixed
 - **No console window on Windows** alongside the GUI (release builds are a GUI-subsystem binary).
 - **Friendly name updates immediately** in the open member-detail flyout when set (no need to

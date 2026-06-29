@@ -145,6 +145,18 @@
       </Component>
     </StandardDirectory>
 
+    <!-- Launch the GUI minimized to the tray at each user login (per-machine Run
+         key; the value runs as the logged-in user). The daemon is already an
+         auto-start service, so login brings up the tray with the network live. -->
+    <Component Id="AutostartRun" Directory="BinDir" Guid="*">
+      <RegistryValue Root="HKLM"
+                     Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                     Name="IPN"
+                     Type="string"
+                     Value="&quot;[INSTALLFOLDER]bin\ipn.exe&quot; --minimized"
+                     KeyPath="yes" />
+    </Component>
+
     <Feature Id="Main" Title="Iroh Private Network" Level="1">
       <ComponentGroupRef Id="BinDlls" />
       <ComponentRef Id="GuiExe" />
@@ -156,6 +168,7 @@
       <ComponentRef Id="DaemonExe" />
       <ComponentRef Id="StartMenuShortcut" />
       <ComponentRef Id="DesktopShortcut" />
+      <ComponentRef Id="AutostartRun" />
     </Feature>
 
     <!-- Daily auto-update Scheduled Task (the Windows analog of the Linux
