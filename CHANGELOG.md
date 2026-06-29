@@ -3,6 +3,12 @@
 All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepachangelog.com).
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
+## [0.1.4]
+### Changed
+- **Join-ticket and recovery-code prefixes rebranded.** Tickets now start `ng1…` and originator
+  recovery codes `ngkey1…` (were `ipn1…`/`ipnkey1…`), finishing the Nullgate rename. Tickets/codes
+  minted by 0.1.3 or earlier won't parse — re-share the ticket from a 0.1.4 device.
+
 ## [0.1.3]
 ### Changed
 - **Rebranded to "Nullgate".** The application is now **Nullgate** everywhere it's visible — the
