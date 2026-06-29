@@ -1135,7 +1135,24 @@ fn fill_member(
     }
     g.add(&property_row("Local IP", m.local_ip.as_deref().unwrap_or("—")));
     g.add(&property_row("Public IP", m.public_ip.as_deref().unwrap_or("—")));
-    g.add(&property_row("Location", m.location.as_deref().unwrap_or("—")));
+
+    // Location: the required attribution link sits inline next to the header; a
+    // help icon after the value carries the "approximate" explainer as a tooltip.
+    let loc_row = adw::ActionRow::builder()
+        .title(
+            "Location   <a href=\"https://db-ip.com/\">\
+             <span size=\"small\">IP Geolocation by DB-IP</span></a>",
+        )
+        .subtitle(m.location.as_deref().unwrap_or("—"))
+        .build();
+    loc_row.set_use_markup(true);
+    loc_row.set_subtitle_selectable(true);
+    loc_row.add_css_class("property");
+    let help = gtk::Image::from_icon_name("help-about-symbolic");
+    help.set_tooltip_text(Some("Approximate, based on the public IP."));
+    help.set_valign(gtk::Align::Center);
+    loc_row.add_suffix(&help);
+    g.add(&loc_row);
 
     let id_row = property_row("Node ID", &m.node_id);
     let copy = icon_button("edit-copy-symbolic", "Copy node ID");
@@ -1155,20 +1172,6 @@ fn fill_member(
         m.observed_addr.as_deref().unwrap_or("—"),
     ));
     ui.member_box.append(&g);
-
-    // Required CC BY 4.0 attribution for the Location data (clickable link).
-    let attrib = gtk::Label::new(None);
-    attrib.set_markup(
-        "<small>Location is approximate, from the public IP. \
-         <a href=\"https://db-ip.com/\">IP Geolocation by DB-IP</a></small>",
-    );
-    attrib.add_css_class("dim-label");
-    attrib.set_wrap(true);
-    attrib.set_halign(gtk::Align::Start);
-    attrib.set_margin_start(12);
-    attrib.set_margin_end(12);
-    attrib.set_margin_top(4);
-    ui.member_box.append(&attrib);
 
     if !m.is_self && is_originator {
         let danger = adw::PreferencesGroup::new();
