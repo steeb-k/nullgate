@@ -57,7 +57,7 @@ done/mitigated and the GUI has had a big SEED-style pass. Likely next:
 Captured here since it's not all obvious from a glance — see `CHANGELOG.md [Unreleased]` for detail.
 - **All 6 known issues** addressed (see below): deterministic IPs, OS-keystore secrets, MSS
   clamping, protocol versioning; timestamp + doc-spam mitigations.
-- **Originator key backup & recovery** — export/import an `ipnkey1…` recovery code (GUI + CLI).
+- **Originator key backup & recovery** — export/import an `ngkey1…` recovery code (GUI + CLI).
 - **Hostname = live OS truth** (re-read each beat, not editable); **friendly names are LOCAL
   per-client nicknames** (set for *other* members, never broadcast).
 - **Public IP advertised** in the signed presence heartbeat; **Local IP / Public IP** shown.

@@ -1558,7 +1558,7 @@ fn create_dialog(window: &adw::ApplicationWindow, net: &Net) {
 }
 
 fn join_dialog(window: &adw::ApplicationWindow, net: &Net) {
-    let entry = gtk::Entry::builder().placeholder_text("ipn1...").build();
+    let entry = gtk::Entry::builder().placeholder_text("ng1...").build();
     let dialog = adw::MessageDialog::builder()
         .transient_for(window)
         .heading("Join a network")
@@ -1575,8 +1575,8 @@ fn join_dialog(window: &adw::ApplicationWindow, net: &Net) {
             return;
         }
         let ticket = entry.text().to_string();
-        if !ticket.trim().starts_with("ipn1") {
-            net.toast("That doesn't look like a join ticket (it should start with “ipn1…”).");
+        if !ticket.trim().starts_with("ng1") {
+            net.toast("That doesn't look like a join ticket (it should start with “ng1…”).");
             return;
         }
         let ticket = ticket.trim().to_string();
@@ -1646,7 +1646,7 @@ fn set_nickname_dialog(
 }
 
 fn import_originator_dialog(window: &adw::ApplicationWindow, net: &Net) {
-    let entry = gtk::Entry::builder().placeholder_text("ipnkey1...").build();
+    let entry = gtk::Entry::builder().placeholder_text("ngkey1...").build();
     let dialog = adw::MessageDialog::builder()
         .transient_for(window)
         .heading("Restore originator access")

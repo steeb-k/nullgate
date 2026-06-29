@@ -188,11 +188,11 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   entries clear once the device becomes a member.
 - **GUI polish.** An **About** dialog (version/license) in a new header menu; the window now
   **remembers its size**; **success toasts** for copy/remove/freeze actions; the **Join ticket
-  field is validated** (must look like `ipn1…`); a **copy button for this device's node ID**;
+  field is validated** (must look like `ng1…`); a **copy button for this device's node ID**;
   **tooltips + a legend** explaining the online dot and direct-vs-relay; relative **"last seen"
   updates live**; and a desktop **notification when a member comes online**.
 - **Originator key backup & recovery.** The originator can export its master key as a single
-  `ipnkey1…` recovery code (GUI "Back up originator key" → QR + copy, with a keep-it-safe
+  `ngkey1…` recovery code (GUI "Back up originator key" → QR + copy, with a keep-it-safe
   warning; CLI `export-key`). Another member of the same network can import it ("Restore
   originator access…" / CLI `import-key`) to regain admin powers after device loss — a code for a
   different network is rejected. New `originator_key_e2e` smoke test.

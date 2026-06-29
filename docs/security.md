@@ -10,7 +10,7 @@ networking background in [architecture.md](architecture.md).
   discovery rendezvous, the admission PSK, and the roster's document namespace.
 - The **originator** holds a separate, exportable **master key** — the authority for removing
   members, freezing the roster, and rotating the secret. It can be **backed up** as an
-  `ipnkey1…` recovery code and **re-imported** on another member of the same network to restore
+  `ngkey1…` recovery code and **re-imported** on another member of the same network to restore
   admin powers after device loss (a code for a different network is refused). Treat the code like
   a master password — anyone who has it can administer the network.
 

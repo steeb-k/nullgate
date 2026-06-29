@@ -71,7 +71,7 @@ async fn originator_key_backup_and_restore() {
 
     // A exports its recovery code; B imports it and becomes originator-capable.
     let code = a.export_originator_key().await.unwrap();
-    assert!(code.starts_with("ipnkey1"));
+    assert!(code.starts_with("ngkey1"));
     b.import_originator_key(&code).await.unwrap();
     assert!(is_originator(&b).await, "B should hold originator powers after import");
 

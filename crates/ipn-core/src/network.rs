@@ -25,7 +25,7 @@ use std::net::Ipv4Addr;
 use crate::roster::Id;
 
 const HKDF_SALT: &[u8] = b"ipn-v1";
-const TICKET_PREFIX: &str = "ipn1";
+const TICKET_PREFIX: &str = "ng1";
 
 /// The root secret for a network. Whoever holds it can find, authenticate to,
 /// and write the roster of the network — membership is then gated by the role
@@ -123,7 +123,7 @@ impl Ticket {
         Ipv4Addr::from(self.subnet)
     }
 
-    /// Encode to a single copy-pasteable string: `ipn1<base32>`.
+    /// Encode to a single copy-pasteable string: `ng1<base32>`.
     pub fn encode(&self) -> String {
         let mut buf = Vec::new();
         ciborium::into_writer(self, &mut buf).expect("serialize ticket");
@@ -137,7 +137,7 @@ impl Ticket {
         let s = s.trim();
         let body = s
             .strip_prefix(TICKET_PREFIX)
-            .context("not a Nullgate ticket (missing ipn1 prefix)")?;
+            .context("not a Nullgate ticket (missing ng1 prefix)")?;
         let bytes = data_encoding::BASE32_NOPAD
             .decode(body.to_uppercase().as_bytes())
             .context("ticket is not valid base32")?;
@@ -156,10 +156,10 @@ pub fn generate_originator_key() -> SigningKey {
     SigningKey::generate(&mut rand::rngs::OsRng)
 }
 
-const RECOVERY_PREFIX: &str = "ipnkey1";
+const RECOVERY_PREFIX: &str = "ngkey1";
 
 /// Encode the originator master secret as a single copy/save-able **recovery
-/// code** (`ipnkey1<base32>`). Anyone holding this can administer the network, so
+/// code** (`ngkey1<base32>`). Anyone holding this can administer the network, so
 /// it must be stored securely.
 pub fn encode_recovery_key(secret: &[u8; 32]) -> String {
     format!(
@@ -173,7 +173,7 @@ pub fn decode_recovery_key(s: &str) -> Result<[u8; 32]> {
     let body = s
         .trim()
         .strip_prefix(RECOVERY_PREFIX)
-        .context("not a Nullgate recovery code (missing ipnkey1 prefix)")?;
+        .context("not a Nullgate recovery code (missing ngkey1 prefix)")?;
     let bytes = data_encoding::BASE32_NOPAD
         .decode(body.to_uppercase().as_bytes())
         .context("recovery code is not valid base32")?;
@@ -222,7 +222,7 @@ mod tests {
             boot.clone(),
         );
         let encoded = t.encode();
-        assert!(encoded.starts_with("ipn1"));
+        assert!(encoded.starts_with("ng1"));
         let back = Ticket::decode(&encoded).unwrap();
         assert_eq!(back.name, "home");
         assert_eq!(back.subnet(), Ipv4Addr::new(10, 99, 0, 0));
@@ -234,16 +234,16 @@ mod tests {
     #[test]
     fn ticket_rejects_garbage() {
         assert!(Ticket::decode("hello").is_err());
-        assert!(Ticket::decode("ipn1!!!!").is_err());
+        assert!(Ticket::decode("ng1!!!!").is_err());
     }
 
     #[test]
     fn recovery_key_roundtrips() {
         let secret = [42u8; 32];
         let code = encode_recovery_key(&secret);
-        assert!(code.starts_with("ipnkey1"));
+        assert!(code.starts_with("ngkey1"));
         assert_eq!(decode_recovery_key(&code).unwrap(), secret);
         assert!(decode_recovery_key("nope").is_err());
-        assert!(decode_recovery_key("ipnkey1!!!!").is_err());
+        assert!(decode_recovery_key("ngkey1!!!!").is_err());
     }
 }
