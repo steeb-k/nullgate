@@ -3,6 +3,19 @@
 All notable changes to IPN. Format follows [Keep a Changelog](https://keepachangelog.com).
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
+## [Unreleased]
+### Changed
+- **Tray icon is now the monochrome icon**, auto-themed: shown white on dark trays and inverted to
+  black on light ones (one asset, no separate black icon needed). The color icon stays bundled for
+  a future Settings toggle.
+
+### Fixed
+- **Duplicate desktop notifications are throttled** to once per 30s per message — fixes the burst
+  of repeated "came online" toasts when a peer flaps offline/online during an update.
+- **Linux launcher icon now shows.** `ipnctl` installs the `.desktop` + hicolor icons under
+  `/usr/share` (which is always in `XDG_DATA_DIRS` and has the theme's `index.theme`) instead of
+  `/usr/local/share`, so the icon resolves and `gtk-update-icon-cache` works.
+
 ## [0.1.2]
 ### Changed
 - **Branding: the desktop app is "IPN Portal".** The main window header now reads **Iroh Private

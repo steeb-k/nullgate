@@ -10,10 +10,20 @@
 //! "Open IPN" — re-shows it. "Quit IPN" sends on `quit_tx`; the GTK side then
 //! disconnects from the network and exits.
 
-// Default tray icon: the color variant. (A monochrome option, icon-tray-mono.png,
-// exists for a future Settings toggle.)
+// Default tray icon: the monochrome variant. The asset is all-white (for dark
+// trays); on a light theme we invert it to black at load time (see `themed_rgb`),
+// so the one asset works in both. (A color variant, icon-tray-color.png, exists
+// for a future Settings toggle.)
 const TRAY_PNG: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../img/icon-tray-color.png"));
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../img/icon-tray-mono.png"));
+
+/// Map a source RGB to what the tray should show for the current theme: the
+/// monochrome icon is white, which vanishes on a light tray, so invert it to black
+/// when the theme is light. (Best-effort: follows the app color scheme.)
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+fn themed_rgb(r: u8, g: u8, b: u8, dark: bool) -> (u8, u8, u8) {
+    if dark { (r, g, b) } else { (255 - r, 255 - g, 255 - b) }
+}
 
 #[cfg(any(windows, target_os = "macos"))]
 pub fn install(
@@ -97,6 +107,7 @@ pub fn install(
 #[cfg(any(windows, target_os = "macos"))]
 fn load_tray_icon() -> Option<tray_icon::Icon> {
     use gtk::gdk_pixbuf::{InterpType, Pixbuf};
+    let dark = adw::StyleManager::default().is_dark();
     let src = Pixbuf::from_read(std::io::Cursor::new(TRAY_PNG)).ok()?;
     let pb = src.scale_simple(32, 32, InterpType::Bilinear)?;
     let pb = if pb.has_alpha() { pb } else { pb.add_alpha(false, 0, 0, 0).ok()? };
@@ -110,7 +121,8 @@ fn load_tray_icon() -> Option<tray_icon::Icon> {
         let row = &bytes[y * rowstride..y * rowstride + w as usize * nch];
         for px in row.chunks_exact(nch) {
             let a = if nch == 4 { px[3] } else { 255 };
-            rgba.extend_from_slice(&[px[0], px[1], px[2], a]);
+            let (r, g, b) = themed_rgb(px[0], px[1], px[2], dark);
+            rgba.extend_from_slice(&[r, g, b, a]);
         }
     }
     tray_icon::Icon::from_rgba(rgba, w as u32, h as u32).ok()
@@ -204,6 +216,7 @@ mod linux {
 
     fn load_icons() -> Vec<ksni::Icon> {
         use gtk::gdk_pixbuf::{InterpType, Pixbuf};
+        let dark = adw::StyleManager::default().is_dark();
         let Ok(src) = Pixbuf::from_read(std::io::Cursor::new(super::TRAY_PNG)) else {
             return Vec::new();
         };
@@ -222,7 +235,8 @@ mod linux {
                     let row = &rgba[y * rowstride..y * rowstride + w as usize * nch];
                     for px in row.chunks_exact(nch) {
                         let a = if nch == 4 { px[3] } else { 255 };
-                        data.extend_from_slice(&[a, px[0], px[1], px[2]]);
+                        let (r, g, b) = super::themed_rgb(px[0], px[1], px[2], dark);
+                        data.extend_from_slice(&[a, r, g, b]);
                     }
                 }
                 Some(ksni::Icon { width: w, height: h, data })

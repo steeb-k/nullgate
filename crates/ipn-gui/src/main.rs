@@ -1733,6 +1733,26 @@ fn show_about(window: &adw::ApplicationWindow) {
 fn notify(app: &adw::Application, title: &str, body: Option<&str>) {
     #[cfg(not(windows))]
     {
+        use std::collections::HashMap;
+        use std::time::{Duration, Instant};
+        // Throttle repeats of the same notification (e.g. a peer flapping
+        // offline/online during an update) to at most once per 30s. Keyed by title;
+        // notify() is only ever called on the GTK main thread, so thread_local is safe.
+        thread_local! {
+            static LAST: RefCell<HashMap<String, Instant>> = RefCell::new(HashMap::new());
+        }
+        let suppressed = LAST.with(|m| {
+            let mut m = m.borrow_mut();
+            let now = Instant::now();
+            if m.get(title).is_some_and(|t| now.duration_since(*t) < Duration::from_secs(30)) {
+                return true;
+            }
+            m.insert(title.to_string(), now);
+            false
+        });
+        if suppressed {
+            return;
+        }
         let n = gtk::gio::Notification::new(title);
         if let Some(b) = body {
             n.set_body(Some(b));

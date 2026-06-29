@@ -22,12 +22,15 @@ set -eu
 REPO="${IPN_BINARIES_REPO:-steeb-k/iroh-private-network}"
 ASSET_RE='https://[^"]+linux-x86_64\.tar\.gz'
 
-PREFIX="/usr/local"
-BIN_DIR="$PREFIX/bin"
-SHARE_DIR="$PREFIX/share"
-APPS_DIR="$SHARE_DIR/applications"
-ICONS_DIR="$SHARE_DIR/icons/hicolor"
-METAINFO_DIR="$SHARE_DIR/metainfo"
+BIN_DIR="/usr/local/bin"
+# Desktop entry + icons go under /usr/share, NOT /usr/local/share: /usr/share is
+# always in XDG_DATA_DIRS, and /usr/share/icons/hicolor already has the theme's
+# index.theme so gtk-update-icon-cache works and the launcher icon resolves.
+# (/usr/local/share/icons/hicolor is a fresh dir with no index.theme and isn't
+# always searched, which left the .desktop icon broken.)
+APPS_DIR="/usr/share/applications"
+ICONS_DIR="/usr/share/icons/hicolor"
+METAINFO_DIR="/usr/share/metainfo"
 UNIT_DIR="/etc/systemd/system"
 AUTOSTART_DIR="/etc/xdg/autostart"
 APP_ID="io.github.steeb_k.IPN"
