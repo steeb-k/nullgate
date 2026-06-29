@@ -1,0 +1,186 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Iroh Private Network (IPN) MSI (WiX v4+ schema; built with WiX 5).
+
+  Installs the self-contained portable bundle (dist\ipn-windows-x86_64: the three
+  exes plus the whole GTK runtime, wintun.dll and the updater script) into
+  "Program Files\IPN", registers + starts the LocalSystem "IPNDaemon" service,
+  registers the "IPNUpdate" scheduled task (daily auto-update), and drops
+  Start-menu + desktop shortcuts to the GUI.
+
+  Build (see scripts\build-msi.ps1) — needs the UI + Util extensions and -arch x64
+  so it installs to Program Files (not Program Files (x86)):
+    wix build -arch x64 wix\ipn.wxs ^
+      -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext ^
+      -d DistDir=dist\ipn-windows-x86_64 -d Version=<ver> -d LicenseRtf=<path> ^
+      -o target\wix\ipn-<ver>-windows-x86_64.msi
+
+  Version is single-sourced from Cargo.toml (passed as $(Version) by build-msi.ps1).
+  The runtime is harvested wholesale with <Files> (no hand-maintained file list).
+  ipn-daemon.exe is its own component so the service can be installed/started/
+  stopped/removed declaratively (ServiceInstall + ServiceControl) — the MSI then
+  waits for the service to stop before removing files on uninstall/upgrade. The
+  registration matches a manual `ipn-daemon.exe install` (crates\ipn-daemon\src\
+  service.rs): LocalSystem, auto-start, "service" launch argument.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package Name="Iroh Private Network"
+           Manufacturer="kznjk"
+           Version="$(Version)"
+           UpgradeCode="65512A8B-5B4B-43F1-A91F-88DF0D109F42"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <SummaryInformation Description="Iroh Private Network — peer-to-peer virtual LAN over iroh" />
+    <!-- AllowSameVersionUpgrades so reinstalling the same version (during iteration,
+         and the silent updater's msiexec /i re-apply) replaces any existing install
+         instead of stacking a second registered product. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon" SourceFile="$(DistDir)\bin\ipn.exe" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+    <!-- WixUI_Minimal: a single Welcome+License page (shows the GPL-3.0 license),
+         then progress + finish. No folder chooser; installs to Program Files. -->
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(LicenseRtf)" />
+
+    <!-- Finish page: a pre-checked "Launch IPN" checkbox that starts the GUI as the
+         logged-in user (Impersonate="yes") on a first-time install. -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Iroh Private Network" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#ipn.exe]" />
+    <CustomAction Id="LaunchApplication" BinaryRef="Wix4UtilCA_X64"
+                  DllEntry="WixShellExec" Impersonate="yes" Return="ignore" />
+    <UI>
+      <!-- DialogRef resolves the dialog symbol from the UI extension so the
+           Publish below links. In WiX v5 the finish dialog is "ExitDialog". -->
+      <DialogRef Id="ExitDialog" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+    </UI>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="IPN">
+        <Directory Id="BinDir" Name="bin" />
+        <Directory Id="ShareDir" Name="share" />
+        <Directory Id="LibDir" Name="lib" />
+      </Directory>
+    </StandardDirectory>
+
+    <!-- bin\ is DLLs (incl. wintun.dll) + three exes + gdbus + the updater script
+         (see scripts\bundle-gtk-windows.ps1). The DLLs are globbed; the exes are
+         listed so the daemon can carry the service. (WiX 5's <Files> has no
+         Exclude, hence the explicit split.) -->
+    <ComponentGroup Id="BinDlls" Directory="BinDir">
+      <Files Include="$(DistDir)\bin\*.dll" />
+    </ComponentGroup>
+    <Component Id="GuiExe" Directory="BinDir" Guid="*">
+      <File Id="ipn.exe" Source="$(DistDir)\bin\ipn.exe" KeyPath="yes" />
+    </Component>
+    <Component Id="CliExe" Directory="BinDir" Guid="*">
+      <File Id="ipn_cli.exe" Source="$(DistDir)\bin\ipn-cli.exe" KeyPath="yes" />
+    </Component>
+    <Component Id="GdbusExe" Directory="BinDir" Guid="*">
+      <File Id="gdbus.exe" Source="$(DistDir)\bin\gdbus.exe" KeyPath="yes" />
+    </Component>
+    <!-- The auto-update engine + its registration helper. Referenced by the
+         scheduled-task custom action below via [#UpdateScript]. -->
+    <Component Id="UpdateScriptComp" Directory="BinDir" Guid="*">
+      <File Id="UpdateScript" Source="$(DistDir)\bin\ipn-update.ps1" KeyPath="yes" />
+    </Component>
+
+    <!-- The GTK runtime (schemas, pixbuf loaders, icon themes). Harvested into
+         explicit share\ and lib\ dirs — a <Files> glob takes the part before the
+         wildcard as its base, so targeting INSTALLFOLDER directly would drop the
+         share\/lib\ level and GTK wouldn't find its resources. -->
+    <ComponentGroup Id="ShareFiles" Directory="ShareDir">
+      <Files Include="$(DistDir)\share\**" />
+    </ComponentGroup>
+    <ComponentGroup Id="LibFiles" Directory="LibDir">
+      <Files Include="$(DistDir)\lib\**" />
+    </ComponentGroup>
+
+    <!-- The daemon + the Windows service (LocalSystem, auto-start). -->
+    <Component Id="DaemonExe" Directory="BinDir" Guid="*">
+      <File Id="ipn_daemon.exe" Source="$(DistDir)\bin\ipn-daemon.exe" KeyPath="yes" />
+      <ServiceInstall Id="IpnSvc"
+                      Name="IPNDaemon"
+                      DisplayName="Iroh Private Network"
+                      Description="Iroh Private Network peer-to-peer virtual LAN daemon"
+                      Type="ownProcess"
+                      Start="auto"
+                      ErrorControl="normal"
+                      Account="LocalSystem"
+                      Arguments="service" />
+      <ServiceControl Id="IpnSvcControl"
+                      Name="IPNDaemon"
+                      Start="install"
+                      Stop="both"
+                      Remove="uninstall"
+                      Wait="yes" />
+    </Component>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="*">
+        <Shortcut Id="GuiStartMenu" Name="Iroh Private Network"
+                  Description="Open the Iroh Private Network app"
+                  Target="[INSTALLFOLDER]bin\ipn.exe" Icon="AppIcon" />
+        <RegistryValue Root="HKCU" Key="Software\IPN" Name="startmenu"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="*">
+        <Shortcut Id="GuiDesktop" Name="Iroh Private Network"
+                  Description="Open the Iroh Private Network app"
+                  Target="[INSTALLFOLDER]bin\ipn.exe" Icon="AppIcon" />
+        <RegistryValue Root="HKCU" Key="Software\IPN" Name="desktop"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="Iroh Private Network" Level="1">
+      <ComponentGroupRef Id="BinDlls" />
+      <ComponentRef Id="GuiExe" />
+      <ComponentRef Id="CliExe" />
+      <ComponentRef Id="GdbusExe" />
+      <ComponentRef Id="UpdateScriptComp" />
+      <ComponentGroupRef Id="ShareFiles" />
+      <ComponentGroupRef Id="LibFiles" />
+      <ComponentRef Id="DaemonExe" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="DesktopShortcut" />
+    </Feature>
+
+    <!-- Daily auto-update Scheduled Task (the Windows analog of the Linux
+         systemd user timer). Registered as SYSTEM via the bundled updater
+         script on install; removed on a real uninstall (NOT a major-upgrade
+         removal, so the task survives version bumps). Deferred + no-impersonate
+         => runs in the elevated install context. Return="ignore" so a task
+         failure never blocks the install/uninstall. -->
+    <CustomAction Id="RegisterUpdateTask" BinaryRef="Wix4UtilCA_X64"
+                  DllEntry="WixQuietExec64" Execute="deferred"
+                  Impersonate="no" Return="ignore" />
+    <SetProperty Id="RegisterUpdateTask" Sequence="execute" Before="RegisterUpdateTask"
+                 Condition="NOT REMOVE"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File &quot;[#UpdateScript]&quot; -RegisterTask" />
+
+    <CustomAction Id="UnregisterUpdateTask" BinaryRef="Wix4UtilCA_X64"
+                  DllEntry="WixQuietExec64" Execute="deferred"
+                  Impersonate="no" Return="ignore" />
+    <SetProperty Id="UnregisterUpdateTask" Sequence="execute" Before="UnregisterUpdateTask"
+                 Condition="REMOVE AND NOT UPGRADINGPRODUCTCODE"
+                 Value="&quot;[System64Folder]schtasks.exe&quot; /Delete /TN &quot;IPNUpdate&quot; /F" />
+
+    <InstallExecuteSequence>
+      <Custom Action="RegisterUpdateTask" After="InstallServices" Condition="NOT REMOVE" />
+      <Custom Action="UnregisterUpdateTask" Before="RemoveFiles" Condition="REMOVE AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

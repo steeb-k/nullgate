@@ -37,6 +37,10 @@ Copy-Item "$root\target\release\ipn.exe" "$dist\bin\"
 Copy-Item "$root\target\release\ipn-daemon.exe" "$dist\bin\"
 Copy-Item "$root\target\release\ipn-cli.exe" "$dist\bin\"
 
+# Auto-update engine (the MSI installs it next to the exes and registers a daily
+# SYSTEM scheduled task that runs it; harmless in the portable zip too).
+Copy-Item "$root\packaging\windows\ipn-update.ps1" "$dist\bin\"
+
 # 2. wintun.dll (cached in vendor\wintun). tun-rs loads it at runtime; without it
 #    the app still runs but routing stays off. Wintun is proprietary (WireGuard
 #    LLC) — we ship its LICENSE.txt alongside the DLL, as its license requires and

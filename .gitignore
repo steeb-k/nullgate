@@ -6,6 +6,15 @@
 # Bundled at package time, not committed
 /vendor/wintun/
 
+# Code-signing metadata (names the Azure signing account/cert profile). Local
+# only — create from docs/windows-packaging.md; never tracked. Auth is via
+# `az login`, so no keys live on disk.
+/artifact-signing-metadata.json
+# Generated during the MSI build from LICENSE.
+/wix/license.rtf
+# Built installers (also covered by /dist, /target).
+*.msi
+
 # Local hands-on test plan (kept untracked; updated as issues are resolved).
 /MANUAL-TESTING.md
 
