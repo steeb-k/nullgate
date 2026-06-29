@@ -688,9 +688,10 @@ fn render_signature(s: &NetworkStatus, pending: &[PendingJoin]) -> String {
         s.home_relay.as_deref().unwrap_or(""),
     );
     for m in &s.members {
-        // Bucket last-seen via `fmt_last_seen` so it changes rarely; include it
-        // always so the dot can flip to red after a week even while offline.
-        let last = fmt_last_seen(m.last_seen);
+        // Only bucket last-seen for OFFLINE members (where it's shown and drives
+        // the red ">1 week" dot). Including it for online members would change
+        // every tick ("Xs ago") and re-render the page, stealing focus.
+        let last = if m.online { String::new() } else { fmt_last_seen(m.last_seen) };
         let _ = write!(
             out,
             "[{}|{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}]",
