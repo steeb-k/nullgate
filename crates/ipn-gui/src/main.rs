@@ -865,16 +865,14 @@ fn member_row(
         }
     }
     subtitle.push_str(&m.virtual_ip.clone().unwrap_or_else(|| "(no IP)".into()));
-    if m.is_self {
-        // (online by definition)
-    } else if m.online {
+    // Online path hint only; "last seen" lives in the member detail flyout, and
+    // the dot color already conveys offline/long-offline at a glance.
+    if !m.is_self && m.online {
         match m.direct {
             Some(true) => subtitle.push_str(" · direct"),
             Some(false) => subtitle.push_str(" · relay"),
             None => {}
         }
-    } else {
-        subtitle.push_str(&format!(" · last seen {}", fmt_last_seen(m.last_seen)));
     }
 
     let row = adw::ActionRow::builder()
