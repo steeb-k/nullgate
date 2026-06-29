@@ -73,8 +73,8 @@ async fn run(
         // produces the same clear error instead of a bare "connection lost".
         let _ = send.finish();
         bail!(
-            "protocol mismatch: peer speaks IPN protocol v{peer_version}, we speak v{version} \
-             — update IPN on one of the devices"
+            "protocol mismatch: peer speaks Nullgate protocol v{peer_version}, we speak v{version} \
+             — update Nullgate on one of the devices"
         );
     }
 

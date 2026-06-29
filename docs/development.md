@@ -1,6 +1,6 @@
 # Development & contributing
 
-How to add a feature to IPN and document it. (Agents: `CLAUDE.md` at the repo root is the
+How to add a feature to Nullgate and document it. (Agents: `CLAUDE.md` at the repo root is the
 authoritative version of this; keep the two in sync.)
 
 ## The shape of a feature
@@ -12,7 +12,7 @@ Most features cross the same layers, in order. Do each step, then move outward:
 2. **Tests.** Unit tests in `ipn-core`. If the feature touches membership, connectivity, or
    revocation, add an **ignored e2e smoke test** in `crates/ipn-core/tests/` proving the real
    property on live nodes (templates: `engine_e2e`, `delete_e2e`, `rotate_e2e`). Set
-   `IPN_DISABLE_TUN=1` in tests.
+   `NULLGATE_DISABLE_TUN=1` in tests.
 3. **IPC (`ipn-ipc`).** Add an `IpcRequest` variant (and `IpcResponse`/`IpcEvent` if needed).
 4. **Daemon (`ipn-daemon`).** Handle the request in `handle_request` / map the event in
    `map_event`.

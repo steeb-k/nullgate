@@ -1,4 +1,4 @@
-//! IPC contract between the unprivileged IPN **GUI** and the privileged
+//! IPC contract between the unprivileged Nullgate **GUI** and the privileged
 //! **ipn-daemon** (which owns the TUN + iroh node). Deliberately light — the GUI
 //! never needs to run the engine or create a TUN itself, so it never needs
 //! elevation; the daemon (a service / setcap binary) does the privileged work.
@@ -27,11 +27,11 @@ pub fn default_socket() -> std::path::PathBuf {
         let base = std::env::var_os("ProgramData")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(r"C:\ProgramData"));
-        base.join("ipn").join("ipn.sock")
+        base.join("nullgate").join("nullgate.sock")
     }
     #[cfg(not(windows))]
     {
-        std::path::PathBuf::from("/tmp/ipn.sock")
+        std::path::PathBuf::from("/tmp/nullgate.sock")
     }
 }
 

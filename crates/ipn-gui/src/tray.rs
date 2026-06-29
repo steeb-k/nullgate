@@ -1,5 +1,5 @@
 //! System tray integration (mirrors seed-sync's approach, simplified to two
-//! actions: **Open IPN** and **Quit IPN**).
+//! actions: **Open Nullgate** and **Quit Nullgate**).
 //!
 //! On Windows/macOS we use the `tray-icon` crate. On Linux that crate's backend
 //! pulls in GTK3 + libappindicator, which clashes with this GTK4 app, so Linux
@@ -7,7 +7,7 @@
 //! bridged back to the GTK main loop over an `async-channel`.
 //!
 //! Closing the window hides it (the icon persists); clicking the tray icon — or
-//! "Open IPN" — re-shows it. "Quit IPN" sends on `quit_tx`; the GTK side then
+//! "Open Nullgate" — re-shows it. "Quit Nullgate" sends on `quit_tx`; the GTK side then
 //! disconnects from the network and exits.
 
 // Tray icon (the only one): a full-color "splash" icon, used as-is on every theme.
@@ -29,8 +29,8 @@ pub fn install(
     #[cfg(windows)]
     set_preferred_app_mode(adw::StyleManager::default().is_dark());
 
-    let open = MenuItem::new("Open IPN", true, None);
-    let quit = MenuItem::new("Quit IPN", true, None);
+    let open = MenuItem::new("Open Nullgate", true, None);
+    let quit = MenuItem::new("Quit Nullgate", true, None);
     let menu = Menu::new();
     let _ = menu.append(&open);
     let _ = menu.append(&quit);
@@ -39,7 +39,7 @@ pub fn install(
 
     let mut builder = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip("iroh-private-network");
+        .with_tooltip("Nullgate");
     if let Some(icon) = load_tray_icon() {
         builder = builder.with_icon(icon);
     }
@@ -161,10 +161,10 @@ mod linux {
 
     impl ksni::Tray for IpnTray {
         fn id(&self) -> String {
-            "io.github.steeb_k.IPN".into()
+            "io.github.steeb_k.Nullgate".into()
         }
         fn title(&self) -> String {
-            "iroh-private-network".into()
+            "Nullgate".into()
         }
         fn category(&self) -> ksni::Category {
             ksni::Category::ApplicationStatus
@@ -182,7 +182,7 @@ mod linux {
             use ksni::menu::StandardItem;
             vec![
                 StandardItem {
-                    label: "Open IPN".into(),
+                    label: "Open Nullgate".into(),
                     activate: Box::new(|t: &mut Self| {
                         let _ = t.tx.try_send(TrayCmd::Open);
                     }),
@@ -190,7 +190,7 @@ mod linux {
                 }
                 .into(),
                 StandardItem {
-                    label: "Quit IPN".into(),
+                    label: "Quit Nullgate".into(),
                     activate: Box::new(|t: &mut Self| {
                         let _ = t.tx.try_send(TrayCmd::Quit);
                     }),

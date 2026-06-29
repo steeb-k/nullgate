@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=Iroh Private Network
+Name=Nullgate
 GenericName=Private VPN
 Comment=Connect your own devices into a private peer-to-peer LAN over iroh
-Exec=ipn
-Icon=io.github.steeb_k.IPN
+Exec=nullgate
+Icon=io.github.steeb_k.Nullgate
 Terminal=false
 Categories=Network;Security;
 Keywords=vpn;p2p;iroh;lan;mesh;

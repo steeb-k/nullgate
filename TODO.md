@@ -21,10 +21,10 @@ packaging: `docs/{windows,linux,macos}-packaging.md`.
   Windows** (Linux/macOS unchanged). *Verify on Windows.* Follow-up: native **WinRT toasts** on
   Windows (needs an AppUserModelID on the MSI's Start-menu shortcut) to bring those notices back.
 - ✅ **"Big issue" — joining gives full LAN access? NO leak.** Code audit + live host scan
-  confirm IPN only routes `10.99.0.0/24` (no route to physical subnets, no IP forwarding/NAT).
+  confirm Nullgate only routes `10.99.0.0/24` (no route to physical subnets, no IP forwarding/NAT).
   The observed "full access" was a test artifact: the test laptop's phone hotspot was bridging
   the phone's own Wi-Fi, putting it back on the home LAN, so RDP reached `192.168.x` over the
-  ordinary LAN — IPN uninvolved. Keep the flat virtual-LAN model. (Verification method now in
+  ordinary LAN — Nullgate uninvolved. Keep the flat virtual-LAN model. (Verification method now in
   MANUAL-TESTING.md: isolate the remote box; connect to `10.99.0.x`, never `192.168.x`.)
 - ⚠️ **Linux .desktop icon shows broken (magenta/black).** The generated PNGs are *valid*
   (verified with `identify`), so it's a theme-lookup/path issue, not a corrupt file. Likely the
@@ -44,7 +44,7 @@ packaging: `docs/{windows,linux,macos}-packaging.md`.
   this is hardening, not a live hole.
 
 ## ★ Recommended next (short list)
-IPN is a **general-purpose ad-hoc VPN** (not RDP-specific). The known-issue hardening list is
+Nullgate is a **general-purpose ad-hoc VPN** (not RDP-specific). The known-issue hardening list is
 done/mitigated and the GUI has had a big SEED-style pass. Likely next:
 - **Self-host relay setting** — point at your own iroh relay (independence/privacy). Kept in
   planning; not urgent while n0's public relays work.
@@ -64,7 +64,7 @@ Captured here since it's not all obvious from a glance — see `CHANGELOG.md [Un
 - **Geolocation** ("City, State, Country") — originator downloads the DB-IP City DB (CC BY 4.0,
   ~60 MB, runtime, bi-weekly refresh), resolves each member's public IP, and propagates signed
   location strings; members need no DB and make no external calls. `geo` module + `geo_e2e`.
-- **GUI redesign (SEED-style)**: static "IPN" titlebar, borrowed `style.css`/`windows.css`,
+- **GUI redesign (SEED-style)**: static "Nullgate" titlebar, borrowed `style.css`/`windows.css`,
   **overlay flyouts** (`adw::OverlaySplitView`) that cover the full window; Members list at the
   bottom (this device included) with a per-member **detail flyout** (info + copy + kick);
   **color-coded status dots** (green/gray/red>1wk, last-seen persisted); **Administration** flyout
@@ -88,7 +88,7 @@ Captured here since it's not all obvious from a glance — see `CHANGELOG.md [Un
   `0600`-file fallback for headless hosts. A per-secret `.in-keystore` marker prevents silently
   regenerating identity when the keystore is briefly unavailable (it errors instead). The
   on-disk `network.cbor` holds only non-secret fields. (Assumes one daemon instance per
-  machine/user; `IPN_SECRETS_FILE_ONLY=1` forces the file backend, used by tests.)
+  machine/user; `NULLGATE_SECRETS_FILE_ONLY=1` forces the file backend, used by tests.)
 - 🟢 **Roster ordering trusts wall-clock timestamps — mitigated, residual accepted.** Done:
   far-future timestamps are dropped (`MAX_FUTURE_SKEW_MS`), and a member can't sign an `Add`
   backdated to before its own admission. The deeper case (a *trusted* member backdating an `Add`
@@ -147,7 +147,7 @@ Captured here since it's not all obvious from a glance — see `CHANGELOG.md [Un
 - Per-member quick actions: copy address (done), nickname (done). (Dropped the RDP/SSH launcher.)
 - Throughput / NAT-type in Diagnostics (needs daemon counters/probe) — still open.
 
-(Done: app icon, system tray, minimize-to-tray, "Quit IPN" disconnects then exits.)
+(Done: app icon, system tray, minimize-to-tray, "Quit Nullgate" disconnects then exits.)
 
 ## Platforms
 - macOS packaging (notarized `.app` or `curl|sh`; daemon as launchd / Network Extension).
@@ -158,11 +158,11 @@ Captured here since it's not all obvious from a glance — see `CHANGELOG.md [Un
   Linux `.deb`/AppImage/Flatpak + a systemd unit, macOS notarized app, Android APK.
 - **Launch on login (autostart), starting minimized to the tray** — register from the installer
   (Windows: Run key / Startup shortcut; Linux: XDG autostart `.desktop`; macOS: LoginItem). The
-  GUI start-hidden flag (`--minimized` / `IPN_START_MINIMIZED`) already exists; just wire the
+  GUI start-hidden flag (`--minimized` / `NULLGATE_START_MINIMIZED`) already exists; just wire the
   autostart entry in the installer.
 - A Windows Start-menu shortcut in the bundle.
 - **Installer should put the daemon binary in a stable location (e.g. Program Files), not run it
-  from the unpacked `dist` folder** — currently the installed service locks `dist\…\ipn-daemon.exe`,
+  from the unpacked `dist` folder** — currently the installed service locks `dist\…\nullgate-daemon.exe`,
   so rebuilding in place fails until the service is stopped. (Local-dev annoyance.)
 - Auto-update mechanism (and a way to view/rotate logs).
 - Log to a file with rotation; a "view logs" affordance in the GUI.
@@ -196,4 +196,4 @@ The original feasibility goals are **implemented**: a private virtual LAN over i
 own devices, reachable by stable private IPs with existing clients, no full-tunnel VPN chokepoint,
 and simple access control (add a device key + a network password, with remove/rotate to block
 anyone who previously had access). Building a full custom RDP client was intentionally **not**
-pursued — IPN provides the network; you use the RDP/SSH/etc. clients you already have.
+pursued — Nullgate provides the network; you use the RDP/SSH/etc. clients you already have.

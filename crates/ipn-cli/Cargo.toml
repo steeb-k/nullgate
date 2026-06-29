@@ -5,10 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Headless CLI client for the IPN daemon (scripting + testing)."
+description = "Headless CLI client for the Nullgate daemon (scripting + testing)."
 
 [[bin]]
-name = "ipn-cli"
+name = "nullgate-cli"
 path = "src/main.rs"
 
 [dependencies]

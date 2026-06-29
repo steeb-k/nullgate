@@ -39,8 +39,8 @@ async fn sees(e: &Engine, node_id: &str) -> bool {
 #[tokio::test]
 #[ignore = "opens real iroh endpoints; run with --ignored"]
 async fn rotating_secret_locks_out_old_ticket_holders() {
-    std::env::set_var("IPN_DISABLE_TUN", "1");
-    std::env::set_var("IPN_SECRETS_FILE_ONLY", "1");
+    std::env::set_var("NULLGATE_DISABLE_TUN", "1");
+    std::env::set_var("NULLGATE_SECRETS_FILE_ONLY", "1");
 
     let a = Engine::start(scratch("a")).await.unwrap();
     let b = Engine::start(scratch("b")).await.unwrap();

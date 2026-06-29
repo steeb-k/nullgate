@@ -1,4 +1,4 @@
-# Build the IPN MSI end to end: release build -> sign exes -> GTK bundle ->
+# Build the Nullgate MSI end to end: release build -> sign exes -> GTK bundle ->
 # wix build -> sign MSI.
 #
 # Prereqs (see docs/windows-packaging.md):
@@ -10,12 +10,12 @@
 #     plus the Trusted Signing client tools + Windows SDK and an authenticated Azure
 #     session (az login). If the metadata is absent the build still succeeds but the
 #     exes/MSI are UNSIGNED — do NOT ship that as a release (SmartScreen will warn).
-#   * The IPNDaemon service must be STOPPED (a running service locks
-#     target\release\ipn-daemon.exe and the release build will fail):
-#       sc.exe stop IPNDaemon
+#   * The NullgateDaemon service must be STOPPED (a running service locks
+#     target\release\nullgate-daemon.exe and the release build will fail):
+#       sc.exe stop NullgateDaemon
 #
 # Usage:  pwsh -File scripts\build-msi.ps1 [-GtkRoot C:\gtk] [-Version <ver>] [-SkipBuild]
-#   -> target\wix\ipn-<version>-windows-x86_64.msi
+#   -> target\wix\nullgate-<version>-windows-x86_64.msi
 #
 # Version defaults to the workspace version in Cargo.toml (single source of truth).
 
@@ -33,7 +33,7 @@ if (-not $Version) {
     if (-not $line) { throw "could not read version from Cargo.toml" }
     $Version = $line.Matches[0].Groups[1].Value
 }
-Write-Host "Building Iroh Private Network MSI $Version" -ForegroundColor Cyan
+Write-Host "Building Nullgate MSI $Version" -ForegroundColor Cyan
 
 $env:PKG_CONFIG_PATH = "$GtkRoot\lib\pkgconfig"
 $env:PATH = "$GtkRoot\bin;$env:USERPROFILE\.dotnet\tools;$env:PATH"
@@ -45,19 +45,19 @@ if ($SkipBuild) {
     Write-Host "[1/6] cargo build --release" -ForegroundColor Cyan
     & cargo build --release -p ipn-gui -p ipn-daemon -p ipn-cli
     if ($LASTEXITCODE -ne 0) {
-        throw "cargo build failed. If it couldn't replace ipn-daemon.exe, stop the service first: sc.exe stop IPNDaemon"
+        throw "cargo build failed. If it couldn't replace nullgate-daemon.exe, stop the service first: sc.exe stop NullgateDaemon"
     }
 }
 
 # Sign our exes in target\release FIRST, so both the MSI and the portable zip the
 # bundle produces carry signed binaries.
 Write-Host "[2/6] signing our exes (Azure Trusted Signing, if configured)" -ForegroundColor Cyan
-$relExes = "ipn.exe", "ipn-daemon.exe", "ipn-cli.exe" | ForEach-Object { Join-Path $root "target\release\$_" }
+$relExes = "nullgate.exe", "nullgate-daemon.exe", "nullgate-cli.exe" | ForEach-Object { Join-Path $root "target\release\$_" }
 & "$root\scripts\sign-artifacts.ps1" -Files $relExes
 
-Write-Host "[3/6] bundling the GTK runtime -> dist\ipn-windows-x86_64" -ForegroundColor Cyan
+Write-Host "[3/6] bundling the GTK runtime -> dist\nullgate-windows-x86_64" -ForegroundColor Cyan
 & "$root\scripts\bundle-gtk-windows.ps1" -GtkRoot $GtkRoot -SkipBuild
-$dist = Join-Path $root "dist\ipn-windows-x86_64"
+$dist = Join-Path $root "dist\nullgate-windows-x86_64"
 
 Write-Host "[4/6] generating the license RTF from LICENSE" -ForegroundColor Cyan
 $licenseRtf = Join-Path $root "wix\license.rtf"
@@ -88,9 +88,9 @@ foreach ($ext in "WixToolset.UI.wixext", "WixToolset.Util.wixext") {
     if ($LASTEXITCODE -ne 0) { throw "wix extension add failed for $ext/$wixVer" }
 }
 
-$out = Join-Path $root "target\wix\ipn-$Version-windows-x86_64.msi"
+$out = Join-Path $root "target\wix\nullgate-$Version-windows-x86_64.msi"
 New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null
-& wix build -arch x64 "$root\wix\ipn.wxs" `
+& wix build -arch x64 "$root\wix\nullgate.wxs" `
     -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext `
     -d DistDir="$dist" -d Version="$Version" -d LicenseRtf="$licenseRtf" `
     -o $out

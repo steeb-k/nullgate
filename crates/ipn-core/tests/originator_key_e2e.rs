@@ -38,8 +38,8 @@ async fn is_originator(e: &Engine) -> bool {
 #[tokio::test]
 #[ignore = "opens real iroh endpoints; run with --ignored"]
 async fn originator_key_backup_and_restore() {
-    std::env::set_var("IPN_DISABLE_TUN", "1");
-    std::env::set_var("IPN_SECRETS_FILE_ONLY", "1");
+    std::env::set_var("NULLGATE_DISABLE_TUN", "1");
+    std::env::set_var("NULLGATE_SECRETS_FILE_ONLY", "1");
 
     let a = Engine::start(scratch("a")).await.unwrap();
     let b = Engine::start(scratch("b")).await.unwrap();

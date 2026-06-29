@@ -1,4 +1,4 @@
-# CLAUDE.md — agent guide for iroh-private-network (IPN)
+# CLAUDE.md — agent guide for iroh-private-network (Nullgate)
 
 Read this before changing anything. It is the authoritative guide for how this repo is built,
 how features are added, and how they must be documented. Keep it accurate — if you change the
@@ -22,7 +22,7 @@ Rust workspace; each crate has one job. A feature usually flows through these la
 | `ipn-ipc` | Wire protocol (`IpcRequest`/`IpcResponse`/`IpcEvent`) + transport (named pipe / unix socket). Depends on `ipn-core` only for display DTOs. | expose a new engine action/event to clients |
 | `ipn-daemon` | Privileged process: owns the engine + TUN, serves IPC. Windows service + foreground modes. | route a new request to the engine |
 | `ipn-cli` | Headless IPC client (testing/scripting). | add a command for the new action |
-| `ipn-gui` | **IPN Portal** — the GTK4 + libadwaita app (binary `ipn`), unprivileged IPC client. The product name in UI/docs is "IPN Portal"; `ipn-gui` stays as the codebase codename. | surface the feature in the UI |
+| `ipn-gui` | **Nullgate** — the GTK4 + libadwaita app (binary `nullgate`), unprivileged IPC client. The product name in UI/docs is "Nullgate"; `ipn-gui` stays as the codebase codename. | surface the feature in the UI |
 
 Key module map in `ipn-core/src`: `engine.rs` (orchestration + public API), `roster.rs`
 (signed membership + role rules), `membership.rs` (roster over iroh-docs), `admission.rs`
@@ -46,7 +46,7 @@ cargo test -p ipn-core --test rotate_e2e -- --ignored
 Packaging + releases: see `docs/releasing.md` (+ `windows-/linux-/macos-packaging.md`). From
 0.1.0 we ship real installers with auto-update: a **code-signed Windows MSI** (`scripts/
 build-msi.ps1`, Azure Trusted Signing), a **Linux** system-service tarball (`scripts/
-package-linux.sh` + `packaging/linux/ipnctl`), and a **macOS** universal `.app` tarball
+package-linux.sh` + `packaging/linux/nullgatectl`), and a **macOS** universal `.app` tarball
 (`scripts/package-macos.sh`, built on a Mac). Releases are `gh release` uploads to the **public**
 `steeb-k/iroh-private-network` repo; the in-product updaters + `install.sh` read its
 `releases/latest`. The signing metadata (`artifact-signing-metadata.json`) is **git-ignored** —
@@ -98,7 +98,7 @@ added.
   cached crate source under `~/.cargo/registry/src/.../iroh-1.0.0` rather than guessing.
 
 ## Gotchas
-- **TUN needs privilege.** Tests and headless runs set `IPN_DISABLE_TUN=1`; the engine honors
+- **TUN needs privilege.** Tests and headless runs set `NULLGATE_DISABLE_TUN=1`; the engine honors
   it and skips creating a real interface. Always set it in automated tests.
 - **GTK on Windows** comes from gvsbuild at `C:\gtk`; `pkg-config` must resolve `gtk4` and
   `libadwaita-1`. On Linux, install the `-dev` packages.

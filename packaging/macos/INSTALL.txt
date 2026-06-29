@@ -1,25 +1,25 @@
-Iroh Private Network (IPN) - macOS
+Nullgate (Nullgate) - macOS
 
 Quick install (downloads the latest release):
     curl -fsSL https://raw.githubusercontent.com/steeb-k/iroh-private-network/main/install.sh | sh
 
 Or from this unpacked tarball:
-    ./ipnctl --install        # uses sudo; installs the daemon as a root LaunchDaemon
+    ./nullgatectl --install        # uses sudo; installs the daemon as a root LaunchDaemon
 
 What it installs:
-    /Applications/Iroh Private Network.app   (self-contained; bundled GTK)
-    /usr/local/bin/{ipn, ipn-daemon, ipn-cli, ipnctl}   (symlinks + the manager)
-    a root LaunchDaemon  io.github.steeb_k.IPN.daemon    (owns the utun interface)
-    a root LaunchDaemon  io.github.steeb_k.IPN.update    (daily auto-update)
-    a per-user LaunchAgent io.github.steeb_k.IPN.gui     (tray GUI at login)
+    /Applications/Nullgate.app   (self-contained; bundled GTK)
+    /usr/local/bin/{nullgate, nullgate-daemon, nullgate-cli, nullgatectl}   (symlinks + the manager)
+    a root LaunchDaemon  io.github.steeb_k.Nullgate.daemon    (owns the utun interface)
+    a root LaunchDaemon  io.github.steeb_k.Nullgate.update    (daily auto-update)
+    a per-user LaunchAgent io.github.steeb_k.Nullgate.gui     (tray GUI at login)
 
 The daemon runs as root (it brings up the 10.99.0.0/24 virtual interface); the GUI
-runs as your user and talks to it over /tmp/ipn.sock.
+runs as your user and talks to it over /tmp/nullgate.sock.
 
 Manage it:
-    ipnctl --status
-    ipnctl --update         # also runs daily on its own
-    ipnctl --uninstall      # add --purge to also remove local data
+    nullgatectl --status
+    nullgatectl --update         # also runs daily on its own
+    nullgatectl --uninstall      # add --purge to also remove local data
 
 Note: the app is ad-hoc signed (not notarized). Installing via the curl|sh command
 or this tarball does not set the quarantine flag, so Gatekeeper won't block it.

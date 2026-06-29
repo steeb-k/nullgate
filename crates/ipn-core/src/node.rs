@@ -1,5 +1,5 @@
 //! The shared iroh node: one endpoint + blob store + gossip + docs, all behind a
-//! single [`Router`]. This is the connectivity + replication substrate the IPN
+//! single [`Router`]. This is the connectivity + replication substrate the Nullgate
 //! engine builds on:
 //!   - the **endpoint** is the authenticated P2P transport (the mesh links),
 //!   - **gossip** carries live presence (hostname / observed IP / last-seen),
@@ -21,7 +21,7 @@ use iroh_blobs::{store::fs::FsStore, BlobsProtocol};
 use iroh_docs::{api::DocsApi, protocol::Docs};
 use iroh_gossip::net::Gossip;
 
-/// A running iroh node with the protocols IPN needs.
+/// A running iroh node with the protocols Nullgate needs.
 pub struct IrohNode {
     pub endpoint: Endpoint,
     pub blobs: FsStore,
@@ -41,7 +41,7 @@ impl IrohNode {
     }
 
     /// Like [`spawn`](Self::spawn) but lets the caller register additional
-    /// protocol handlers (custom ALPNs, e.g. the IPN mesh/join protocols) on the
+    /// protocol handlers (custom ALPNs, e.g. the Nullgate mesh/join protocols) on the
     /// router before it starts its accept loop.
     pub async fn spawn_with<F>(data_dir: &Path, add_protocols: F) -> anyhow::Result<Self>
     where

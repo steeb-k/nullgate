@@ -1,7 +1,7 @@
 # Assemble a self-contained Windows distribution of iroh-private-network.
 #
 # Mirrors seed-sync-gtk's bundling: copies the GTK4/libadwaita runtime (DLLs,
-# compiled GSettings schemas, gdk-pixbuf loaders, icon theme) next to ipn.exe so
+# compiled GSettings schemas, gdk-pixbuf loaders, icon theme) next to nullgate.exe so
 # the app runs on a machine with no GTK install. Also fetches wintun.dll, which
 # tun-rs loads at runtime to bring up the virtual interface (routing).
 #
@@ -17,7 +17,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
-$name = "ipn-windows-x86_64"
+$name = "nullgate-windows-x86_64"
 $dist = Join-Path $root "dist\$name"
 $gbin = Join-Path $GtkRoot "bin"
 $wintunVer = "0.14.1"
@@ -33,13 +33,13 @@ if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
 New-Item -ItemType Directory -Force -Path "$dist\bin" | Out-Null
 
 # 1. Our binaries: GUI (unprivileged), daemon (the service), CLI.
-Copy-Item "$root\target\release\ipn.exe" "$dist\bin\"
-Copy-Item "$root\target\release\ipn-daemon.exe" "$dist\bin\"
-Copy-Item "$root\target\release\ipn-cli.exe" "$dist\bin\"
+Copy-Item "$root\target\release\nullgate.exe" "$dist\bin\"
+Copy-Item "$root\target\release\nullgate-daemon.exe" "$dist\bin\"
+Copy-Item "$root\target\release\nullgate-cli.exe" "$dist\bin\"
 
 # Auto-update engine (the MSI installs it next to the exes and registers a daily
 # SYSTEM scheduled task that runs it; harmless in the portable zip too).
-Copy-Item "$root\packaging\windows\ipn-update.ps1" "$dist\bin\"
+Copy-Item "$root\packaging\windows\nullgate-update.ps1" "$dist\bin\"
 
 # 2. wintun.dll (cached in vendor\wintun). tun-rs loads it at runtime; without it
 #    the app still runs but routing stays off. Wintun is proprietary (WireGuard
@@ -100,11 +100,11 @@ if (Test-Path "$gbin\gtk-update-icon-cache.exe") {
 #    GUI normally — no per-launch elevation.
 $install = @'
 @echo off
-REM Install + start the IPN daemon as a Windows service (one-time, elevated).
+REM Install + start the Nullgate daemon as a Windows service (one-time, elevated).
 set HERE=%~dp0
-powershell -Command "Start-Process -FilePath '%HERE%bin\ipn-daemon.exe' -ArgumentList 'install' -Verb RunAs"
-echo If you approved the UAC prompt, the IPN service is now running.
-echo Now launch IPN.bat (no elevation needed).
+powershell -Command "Start-Process -FilePath '%HERE%bin\nullgate-daemon.exe' -ArgumentList 'install' -Verb RunAs"
+echo If you approved the UAC prompt, the Nullgate service is now running.
+echo Now launch Nullgate.bat (no elevation needed).
 pause
 '@
 Set-Content -Path "$dist\1. Install service (admin).bat" -Value $install -Encoding ASCII
@@ -112,7 +112,7 @@ Set-Content -Path "$dist\1. Install service (admin).bat" -Value $install -Encodi
 $uninstall = @'
 @echo off
 set HERE=%~dp0
-powershell -Command "Start-Process -FilePath '%HERE%bin\ipn-daemon.exe' -ArgumentList 'uninstall' -Verb RunAs"
+powershell -Command "Start-Process -FilePath '%HERE%bin\nullgate-daemon.exe' -ArgumentList 'uninstall' -Verb RunAs"
 pause
 '@
 Set-Content -Path "$dist\Uninstall service (admin).bat" -Value $uninstall -Encoding ASCII
@@ -120,13 +120,13 @@ Set-Content -Path "$dist\Uninstall service (admin).bat" -Value $uninstall -Encod
 $gui = @'
 @echo off
 set HERE=%~dp0
-start "" "%HERE%bin\ipn.exe"
+start "" "%HERE%bin\nullgate.exe"
 '@
-Set-Content -Path "$dist\2. IPN.bat" -Value $gui -Encoding ASCII
+Set-Content -Path "$dist\2. Nullgate.bat" -Value $gui -Encoding ASCII
 
 # 8. Zip it.
 $zipOut = Join-Path $root "dist\$name.zip"
 if (Test-Path $zipOut) { Remove-Item -Force $zipOut }
 Compress-Archive -Path "$dist\*" -DestinationPath $zipOut
 Write-Host "Done: $zipOut"
-Write-Host "Run bin\ipn.exe (or the .bat to elevate for routing)."
+Write-Host "Run bin\nullgate.exe (or the .bat to elevate for routing)."

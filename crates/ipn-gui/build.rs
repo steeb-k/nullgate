@@ -1,5 +1,5 @@
 //! On Windows, embed the app icon (img/icon-stacked.ico) into the GUI executable so
-//! the taskbar/window/Explorer icon is IPN's. No-op on other platforms.
+//! the taskbar/window/Explorer icon is Nullgate's. No-op on other platforms.
 
 fn main() {
     #[cfg(windows)]

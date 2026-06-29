@@ -1,23 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Info.plist for "Iroh Private Network.app". __VERSION__ is rewritten from the
+<!-- Info.plist for "Nullgate.app". __VERSION__ is rewritten from the
      Cargo version by scripts/package-macos.sh. The real GTK binary lives at
-     Contents/MacOS/ipn (CFBundleExecutable), so the Dock/Applications icon comes
+     Contents/MacOS/nullgate (CFBundleExecutable), so the Dock/Applications icon comes
      from Resources/AppIcon.icns. -->
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key>
-  <string>Iroh Private Network</string>
+  <string>Nullgate</string>
   <key>CFBundleDisplayName</key>
-  <string>Iroh Private Network</string>
+  <string>Nullgate</string>
   <key>CFBundleIdentifier</key>
-  <string>io.github.steeb_k.IPN</string>
+  <string>io.github.steeb_k.Nullgate</string>
   <key>CFBundleVersion</key>
   <string>__VERSION__</string>
   <key>CFBundleShortVersionString</key>
   <string>__VERSION__</string>
   <key>CFBundleExecutable</key>
-  <string>ipn</string>
+  <string>nullgate</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundlePackageType</key>

@@ -1,39 +1,39 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Iroh Private Network (IPN) MSI (WiX v4+ schema; built with WiX 5).
+  Nullgate (Nullgate) MSI (WiX v4+ schema; built with WiX 5).
 
-  Installs the self-contained portable bundle (dist\ipn-windows-x86_64: the three
+  Installs the self-contained portable bundle (dist\nullgate-windows-x86_64: the three
   exes plus the whole GTK runtime, wintun.dll and the updater script) into
-  "Program Files\IPN", registers + starts the LocalSystem "IPNDaemon" service,
-  registers the "IPNUpdate" scheduled task (daily auto-update), and drops
+  "Program Files\Nullgate", registers + starts the LocalSystem "NullgateDaemon" service,
+  registers the "NullgateUpdate" scheduled task (daily auto-update), and drops
   Start-menu + desktop shortcuts to the GUI.
 
   Build (see scripts\build-msi.ps1) — needs the UI + Util extensions and -arch x64
   so it installs to Program Files (not Program Files (x86)):
-    wix build -arch x64 wix\ipn.wxs ^
+    wix build -arch x64 wix\nullgate.wxs ^
       -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext ^
-      -d DistDir=dist\ipn-windows-x86_64 -d Version=<ver> -d LicenseRtf=<path> ^
-      -o target\wix\ipn-<ver>-windows-x86_64.msi
+      -d DistDir=dist\nullgate-windows-x86_64 -d Version=<ver> -d LicenseRtf=<path> ^
+      -o target\wix\nullgate-<ver>-windows-x86_64.msi
 
   Version is single-sourced from Cargo.toml (passed as $(Version) by build-msi.ps1).
   The runtime is harvested wholesale with <Files> (no hand-maintained file list).
-  ipn-daemon.exe is its own component so the service can be installed/started/
+  nullgate-daemon.exe is its own component so the service can be installed/started/
   stopped/removed declaratively (ServiceInstall + ServiceControl) — the MSI then
   waits for the service to stop before removing files on uninstall/upgrade. The
-  registration matches a manual `ipn-daemon.exe install` (crates\ipn-daemon\src\
+  registration matches a manual `nullgate-daemon.exe install` (crates\nullgate-daemon\src\
   service.rs): LocalSystem, auto-start, "service" launch argument.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
-  <Package Name="Iroh Private Network"
+  <Package Name="Nullgate"
            Manufacturer="kznjk"
            Version="$(Version)"
            UpgradeCode="65512A8B-5B4B-43F1-A91F-88DF0D109F42"
            Scope="perMachine"
            Compressed="yes">
 
-    <SummaryInformation Description="Iroh Private Network — peer-to-peer virtual LAN over iroh" />
+    <SummaryInformation Description="Nullgate — peer-to-peer virtual LAN over iroh" />
     <!-- AllowSameVersionUpgrades so reinstalling the same version (during iteration,
          and the silent updater's msiexec /i re-apply) replaces any existing install
          instead of stacking a second registered product. -->
@@ -41,7 +41,7 @@
                   DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
-    <Icon Id="AppIcon" SourceFile="$(DistDir)\bin\ipn.exe" />
+    <Icon Id="AppIcon" SourceFile="$(DistDir)\bin\nullgate.exe" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
 
     <!-- WixUI_Minimal: a single Welcome+License page (shows the GPL-3.0 license),
@@ -49,11 +49,11 @@
     <ui:WixUI Id="WixUI_Minimal" />
     <WixVariable Id="WixUILicenseRtf" Value="$(LicenseRtf)" />
 
-    <!-- Finish page: a pre-checked "Launch IPN" checkbox that starts the GUI as the
+    <!-- Finish page: a pre-checked "Launch Nullgate" checkbox that starts the GUI as the
          logged-in user (Impersonate="yes") on a first-time install. -->
-    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Iroh Private Network" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Nullgate" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
-    <Property Id="WixShellExecTarget" Value="[#ipn.exe]" />
+    <Property Id="WixShellExecTarget" Value="[#nullgate.exe]" />
     <CustomAction Id="LaunchApplication" BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixShellExec" Impersonate="yes" Return="ignore" />
     <UI>
@@ -65,7 +65,7 @@
     </UI>
 
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="IPN">
+      <Directory Id="INSTALLFOLDER" Name="Nullgate">
         <Directory Id="BinDir" Name="bin" />
         <Directory Id="ShareDir" Name="share" />
         <Directory Id="LibDir" Name="lib" />
@@ -80,10 +80,10 @@
       <Files Include="$(DistDir)\bin\*.dll" />
     </ComponentGroup>
     <Component Id="GuiExe" Directory="BinDir" Guid="*">
-      <File Id="ipn.exe" Source="$(DistDir)\bin\ipn.exe" KeyPath="yes" />
+      <File Id="nullgate.exe" Source="$(DistDir)\bin\nullgate.exe" KeyPath="yes" />
     </Component>
     <Component Id="CliExe" Directory="BinDir" Guid="*">
-      <File Id="ipn_cli.exe" Source="$(DistDir)\bin\ipn-cli.exe" KeyPath="yes" />
+      <File Id="ipn_cli.exe" Source="$(DistDir)\bin\nullgate-cli.exe" KeyPath="yes" />
     </Component>
     <Component Id="GdbusExe" Directory="BinDir" Guid="*">
       <File Id="gdbus.exe" Source="$(DistDir)\bin\gdbus.exe" KeyPath="yes" />
@@ -91,7 +91,7 @@
     <!-- The auto-update engine + its registration helper. Referenced by the
          scheduled-task custom action below via [#UpdateScript]. -->
     <Component Id="UpdateScriptComp" Directory="BinDir" Guid="*">
-      <File Id="UpdateScript" Source="$(DistDir)\bin\ipn-update.ps1" KeyPath="yes" />
+      <File Id="UpdateScript" Source="$(DistDir)\bin\nullgate-update.ps1" KeyPath="yes" />
     </Component>
 
     <!-- The GTK runtime (schemas, pixbuf loaders, icon themes). Harvested into
@@ -107,18 +107,18 @@
 
     <!-- The daemon + the Windows service (LocalSystem, auto-start). -->
     <Component Id="DaemonExe" Directory="BinDir" Guid="*">
-      <File Id="ipn_daemon.exe" Source="$(DistDir)\bin\ipn-daemon.exe" KeyPath="yes" />
+      <File Id="ipn_daemon.exe" Source="$(DistDir)\bin\nullgate-daemon.exe" KeyPath="yes" />
       <ServiceInstall Id="IpnSvc"
-                      Name="IPNDaemon"
-                      DisplayName="Iroh Private Network"
-                      Description="Iroh Private Network peer-to-peer virtual LAN daemon"
+                      Name="NullgateDaemon"
+                      DisplayName="Nullgate"
+                      Description="Nullgate peer-to-peer virtual LAN daemon"
                       Type="ownProcess"
                       Start="auto"
                       ErrorControl="normal"
                       Account="LocalSystem"
                       Arguments="service" />
       <ServiceControl Id="IpnSvcControl"
-                      Name="IPNDaemon"
+                      Name="NullgateDaemon"
                       Start="install"
                       Stop="both"
                       Remove="uninstall"
@@ -127,20 +127,20 @@
 
     <StandardDirectory Id="ProgramMenuFolder">
       <Component Id="StartMenuShortcut" Guid="*">
-        <Shortcut Id="GuiStartMenu" Name="Iroh Private Network"
-                  Description="Open the Iroh Private Network app"
-                  Target="[INSTALLFOLDER]bin\ipn.exe" Icon="AppIcon" />
-        <RegistryValue Root="HKCU" Key="Software\IPN" Name="startmenu"
+        <Shortcut Id="GuiStartMenu" Name="Nullgate"
+                  Description="Open the Nullgate app"
+                  Target="[INSTALLFOLDER]bin\nullgate.exe" Icon="AppIcon" />
+        <RegistryValue Root="HKCU" Key="Software\Nullgate" Name="startmenu"
                        Type="integer" Value="1" KeyPath="yes" />
       </Component>
     </StandardDirectory>
 
     <StandardDirectory Id="DesktopFolder">
       <Component Id="DesktopShortcut" Guid="*">
-        <Shortcut Id="GuiDesktop" Name="Iroh Private Network"
-                  Description="Open the Iroh Private Network app"
-                  Target="[INSTALLFOLDER]bin\ipn.exe" Icon="AppIcon" />
-        <RegistryValue Root="HKCU" Key="Software\IPN" Name="desktop"
+        <Shortcut Id="GuiDesktop" Name="Nullgate"
+                  Description="Open the Nullgate app"
+                  Target="[INSTALLFOLDER]bin\nullgate.exe" Icon="AppIcon" />
+        <RegistryValue Root="HKCU" Key="Software\Nullgate" Name="desktop"
                        Type="integer" Value="1" KeyPath="yes" />
       </Component>
     </StandardDirectory>
@@ -151,13 +151,13 @@
     <Component Id="AutostartRun" Directory="BinDir" Guid="*">
       <RegistryValue Root="HKLM"
                      Key="Software\Microsoft\Windows\CurrentVersion\Run"
-                     Name="IPN"
+                     Name="Nullgate"
                      Type="string"
-                     Value="&quot;[INSTALLFOLDER]bin\ipn.exe&quot; --minimized"
+                     Value="&quot;[INSTALLFOLDER]bin\nullgate.exe&quot; --minimized"
                      KeyPath="yes" />
     </Component>
 
-    <Feature Id="Main" Title="Iroh Private Network" Level="1">
+    <Feature Id="Main" Title="Nullgate" Level="1">
       <ComponentGroupRef Id="BinDlls" />
       <ComponentRef Id="GuiExe" />
       <ComponentRef Id="CliExe" />
@@ -189,7 +189,7 @@
                   Impersonate="no" Return="ignore" />
     <SetProperty Id="UnregisterUpdateTask" Sequence="execute" Before="UnregisterUpdateTask"
                  Condition="REMOVE AND NOT UPGRADINGPRODUCTCODE"
-                 Value="&quot;[System64Folder]schtasks.exe&quot; /Delete /TN &quot;IPNUpdate&quot; /F" />
+                 Value="&quot;[System64Folder]schtasks.exe&quot; /Delete /TN &quot;NullgateUpdate&quot; /F" />
 
     <InstallExecuteSequence>
       <Custom Action="RegisterUpdateTask" After="InstallServices" Condition="NOT REMOVE" />

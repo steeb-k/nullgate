@@ -1,10 +1,18 @@
 # Changelog
 
-All notable changes to IPN. Format follows [Keep a Changelog](https://keepachangelog.com).
+All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepachangelog.com).
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
-## [Unreleased]
+## [0.1.3]
 ### Changed
+- **Rebranded to "Nullgate".** The application is now **Nullgate** everywhere it's visible — the
+  window/About/tray/notifications, the Windows service (**NullgateDaemon**) and scheduled task
+  (**NullgateUpdate**), the **process names** (`nullgate`, `nullgate-daemon`, `nullgate-cli`), the
+  Linux/macOS manager (**`nullgatectl`**), the app-id (`io.github.steeb_k.Nullgate`), install
+  paths (`Program Files\Nullgate`), the data dir / IPC socket, and the `NULLGATE_*` env vars.
+  **Fresh start:** the new identity/paths mean existing local networks are not carried over —
+  remove the old install first (Windows: uninstall the old MSI; Linux: old `--uninstall`) and
+  re-create your network. The repo stays `iroh-private-network`; crate names stay `ipn-*`.
 - **New app icon ("stacked").** The window/taskbar/launcher icon now uses hand-tuned per-size
   art (16–512px) across all platforms: a multi-size Windows `.ico`, per-size Linux hicolor PNGs,
   and a per-size macOS `.icns`. (The tray icon is unchanged.)
@@ -13,14 +21,14 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 ### Fixed
 - **Duplicate desktop notifications are throttled** to once per 30s per message — fixes the burst
   of repeated "came online" toasts when a peer flaps offline/online during an update.
-- **Linux launcher icon now shows.** `ipnctl` installs the `.desktop` + hicolor icons under
+- **Linux launcher icon now shows.** `nullgatectl` installs the `.desktop` + hicolor icons under
   `/usr/share` (which is always in `XDG_DATA_DIRS` and has the theme's `index.theme`) instead of
   `/usr/local/share`, so the icon resolves and `gtk-update-icon-cache` works.
 
 ## [0.1.2]
 ### Changed
-- **Branding: the desktop app is "IPN Portal".** The main window header now reads **Iroh Private
-  Network** with **IPN Portal <version>** beneath it. "IPN Portal" is the product name for the GUI
+- **Branding: the desktop app is "Nullgate".** The main window header now reads **Iroh Private
+  Network** with **Nullgate <version>** beneath it. "Nullgate" is the product name for the GUI
   in the UI and docs; `ipn-gui` stays as the codebase codename.
 
 ### Added
@@ -38,11 +46,11 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 ### Added
 - **Launch on login, minimized to the tray.** Installs an auto-start entry so the GUI comes up
   hidden in the tray at each login — Windows (per-machine Run key in the MSI), Linux (XDG
-  autostart, already added by `ipnctl`), macOS (login LaunchAgent). The daemon already auto-starts,
+  autostart, already added by `nullgatectl`), macOS (login LaunchAgent). The daemon already auto-starts,
   so a reboot brings the tray up with the network live; click the tray icon to open the window.
 
 ### Fixed
-- **Linux/macOS updater aborted with exit 23.** `ipnctl --update` used `set -o pipefail` with
+- **Linux/macOS updater aborted with exit 23.** `nullgatectl --update` used `set -o pipefail` with
   `curl | grep -m1 …` extraction pipelines; the early-closing consumer made curl exit with EPIPE
   (code 23), which `pipefail` propagated and `set -e` turned into an abort — even though the value
   was read fine. Dropped `pipefail` (results are guarded; critical ops use `|| die`).
@@ -57,7 +65,7 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [0.1.0]
 ### Changed
-- **About dialog cleaned up.** Shows the app icon and the name "Iroh Private Network", developer
+- **About dialog cleaned up.** Shows the app icon and the name "Nullgate", developer
   "kznjk", and **Website** + **Report an Issue** links (to the GitHub repo / issues); the
   "Details" page is gone. The About row no longer shows a "›" chevron (it opens a dialog, not a
   flyout). The bundled `icon-spin` is registered into the icon theme at startup so it appears in
@@ -76,7 +84,7 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   > 1 week)**. Last-seen is persisted so the red state survives daemon restarts.
 - **New app icon** (`img/icon-spin.*`): embedded in the Windows `.exe` and installed as the Linux
   hicolor icon. The tray icon is unchanged. (Takes effect on the next build.)
-- **GUI redesigned (SEED-style).** A static "IPN / Iroh Private Network" titlebar; a stylesheet
+- **GUI redesigned (SEED-style).** A static "Nullgate / Nullgate" titlebar; a stylesheet
   borrowed from seed-sync-gtk (frameless header that merges into the window background, with a
   Windows-11 layer — Segoe UI, accent, rounded controls, native-style window buttons). Sub-menus
   are **overlay flyouts** (`adw::OverlaySplitView`, kept collapsed) that slide in over the **full
@@ -142,8 +150,8 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ### Added
 - **Real installers with auto-update (0.1.0).** Windows: a **code-signed MSI** (`scripts/
-  build-msi.ps1`, WiX + Azure Trusted Signing) that installs to `Program Files\IPN`, registers
-  the `IPNDaemon` service + a daily `IPNUpdate` scheduled task, and adds shortcuts. Linux/macOS:
+  build-msi.ps1`, WiX + Azure Trusted Signing) that installs to `Program Files\Nullgate`, registers
+  the `NullgateDaemon` service + a daily `NullgateUpdate` scheduled task, and adds shortcuts. Linux/macOS:
   a one-line installer (`curl … | sh`) — Linux installs a root systemd service + daily update
   timer; macOS installs an `/Applications` app + root LaunchDaemon + updater. The daemon's
   privilege (TUN/utun) is handled per-OS. All three keep themselves updated from the public repo.
@@ -161,12 +169,12 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   CLI `ipn-cli rename <name>`; the GUI exposes it inline (pencil).
 - **Header shows the network + state.** The title bar now displays the current network name and a
   "N device(s) · connected/disconnected" subtitle (or the offline/mismatch state).
-- **Ctrl+Q** quits IPN (disconnect + exit), same as the tray's "Quit IPN".
+- **Ctrl+Q** quits Nullgate (disconnect + exit), same as the tray's "Quit Nullgate".
 - **Friendlier first-run.** The empty screen now has **Create / Join buttons** right on it (no
   hunting for the + menu), and a **"Connecting…"** placeholder shows until the first status
   arrives.
-- **`--version`** on `ipn`, `ipn-cli`, and `ipn-daemon`; **`--minimized`** (or
-  `IPN_START_MINIMIZED`) launches the GUI straight to the tray, for launch-on-login.
+- **`--version`** on `nullgate`, `ipn-cli`, and `ipn-daemon`; **`--minimized`** (or
+  `NULLGATE_START_MINIMIZED`) launches the GUI straight to the tray, for launch-on-login.
 - **Diagnostics view.** A collapsible "Diagnostics" section on the main screen shows this device's
   home relay, a direct-vs-relay connection summary, and TUN routing state. `NetworkStatus` gained
   `home_relay`.
@@ -188,8 +196,8 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   warning; CLI `export-key`). Another member of the same network can import it ("Restore
   originator access…" / CLI `import-key`) to regain admin powers after device loss — a code for a
   different network is rejected. New `originator_key_e2e` smoke test.
-- **System tray** (Open IPN / Quit IPN) with minimize-to-tray: closing the window hides it to
-  the tray (keeps the connection) and notifies once; "Quit IPN" disconnects from the network
+- **System tray** (Open Nullgate / Quit Nullgate) with minimize-to-tray: closing the window hides it to
+  the tray (keeps the connection) and notifies once; "Quit Nullgate" disconnects from the network
   locally, then exits. tray-icon on Windows/macOS, ksni on Linux; uses `img/trayicon.png`.
 - **Connect / Disconnect** (engine `set_online`) so quitting takes the device offline while
   keeping the saved network; reopening the app reconnects. Wired through IPC/daemon/CLI;

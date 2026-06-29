@@ -1,5 +1,5 @@
 [Unit]
-Description=Iroh Private Network daemon
+Description=Nullgate daemon
 Documentation=https://github.com/steeb-k/iroh-private-network
 After=network-online.target
 Wants=network-online.target
@@ -8,7 +8,7 @@ Wants=network-online.target
 Type=simple
 # Runs as root so it can create the TUN interface. AmbientCapabilities is
 # belt-and-suspenders (and lets you switch to a non-root User= later).
-ExecStart=/usr/local/bin/ipn-daemon run
+ExecStart=/usr/local/bin/nullgate-daemon run
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 Restart=on-failure
 RestartSec=2

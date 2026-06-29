@@ -1,4 +1,4 @@
-//! The IPN daemon: runs the engine (iroh node + roster + mesh + presence + TUN)
+//! The Nullgate daemon: runs the engine (iroh node + roster + mesh + presence + TUN)
 //! and serves the unprivileged GUI over a local IPC socket. This is the only
 //! component that needs privilege (to create the TUN); the GUI never does.
 //!
@@ -23,7 +23,7 @@ use tokio::io::AsyncWriteExt;
 mod service;
 
 #[derive(Parser)]
-#[command(name = "ipn-daemon", about = "Privileged IPN daemon (owns TUN + iroh node)", version)]
+#[command(name = "nullgate-daemon", about = "Privileged Nullgate daemon (owns TUN + iroh node)", version)]
 struct Cli {
     /// Override the data directory (node key, network config, docs).
     #[arg(long)]
@@ -58,12 +58,12 @@ enum Cmd {
 }
 
 pub(crate) fn default_data_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("IPN_DATA_DIR") {
+    if let Some(d) = std::env::var_os("NULLGATE_DATA_DIR") {
         return PathBuf::from(d);
     }
-    directories::ProjectDirs::from("io.github", "steeb_k", "ipn")
+    directories::ProjectDirs::from("io.github", "steeb_k", "Nullgate")
         .map(|d| d.data_dir().to_path_buf())
-        .unwrap_or_else(|| std::env::temp_dir().join("ipn"))
+        .unwrap_or_else(|| std::env::temp_dir().join("nullgate"))
 }
 
 fn data_dir(cli: &Cli) -> PathBuf {

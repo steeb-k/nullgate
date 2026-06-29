@@ -1,4 +1,4 @@
-iroh-private-network (IPN)
+iroh-private-network (Nullgate)
 Copyright (C) 2026 steeb-k and contributors
 
 This program is free software: you can redistribute it and/or modify it under
@@ -13,13 +13,13 @@ more details.
 ADDITIONAL PERMISSION under GNU GPL version 3 section 7 (the "Wintun exception")
 -------------------------------------------------------------------------------
 
-As an additional permission, the copyright holders of IPN give you permission to
-combine IPN with the "Wintun" prebuilt binary ("wintun.dll") distributed by
+As an additional permission, the copyright holders of Nullgate give you permission to
+combine Nullgate with the "Wintun" prebuilt binary ("wintun.dll") distributed by
 WireGuard LLC under the Wintun "Prebuilt Binaries License", and to convey the
 resulting work, provided that wintun.dll is used solely through its Permitted API
 (the "wintun.h" interface), is not modified, and is distributed together with its
 own unmodified license. You may extend this permission to a modified version of
-IPN, but you are not obligated to do so. If you do not wish to do so, delete this
+Nullgate, but you are not obligated to do so. If you do not wish to do so, delete this
 permission statement from your version.
 
 The Wintun binary is NOT covered by the GNU GPL; it is licensed separately by

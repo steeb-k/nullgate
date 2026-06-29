@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- IPN auto-update LaunchDaemon (SYSTEM/root). Installed to /Library/LaunchDaemons.
+<!-- Nullgate auto-update LaunchDaemon (SYSTEM/root). Installed to /Library/LaunchDaemons.
      Runs as root because applying an update replaces the .app and restarts the
      daemon. RunAtLoad checks shortly after boot; StartCalendarInterval re-checks
-     daily. `ipnctl --update` no-ops fast when already current. -->
+     daily. `nullgatectl --update` no-ops fast when already current. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>io.github.steeb_k.IPN.update</string>
+  <string>io.github.steeb_k.Nullgate.update</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/ipnctl</string>
+    <string>/usr/local/bin/nullgatectl</string>
     <string>--update</string>
   </array>
   <key>RunAtLoad</key>
@@ -25,8 +25,8 @@
   <key>ProcessType</key>
   <string>Background</string>
   <key>StandardOutPath</key>
-  <string>/Library/Logs/IPN/ipn-update.log</string>
+  <string>/Library/Logs/Nullgate/nullgate-update.log</string>
   <key>StandardErrorPath</key>
-  <string>/Library/Logs/IPN/ipn-update.log</string>
+  <string>/Library/Logs/Nullgate/nullgate-update.log</string>
 </dict>
 </plist>

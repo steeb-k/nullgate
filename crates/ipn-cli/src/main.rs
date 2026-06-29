@@ -8,7 +8,7 @@ use ipn_ipc::transport::oneshot_request;
 use ipn_ipc::{IpcRequest, IpcResponse};
 
 #[derive(Parser)]
-#[command(name = "ipn-cli", about = "Control the IPN daemon", version)]
+#[command(name = "nullgate-cli", about = "Control the Nullgate daemon", version)]
 struct Cli {
     #[arg(long)]
     socket: Option<PathBuf>,

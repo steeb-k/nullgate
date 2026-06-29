@@ -4,15 +4,15 @@ How the Windows installer is built, signed, and how it auto-updates. All builds 
 **local** (no CI). Run from an elevated-capable shell on Windows.
 
 ## What ships
-A single **code-signed MSI**, `ipn-<version>-windows-x86_64.msi`, that:
+A single **code-signed MSI**, `nullgate-<version>-windows-x86_64.msi`, that:
 - installs the self-contained app (the three exes + the full GTK runtime + `wintun.dll`)
-  into `C:\Program Files\IPN`,
-- registers and starts the **LocalSystem `IPNDaemon`** service (the daemon owns the TUN),
-- registers the **`IPNUpdate`** daily scheduled task (auto-update, runs as SYSTEM),
+  into `C:\Program Files\Nullgate`,
+- registers and starts the **LocalSystem `NullgateDaemon`** service (the daemon owns the TUN),
+- registers the **`NullgateUpdate`** daily scheduled task (auto-update, runs as SYSTEM),
 - adds Start-menu + Desktop shortcuts, and offers "Launch" on finish.
 
 There is no portable zip in a release — the MSI is the Windows artifact. (The bundle step
-still produces `dist\ipn-windows-x86_64.zip` as a byproduct, handy for local testing.)
+still produces `dist\nullgate-windows-x86_64.zip` as a byproduct, handy for local testing.)
 
 ## Prerequisites (one-time)
 - **Rust** (MSVC): `rustup default stable-msvc`.
@@ -28,12 +28,12 @@ still produces `dist\ipn-windows-x86_64.zip` as a byproduct, handy for local tes
 
 ## Build
 ```powershell
-# Stop the service first if it's installed (it locks target\release\ipn-daemon.exe):
-sc.exe stop IPNDaemon
+# Stop the service first if it's installed (it locks target\release\nullgate-daemon.exe):
+sc.exe stop NullgateDaemon
 
 az login                                  # authenticate the signing session
-pwsh -File scripts\build-msi.ps1          # -> target\wix\ipn-<ver>-windows-x86_64.msi
-signtool verify /pa target\wix\ipn-<ver>-windows-x86_64.msi   # optional check
+pwsh -File scripts\build-msi.ps1          # -> target\wix\nullgate-<ver>-windows-x86_64.msi
+signtool verify /pa target\wix\nullgate-<ver>-windows-x86_64.msi   # optional check
 ```
 `build-msi.ps1` runs: release build → **sign the exes** → GTK bundle
 (`bundle-gtk-windows.ps1`, which also copies the updater into `bin\`) → `wix build`
@@ -67,15 +67,15 @@ Signing tool locations; override `ARTIFACT_SIGNING_DLIB`), and timestamps via
 session (`AzureCliCredential`) so it doesn't stall on IMDS.
 
 ## Auto-update
-`packaging\windows\ipn-update.ps1` is installed to `C:\Program Files\IPN\bin` and registered as
-the SYSTEM scheduled task **`IPNUpdate`** (daily ~3am ±2h, plus 5 min after boot). It compares
-`ipn-daemon.exe --version` to the latest release tag of the public
+`packaging\windows\ipn-update.ps1` is installed to `C:\Program Files\Nullgate\bin` and registered as
+the SYSTEM scheduled task **`NullgateUpdate`** (daily ~3am ±2h, plus 5 min after boot). It compares
+`nullgate-daemon.exe --version` to the latest release tag of the public
 `steeb-k/iroh-private-network` repo and, if newer, downloads the MSI and applies it silently
 (`msiexec /i … /qn`). The MSI's `MajorUpgrade` stops the service, swaps files, and restarts it.
 Logs: `%ProgramData%\ipn\update.log`.
 
 ## Gotchas
-- A **running `IPNDaemon` service locks** `ipn-daemon.exe` — stop it (`sc.exe stop IPNDaemon`)
+- A **running `NullgateDaemon` service locks** `nullgate-daemon.exe` — stop it (`sc.exe stop NullgateDaemon`)
   before a release build.
 - The MSI is **x64** (`-arch x64`) so it installs under `Program Files`, not `Program Files (x86)`.
 - The `UpgradeCode` in `wix\ipn.wxs` is fixed; never change it or upgrades break.

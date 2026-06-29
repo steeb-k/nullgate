@@ -5,10 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Privileged IPN daemon: owns the iroh node + TUN, serves the GUI over IPC."
+description = "Privileged Nullgate daemon: owns the iroh node + TUN, serves the GUI over IPC."
 
 [[bin]]
-name = "ipn-daemon"
+name = "nullgate-daemon"
 path = "src/main.rs"
 
 [dependencies]

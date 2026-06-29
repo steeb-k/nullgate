@@ -1,11 +1,11 @@
-# iroh-private-network (IPN)
+# iroh-private-network (Nullgate)
 
 Connect your own computers into a private network, wherever they are, so you can reach one
 machine directly — Remote Desktop, SSH, file shares, a home server — **without routing all your
 internet through a home VPN**.
 
 A normal VPN sends everything through one chokepoint: you log in and your whole connection is
-tunneled home, double-counting bandwidth and slowing the home network for everyone else. IPN
+tunneled home, double-counting bandwidth and slowing the home network for everyone else. Nullgate
 links your devices peer-to-peer instead, so only the traffic *between your devices* uses the
 link. You reach a machine by a stable private address (e.g. `10.99.0.7`) with the RDP/SSH/etc.
 client you already use.
@@ -31,11 +31,11 @@ devices find and authenticate each other directly (built on [iroh](https://www.i
 
 ## Get it
 
-**Windows** — download `ipn-<version>-windows-x86_64.msi` from the
+**Windows** — download `nullgate-<version>-windows-x86_64.msi` from the
 [Releases](https://github.com/steeb-k/iroh-private-network/releases) page and run it (it's
 code-signed). It installs the app plus the background networking service and keeps itself
-updated. Launch **Iroh Private Network** from the Start menu — the desktop app is called
-**IPN Portal**.
+updated. Launch **Nullgate** from the Start menu — the desktop app is called
+**Nullgate**.
 
 **Linux & macOS** — one line in a terminal:
 
@@ -46,8 +46,8 @@ curl -fsSL https://raw.githubusercontent.com/steeb-k/iroh-private-network/main/i
 It downloads the right build, sets up the background service (you'll be asked for your password
 once, because the service needs permission to create the virtual network interface), and enables
 daily auto-updates. On **Linux** you also need the system GTK runtime:
-`sudo apt install libgtk-4-1 libadwaita-1-0`. Afterwards, manage it with `ipnctl`
-(`ipnctl --status`, `--update`, `--uninstall`). On **macOS** the app lands in `/Applications`.
+`sudo apt install libgtk-4-1 libadwaita-1-0`. Afterwards, manage it with `nullgatectl`
+(`nullgatectl --status`, `--update`, `--uninstall`). On **macOS** the app lands in `/Applications`.
 
 ## Using it
 1. On one device: **+ → Create a network**, then share the ticket (copy it, or show the QR).
@@ -69,7 +69,7 @@ Built on a lot of other people's work:
   [iroh-gossip](https://github.com/n0-computer/iroh-gossip),
   [iroh-blobs](https://github.com/n0-computer/iroh-blobs), iroh-tickets,
   [iroh-mdns-address-lookup](https://github.com/n0-computer/iroh)) by
-  [n0](https://www.iroh.computer) — the peer-to-peer foundation IPN is built on.
+  [n0](https://www.iroh.computer) — the peer-to-peer foundation Nullgate is built on.
 - **[dumbpipe](https://github.com/n0-computer/dumbpipe)** (n0) — used to validate the approach
   early on.
 - **[iroh-lan](https://github.com/rustonbsd/iroh-lan)** by rustonbsd — prior art for a virtual

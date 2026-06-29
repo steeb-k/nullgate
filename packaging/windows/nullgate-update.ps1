@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-  Iroh Private Network (IPN) Windows install-or-update engine + scheduled-task
+  Nullgate (Nullgate) Windows install-or-update engine + scheduled-task
   helper.
 
-  The Windows analog of packaging/linux/ipn-update. Compares the installed daemon
+  The Windows analog of packaging/linux/nullgate-update. Compares the installed daemon
   version to the latest release of the PUBLIC steeb-k/iroh-private-network repo
   and, if newer, downloads the MSI and applies it silently. The MSI's MajorUpgrade
   handling does the heavy lifting (stop service -> replace files -> restart
@@ -13,15 +13,15 @@
   Report whether an update is available; make no changes.
 
 .PARAMETER RegisterTask
-  Register the daily "IPNUpdate" scheduled task (runs this script as SYSTEM).
+  Register the daily "NullgateUpdate" scheduled task (runs this script as SYSTEM).
   Invoked by the MSI on install.
 
 .PARAMETER UnregisterTask
-  Remove the "IPNUpdate" scheduled task.
+  Remove the "NullgateUpdate" scheduled task.
 
 .NOTES
   Public repo => no auth. Version is the source of truth (compared to the release
-  tag). Lives in "Program Files\IPN\bin"; it locates ipn-daemon.exe next to itself
+  tag). Lives in "Program Files\Nullgate\bin"; it locates nullgate-daemon.exe next to itself
   via $PSScriptRoot.
 #>
 [CmdletBinding(DefaultParameterSetName = 'Update')]
@@ -33,21 +33,21 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Repo      = if ($env:IPN_BINARIES_REPO) { $env:IPN_BINARIES_REPO } else { 'steeb-k/iroh-private-network' }
+$Repo      = if ($env:NULLGATE_BINARIES_REPO) { $env:NULLGATE_BINARIES_REPO } else { 'steeb-k/iroh-private-network' }
 $AssetGlob = '*windows-x86_64.msi'
-$TaskName  = 'IPNUpdate'
+$TaskName  = 'NullgateUpdate'
 $BinDir    = $PSScriptRoot
-$DaemonExe = Join-Path $BinDir 'ipn-daemon.exe'
+$DaemonExe = Join-Path $BinDir 'nullgate-daemon.exe'
 $ScriptPath = $PSCommandPath
 
 # Log to the machine-wide data dir (where the LocalSystem daemon also writes).
-$DataDir = Join-Path $env:ProgramData 'ipn'
+$DataDir = Join-Path $env:ProgramData 'nullgate'
 $LogFile = Join-Path $DataDir 'update.log'
 
 function Write-Log {
     param([string]$Message)
     $line = "{0}  {1}" -f (Get-Date -Format 's'), $Message
-    Write-Host "ipn-update: $Message"
+    Write-Host "nullgate-update: $Message"
     try {
         if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Force -Path $DataDir | Out-Null }
         Add-Content -Path $LogFile -Value $line -Encoding UTF8
@@ -72,7 +72,7 @@ function Register-UpdateTask {
 
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger @($daily, $boot) `
         -Principal $principal -Settings $settings `
-        -Description 'Iroh Private Network daily auto-update check' -Force | Out-Null
+        -Description 'Nullgate daily auto-update check' -Force | Out-Null
     Write-Log "registered scheduled task '$TaskName'"
 }
 
@@ -98,12 +98,12 @@ function Invoke-Update {
 
     $installed = Get-InstalledVersion
     if (-not $installed) {
-        Write-Log "ipn-daemon.exe not found next to the updater; nothing to do"
+        Write-Log "nullgate-daemon.exe not found next to the updater; nothing to do"
         return
     }
     Write-Log "checking $Repo for a newer release (installed: $installed)"
 
-    $headers = @{ 'User-Agent' = 'ipn-update'; 'Accept' = 'application/vnd.github+json' }
+    $headers = @{ 'User-Agent' = 'nullgate-update'; 'Accept' = 'application/vnd.github+json' }
     $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers $headers
     $tag = $rel.tag_name
     if (-not $tag) { Write-Log "could not determine the latest release tag"; return }
@@ -119,9 +119,9 @@ function Invoke-Update {
     $asset = $rel.assets | Where-Object { $_.name -like $AssetGlob } | Select-Object -First 1
     if (-not $asset) { Write-Log "release $tag has no $AssetGlob asset"; return }
 
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("ipn-{0}.msi" -f $latest)
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("nullgate-{0}.msi" -f $latest)
     Write-Log "downloading $($asset.name)"
-    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tmp -UseBasicParsing -Headers @{ 'User-Agent' = 'ipn-update' }
+    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tmp -UseBasicParsing -Headers @{ 'User-Agent' = 'nullgate-update' }
 
     $msiLog = Join-Path $DataDir 'update-msi.log'
     Write-Log "applying $tmp (msiexec /qn)"

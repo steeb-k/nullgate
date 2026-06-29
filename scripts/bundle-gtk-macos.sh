@@ -4,15 +4,15 @@
 #   scripts/bundle-gtk-macos.sh <stage-dir>
 #   BUNDLE_BINDIR=MacOS scripts/bundle-gtk-macos.sh <app>/Contents
 #
-# <stage-dir> must already contain <bindir>/{ipn,ipn-daemon,ipn-cli}, where
+# <stage-dir> must already contain <bindir>/{nullgate,nullgate-daemon,nullgate-cli}, where
 # <bindir> is "bin" (plain tree) or "MacOS" (a .app's Contents/, via BUNDLE_BINDIR).
 # Either way the bindir is one level under <stage-dir>, so @executable_path/../lib
-# resolves the same. Only `ipn` (the GUI) links Homebrew dylibs (the daemon/CLI are
-# system-only), so the closure is walked from `ipn` plus the gdk-pixbuf + librsvg
+# resolves the same. Only `nullgate` (the GUI) links Homebrew dylibs (the daemon/CLI are
+# system-only), so the closure is walked from `nullgate` plus the gdk-pixbuf + librsvg
 # loader modules (dlopened at runtime, so not in the link graph).
 #
 # Steps:
-#   1. Walk the otool closure of `ipn` + the pixbuf/svg loaders.
+#   1. Walk the otool closure of `nullgate` + the pixbuf/svg loaders.
 #   2. Copy every non-system dylib into lib/ (flattened by basename).
 #   3. Rewrite install names to @executable_path/../lib/<name> (binary + dylibs +
 #      loaders); set each dylib's id.
@@ -39,7 +39,7 @@ SCHEMA_DST="$STAGE/share/glib-2.0/schemas"
 log() { printf 'bundle-gtk: %s\n' "$*"; }
 die() { printf 'bundle-gtk: error: %s\n' "$*" >&2; exit 1; }
 
-[ -x "$BIN/ipn" ] || die "no $BINDIR/ipn under $STAGE"
+[ -x "$BIN/nullgate" ] || die "no $BINDIR/nullgate under $STAGE"
 command -v install_name_tool >/dev/null || die "install_name_tool missing (need Xcode CLT)"
 
 mkdir -p "$LIBDIR" "$LOADERDIR" "$SCHEMA_DST"
@@ -97,7 +97,7 @@ copy_loaders_from "$BREW/lib/gdk-pixbuf-2.0/2.10.0/loaders"
 [ -d "$BREW/opt/librsvg/lib/gdk-pixbuf-2.0/2.10.0/loaders" ] \
   && copy_loaders_from "$BREW/opt/librsvg/lib/gdk-pixbuf-2.0/2.10.0/loaders"
 
-QUEUE+=("$BIN/ipn")
+QUEUE+=("$BIN/nullgate")
 for l in "${LOADERS[@]}"; do QUEUE+=("$l"); done
 
 i=0
@@ -119,7 +119,7 @@ relocate() {
   done < <(nonsys_deps "$f")
 }
 
-relocate "$BIN/ipn"
+relocate "$BIN/nullgate"
 for f in "$LIBDIR"/*.dylib; do
   relocate "$f"
   install_name_tool -id "@executable_path/../lib/$(basename "$f")" "$f" 2>/dev/null
@@ -131,7 +131,7 @@ done
 
 # --- Verify no Homebrew/@rpath references survive before signing. ---
 check_leaks() {
-  { otool -L "$BIN/ipn"; \
+  { otool -L "$BIN/nullgate"; \
     for f in "$LIBDIR"/*.dylib "${LOADERS[@]}"; do otool -L "$f"; done; } \
     | awk '{print $1}' | grep -E "^$BREW|^@rpath/" || true
 }
@@ -143,7 +143,7 @@ log "re-signing (ad-hoc)..."
 for f in "$LIBDIR"/*.dylib "${LOADERS[@]}"; do
   codesign --force --sign - --timestamp=none "$f" >/dev/null 2>&1 || die "codesign failed on $f"
 done
-for b in ipn ipn-daemon ipn-cli; do
+for b in nullgate nullgate-daemon nullgate-cli; do
   [ -f "$BIN/$b" ] && codesign --force --sign - --timestamp=none "$BIN/$b" >/dev/null 2>&1
 done
 

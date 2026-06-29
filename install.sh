@@ -1,25 +1,25 @@
 #!/bin/sh
-# Iroh Private Network (IPN) bootstrap — install, update, or remove in one command,
+# Nullgate (Nullgate) bootstrap — install, update, or remove in one command,
 # on Linux OR macOS:
 #
 #   curl -fsSL https://raw.githubusercontent.com/steeb-k/iroh-private-network/main/install.sh | sh
 #
 # It detects the OS, downloads the matching release asset, unpacks it, and runs the
-# bundled `ipnctl --install`. After the first install, manage everything with the
-# `ipnctl` command. Interactive when run from a terminal; otherwise defaults to
+# bundled `nullgatectl --install`. After the first install, manage everything with the
+# `nullgatectl` command. Interactive when run from a terminal; otherwise defaults to
 # install/update. Non-interactive override:
 #   ... | sh -s -- install      (or update / remove)
-#   IPN_ACTION=install ... | sh
+#   NULLGATE_ACTION=install ... | sh
 #
 # Source of truth: install.sh at the repo root. Windows users: download the signed
 # .msi from the releases page instead.
 set -eu
 
-REPO="${IPN_BINARIES_REPO:-steeb-k/iroh-private-network}"
+REPO="${NULLGATE_BINARIES_REPO:-steeb-k/iroh-private-network}"
 API="https://api.github.com/repos/$REPO/releases/latest"
 
 say()  { printf '%s\n' "$*"; }
-die()  { printf '%s\n' "ipn: error: $*" >&2; exit 1; }
+die()  { printf '%s\n' "nullgate: error: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # --- OS detection: pick the asset regex + the unpacked-tree root marker. --------
@@ -34,7 +34,7 @@ case "$OS" in
     case "$(uname -m)" in arm64) HOST=arm64 ;; *) HOST=x86_64 ;; esac
     ASSET_RE="https://[^\"]+macos-(universal|$HOST)\\.tar\\.gz"
     ASSET_DESC="macos-$HOST (or -universal) tarball"
-    find_root() { find "$1" -maxdepth 2 -type d -name "Iroh Private Network.app" -exec dirname {} ';' | head -n1; }
+    find_root() { find "$1" -maxdepth 2 -type d -name "Nullgate.app" -exec dirname {} ';' | head -n1; }
     ;;
   *) die "unsupported OS: $OS (Linux and macOS only; Windows uses the .msi installer)" ;;
 esac
@@ -42,15 +42,15 @@ esac
 have curl || die "curl is required"
 have tar  || die "tar is required"
 
-say "Iroh Private Network installer"
+say "Nullgate installer"
 
 INSTALLED=""
-if have ipn-daemon; then
-  INSTALLED="$(ipn-daemon --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
+if have nullgate-daemon; then
+  INSTALLED="$(nullgate-daemon --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
 fi
 
-# Pick the action: CLI arg > $IPN_ACTION > interactive menu > sane default.
-ACTION="${1:-${IPN_ACTION:-}}"
+# Pick the action: CLI arg > $NULLGATE_ACTION > interactive menu > sane default.
+ACTION="${1:-${NULLGATE_ACTION:-}}"
 if [ -z "$ACTION" ]; then
   if (exec 3</dev/tty) 2>/dev/null; then
     if [ -n "$INSTALLED" ]; then
@@ -85,13 +85,13 @@ esac
 
 # Update/remove of an existing install: delegate to the installed manager, which
 # already knows how to download + version-check + swap (no work to duplicate here).
-if have ipnctl; then
+if have nullgatectl; then
   case "$ACTION" in
-    install_or_update) exec ipnctl --update ;;
-    remove)            exec ipnctl --uninstall ;;
+    install_or_update) exec nullgatectl --update ;;
+    remove)            exec nullgatectl --uninstall ;;
   esac
 fi
-[ "$ACTION" = remove ] && die "Iroh Private Network is not installed"
+[ "$ACTION" = remove ] && die "Nullgate is not installed"
 
 # First-time install: fetch the latest release tarball and run its manager.
 URL="$(curl -fsSL "$API" | grep -oE "\"browser_download_url\": *\"$ASSET_RE\"" | sed -E 's/.*"(https[^"]+)".*/\1/' | head -n1)"
@@ -103,4 +103,4 @@ tar -xzf "$TMP/pkg.tgz" -C "$TMP" || die "extract failed"
 ROOT="$(find_root "$TMP")"
 [ -n "$ROOT" ] || die "downloaded archive has an unexpected layout"
 say "Installing (you may be prompted for your password to set up the system service)"
-"$ROOT/ipnctl" --install
+"$ROOT/nullgatectl" --install

@@ -1,4 +1,4 @@
-//! The signed membership roster — the security crux of IPN.
+//! The signed membership roster — the security crux of Nullgate.
 //!
 //! The roster is an append-only set of **signed entries** that fold into the
 //! current membership. It is designed to ride on a multi-writer store

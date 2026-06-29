@@ -1,8 +1,8 @@
 # Keep shell scripts LF so they run under bash/WSL even when checked out on Windows.
 *.sh text eol=lf
 # Extensionless POSIX scripts + systemd units + plists must stay LF too.
-packaging/linux/ipnctl text eol=lf
-packaging/macos/ipnctl text eol=lf
+packaging/linux/nullgatectl text eol=lf
+packaging/macos/nullgatectl text eol=lf
 *.service text eol=lf
 *.timer text eol=lf
 *.plist text eol=lf

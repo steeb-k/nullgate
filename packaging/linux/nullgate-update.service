@@ -1,9 +1,9 @@
 [Unit]
-Description=Iroh Private Network auto-update check
+Description=Nullgate auto-update check
 Documentation=https://github.com/steeb-k/iroh-private-network
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/ipnctl --update
+ExecStart=/usr/local/bin/nullgatectl --update

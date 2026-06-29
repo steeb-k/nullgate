@@ -21,8 +21,8 @@ use windows_service::{
     Result as WsResult,
 };
 
-const SERVICE_NAME: &str = "IPNDaemon";
-const SERVICE_DISPLAY: &str = "iroh-private-network";
+const SERVICE_NAME: &str = "NullgateDaemon";
+const SERVICE_DISPLAY: &str = "Nullgate";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
 /// SCM entry point (invoked when started via `ipn-daemon service`).
@@ -111,7 +111,7 @@ pub fn manage(cmd: &str) -> WsResult<()> {
             };
             let service = manager
                 .create_service(&info, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START)?;
-            service.set_description("iroh-private-network P2P virtual LAN daemon")?;
+            service.set_description("Nullgate P2P virtual LAN daemon")?;
             let _ = service.start::<&OsStr>(&[]);
             println!("installed and started service '{SERVICE_NAME}'");
         }

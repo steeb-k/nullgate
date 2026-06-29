@@ -1,6 +1,6 @@
-# IPN documentation
+# Nullgate documentation
 
-Start with the project [README](../README.md) for what IPN is and how to install it. These docs
+Start with the project [README](../README.md) for what Nullgate is and how to install it. These docs
 go deeper:
 
 - **[architecture.md](architecture.md)** — how it works: components, connectivity, the roster,

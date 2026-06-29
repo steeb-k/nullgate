@@ -137,7 +137,7 @@ impl Ticket {
         let s = s.trim();
         let body = s
             .strip_prefix(TICKET_PREFIX)
-            .context("not an IPN ticket (missing ipn1 prefix)")?;
+            .context("not a Nullgate ticket (missing ipn1 prefix)")?;
         let bytes = data_encoding::BASE32_NOPAD
             .decode(body.to_uppercase().as_bytes())
             .context("ticket is not valid base32")?;
@@ -173,7 +173,7 @@ pub fn decode_recovery_key(s: &str) -> Result<[u8; 32]> {
     let body = s
         .trim()
         .strip_prefix(RECOVERY_PREFIX)
-        .context("not an IPN recovery code (missing ipnkey1 prefix)")?;
+        .context("not a Nullgate recovery code (missing ipnkey1 prefix)")?;
     let bytes = data_encoding::BASE32_NOPAD
         .decode(body.to_uppercase().as_bytes())
         .context("recovery code is not valid base32")?;

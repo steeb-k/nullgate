@@ -10,7 +10,7 @@
 //! pushed events arrive on the GTK main thread via an `async-channel` consumed by
 //! `glib::spawn_future_local`. GTK objects are only touched on the main thread.
 //!
-//! Layout (SEED-style): a static "IPN" titlebar; a main page with a control group
+//! Layout (SEED-style): a static "Nullgate" titlebar; a main page with a control group
 //! (Administration, Show join ticket, Diagnostics) and a Members list at the
 //! bottom (this device included). Each control row, and each member, opens a
 //! slide-in **flyout** — an `adw::OverlaySplitView` sidebar that overlays the
@@ -28,7 +28,7 @@ use tokio::runtime::Handle;
 
 mod tray;
 
-const APP_ID: &str = "io.github.steeb_k.IPN";
+const APP_ID: &str = "io.github.steeb_k.Nullgate";
 
 /// Messages from the IO side to the UI.
 #[derive(Clone)]
@@ -207,7 +207,7 @@ fn install_app_icon() {
     // per-size "stacked" app icon so the window/taskbar icon is crisp at each size
     // (the artist hand-tuned the small sizes). Always (over)write so a replaced
     // asset takes effect next launch.
-    let base = dirs.cache_dir().join("ipn").join("icons");
+    let base = dirs.cache_dir().join("nullgate").join("icons");
     let sizes: [(&str, &[u8]); 6] = [
         ("16x16", include_bytes!("../../../img/icon-stacked-16.png")),
         ("32x32", include_bytes!("../../../img/icon-stacked-32.png")),
@@ -245,7 +245,7 @@ fn load_css() {
 
 /// Path of the small file remembering the window size (best-effort).
 fn window_state_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("io.github", "steeb_k", "ipn")
+    directories::ProjectDirs::from("io.github", "steeb_k", "Nullgate")
         .map(|d| d.config_dir().join("gui-window"))
 }
 
@@ -278,11 +278,11 @@ fn save_window_size(window: &adw::ApplicationWindow) {
 fn main() -> glib::ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("ipn {}", env!("CARGO_PKG_VERSION"));
+        println!("nullgate {}", env!("CARGO_PKG_VERSION"));
         return glib::ExitCode::SUCCESS;
     }
     let start_minimized =
-        args.iter().any(|a| a == "--minimized") || std::env::var_os("IPN_START_MINIMIZED").is_some();
+        args.iter().any(|a| a == "--minimized") || std::env::var_os("NULLGATE_START_MINIMIZED").is_some();
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -357,17 +357,17 @@ fn build_ui(
     let (win_w, win_h) = load_window_size();
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title("Iroh Private Network")
+        .title("Nullgate")
         .default_width(win_w)
         .default_height(win_h)
         .build();
 
     // --- main header (static branding; carries the window controls) ---
-    // "IPN Portal" is the product name for this GUI client (codename ipn-gui).
+    // "Nullgate" is the product name for this GUI client (codename ipn-gui).
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&adw::WindowTitle::new(
-        "Iroh Private Network",
-        &format!("IPN Portal {}", env!("CARGO_PKG_VERSION")),
+        "Nullgate",
+        &format!("v{}", env!("CARGO_PKG_VERSION")),
     )));
 
     // "+" create/join — only shown when not in a network (toggled below).
@@ -567,7 +567,7 @@ fn build_ui(
                         notify(
                             &app_n,
                             &format!("“{hostname}” wants to join"),
-                            Some("Open IPN to approve or deny."),
+                            Some("Open Nullgate to approve or deny."),
                         );
                         if let Some(s) = state.borrow().as_ref() {
                             render_if_changed(&ui, s, &net, &window, &pending, &last_sig);
@@ -634,8 +634,8 @@ fn build_ui(
                 // show the title prominently and hide/clip the body.
                 notify(
                     &app,
-                    "IPN is still running in the tray",
-                    Some("Click the tray icon to reopen, or “Quit IPN” to disconnect."),
+                    "Nullgate is still running in the tray",
+                    Some("Click the tray icon to reopen, or “Quit Nullgate” to disconnect."),
                 );
             }
             glib::Propagation::Stop
@@ -747,7 +747,7 @@ fn connecting_page() -> adw::StatusPage {
     spinner.start();
     adw::StatusPage::builder()
         .title("Connecting…")
-        .description("Reaching the IPN background service.")
+        .description("Reaching the Nullgate background service.")
         .css_classes(["empty-state"])
         .child(&spinner)
         .vexpand(true)
@@ -759,7 +759,7 @@ fn daemon_down_page() -> adw::StatusPage {
         .icon_name("network-error-symbolic")
         .title("Service not running")
         .description(
-            "The privileged ipn-daemon isn't reachable. Start it (Windows: the IPN service; \
+            "The privileged nullgate-daemon isn't reachable. Start it (Windows: the Nullgate service; \
              Linux: the daemon / systemd service). This window reconnects automatically.",
         )
         .css_classes(["empty-state"])
@@ -773,7 +773,7 @@ fn version_mismatch_page(daemon: u32, gui: u32) -> adw::StatusPage {
         .title("Version mismatch")
         .description(format!(
             "The app (IPC v{gui}) and the background service (IPC v{daemon}) are different \
-             versions. Update both IPN components to the same release."
+             versions. Update both Nullgate components to the same release."
         ))
         .css_classes(["empty-state"])
         .vexpand(true)
@@ -957,7 +957,7 @@ fn render_main(
     {
         // About opens the standard dialog (not a flyout) — no chevron suffix.
         let row = adw::ActionRow::builder()
-            .title("About IPN")
+            .title("About Nullgate")
             .subtitle(&format!("Version {}", env!("CARGO_PKG_VERSION")))
             .activatable(true)
             .build();
@@ -1722,7 +1722,7 @@ fn show_about(window: &adw::ApplicationWindow) {
     // once the project is public.)
     let about = adw::AboutWindow::builder()
         .transient_for(window)
-        .application_name("Iroh Private Network")
+        .application_name("Nullgate")
         .application_icon(APP_ID)
         .version(env!("CARGO_PKG_VERSION"))
         .developer_name("kznjk")

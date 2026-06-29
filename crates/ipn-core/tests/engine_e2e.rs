@@ -25,8 +25,8 @@ async fn create_join_and_see_each_other() {
         .with_env_filter("ipn_core=debug,iroh=warn")
         .try_init();
     // Don't create real TUN adapters during the test.
-    std::env::set_var("IPN_DISABLE_TUN", "1");
-    std::env::set_var("IPN_SECRETS_FILE_ONLY", "1");
+    std::env::set_var("NULLGATE_DISABLE_TUN", "1");
+    std::env::set_var("NULLGATE_SECRETS_FILE_ONLY", "1");
     let a = Engine::start(scratch("a")).await.unwrap();
     let b = Engine::start(scratch("b")).await.unwrap();
 

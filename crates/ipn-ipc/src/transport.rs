@@ -55,7 +55,7 @@ fn socket_name(path: &Path) -> io::Result<Name<'static>> {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    format!("ipn-{hash:016x}.sock").to_ns_name::<GenericNamespaced>()
+    format!("nullgate-{hash:016x}.sock").to_ns_name::<GenericNamespaced>()
 }
 
 pub async fn connect(path: &Path) -> io::Result<Stream> {

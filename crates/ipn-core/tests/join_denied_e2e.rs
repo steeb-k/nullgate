@@ -18,8 +18,8 @@ fn scratch(name: &str) -> std::path::PathBuf {
 #[tokio::test]
 #[ignore = "opens real iroh endpoints; run with --ignored"]
 async fn declined_join_resets_to_no_network() {
-    std::env::set_var("IPN_DISABLE_TUN", "1");
-    std::env::set_var("IPN_SECRETS_FILE_ONLY", "1");
+    std::env::set_var("NULLGATE_DISABLE_TUN", "1");
+    std::env::set_var("NULLGATE_SECRETS_FILE_ONLY", "1");
 
     let a = Engine::start(scratch("a")).await.unwrap();
     let b = Engine::start(scratch("b")).await.unwrap();

@@ -1,27 +1,27 @@
-Iroh Private Network (IPN) - Linux
+Nullgate (Nullgate) - Linux
 
 Quick install (downloads the latest release):
     curl -fsSL https://raw.githubusercontent.com/steeb-k/iroh-private-network/main/install.sh | sh
 
 Or from this unpacked tarball:
-    ./ipnctl --install        # uses sudo; installs the daemon as a system service
+    ./nullgatectl --install        # uses sudo; installs the daemon as a system service
 
 Requirements on the target machine:
     GTK 4.10+ and libadwaita 1.4+   (Debian/Ubuntu: sudo apt install libgtk-4-1 libadwaita-1-0)
 
 What it installs:
-    /usr/local/bin/{ipn, ipn-daemon, ipn-cli, ipnctl}
-    a root systemd service  ipn-daemon.service   (owns the TUN; needs CAP_NET_ADMIN)
-    a root systemd timer    ipn-update.timer      (daily auto-update)
+    /usr/local/bin/{nullgate, nullgate-daemon, nullgate-cli, nullgatectl}
+    a root systemd service  nullgate-daemon.service   (owns the TUN; needs CAP_NET_ADMIN)
+    a root systemd timer    nullgate-update.timer      (daily auto-update)
     an app-menu entry + tray autostart            (the GUI runs as your user)
 
 The daemon runs as root (it brings up the 10.99.0.0/24 virtual interface); the GUI
-runs unprivileged and talks to it over /tmp/ipn.sock. Do NOT run the GUI with sudo.
+runs unprivileged and talks to it over /tmp/nullgate.sock. Do NOT run the GUI with sudo.
 
 Manage it:
-    ipnctl --status
-    ipnctl --update         # also runs daily on its own
-    ipnctl --uninstall      # add --purge to also remove local data
+    nullgatectl --status
+    nullgatectl --update         # also runs daily on its own
+    nullgatectl --uninstall      # add --purge to also remove local data
 
 Trouble: "Service not running" after an unclean stop can leave a stale socket:
-    sudo systemctl restart ipn-daemon
+    sudo systemctl restart nullgate-daemon

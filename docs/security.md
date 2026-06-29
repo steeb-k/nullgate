@@ -1,6 +1,6 @@
 # Security model
 
-This describes how IPN decides who is in a network and how access is taken away. It assumes the
+This describes how Nullgate decides who is in a network and how access is taken away. It assumes the
 networking background in [architecture.md](architecture.md).
 
 ## Identities

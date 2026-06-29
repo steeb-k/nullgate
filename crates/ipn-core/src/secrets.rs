@@ -14,7 +14,7 @@
 //! it's unreachable, rather than reporting "not found" and letting the caller mint
 //! a new one.
 //!
-//! Set `IPN_SECRETS_FILE_ONLY=1` to force the file backend (used by tests, where
+//! Set `NULLGATE_SECRETS_FILE_ONLY=1` to force the file backend (used by tests, where
 //! many in-process engines would otherwise collide on the same global keystore
 //! keys; with files they're isolated per data dir).
 
@@ -22,10 +22,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 
-const SERVICE: &str = "iroh-private-network";
+const SERVICE: &str = "nullgate";
 
 fn file_only() -> bool {
-    std::env::var_os("IPN_SECRETS_FILE_ONLY").is_some()
+    std::env::var_os("NULLGATE_SECRETS_FILE_ONLY").is_some()
 }
 
 fn secrets_dir(data_dir: &Path) -> PathBuf {

@@ -1,5 +1,5 @@
 [Unit]
-Description=Iroh Private Network daily auto-update check
+Description=Nullgate daily auto-update check
 
 [Timer]
 # Shortly after boot, then once a day. Persistent catches up if the machine was

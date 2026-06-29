@@ -653,7 +653,7 @@ impl Engine {
     }
 
     /// Connect to / disconnect from the network without forgetting it. Used by the
-    /// GUI: "Quit IPN" disconnects (the device goes offline from the pool) but
+    /// GUI: "Quit Nullgate" disconnects (the device goes offline from the pool) but
     /// keeps the config; reopening the app reconnects. Idempotent.
     pub async fn set_online(&self, online: bool) -> Result<()> {
         let inner = &self.inner;
@@ -1377,7 +1377,7 @@ async fn register_mesh(inner: &Arc<Inner>, peer: Id, conn: Connection) {
 /// so membership + presence still work. Spawns the outbound read loop on success.
 async fn enable_tun(inner: &Arc<Inner>, ip: Ipv4Addr) {
     // Escape hatch for tests/CI (and headless runs where a TUN is undesirable).
-    if std::env::var_os("IPN_DISABLE_TUN").is_some() {
+    if std::env::var_os("NULLGATE_DISABLE_TUN").is_some() {
         return;
     }
     if inner.tun_attempted.swap(true, Ordering::SeqCst) {
