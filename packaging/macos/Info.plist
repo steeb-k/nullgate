@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Info.plist for "Iroh Private Network.app". __VERSION__ is rewritten from the
+     Cargo version by scripts/package-macos.sh. The real GTK binary lives at
+     Contents/MacOS/ipn (CFBundleExecutable), so the Dock/Applications icon comes
+     from Resources/AppIcon.icns. -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>Iroh Private Network</string>
+  <key>CFBundleDisplayName</key>
+  <string>Iroh Private Network</string>
+  <key>CFBundleIdentifier</key>
+  <string>io.github.steeb_k.IPN</string>
+  <key>CFBundleVersion</key>
+  <string>__VERSION__</string>
+  <key>CFBundleShortVersionString</key>
+  <string>__VERSION__</string>
+  <key>CFBundleExecutable</key>
+  <string>ipn</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSHumanReadableCopyright</key>
+  <string>(c) kznjk - GPL-3.0-or-later</string>
+</dict>
+</plist>

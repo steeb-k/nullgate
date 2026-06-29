@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- IPN tray GUI autostart LaunchAgent (per-user, Aqua). Installed to
+     /Library/LaunchAgents so it loads for each user at login. Launches the GUI
+     minimized to the tray. No KeepAlive — if the user quits it, it stays quit
+     until next login. The GUI runs unprivileged and talks to the root daemon over
+     /tmp/ipn.sock. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.steeb_k.IPN.gui</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Applications/Iroh Private Network.app/Contents/MacOS/ipn</string>
+    <string>--minimized</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+</dict>
+</plist>

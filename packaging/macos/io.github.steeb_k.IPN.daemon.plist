@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- IPN daemon LaunchDaemon (SYSTEM/root). Installed to /Library/LaunchDaemons by
+     `ipnctl --install`. Root is required to create the utun virtual interface.
+     RunAtLoad + KeepAlive == start at boot and restart on exit (analog of the
+     Linux ipn-daemon.service). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.steeb_k.IPN.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Applications/Iroh Private Network.app/Contents/MacOS/ipn-daemon</string>
+    <string>run</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Library/Logs/IPN/ipn-daemon.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Library/Logs/IPN/ipn-daemon.log</string>
+</dict>
+</plist>

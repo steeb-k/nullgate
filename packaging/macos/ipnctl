@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+# Iroh Private Network (IPN) — install / update / uninstall manager (macOS).
+# macOS analog of packaging/linux/ipnctl (launchd instead of systemd).
+#
+#   ipnctl --install [--no-auto-update] [--no-gui-autostart]
+#   ipnctl --update  [--check]
+#   ipnctl --uninstall [--purge]
+#   ipnctl --status
+#   ipnctl --help
+#
+# IPN's daemon needs root to create the utun interface, so it installs as a SYSTEM
+# LaunchDaemon (not a per-user agent): the app goes to /Applications, the daemon +
+# auto-update run as root LaunchDaemons, and the tray GUI runs per-user as an Aqua
+# LaunchAgent. install/update/uninstall need root; this re-execs with sudo.
+set -euo pipefail
+
+REPO="${IPN_BINARIES_REPO:-steeb-k/iroh-private-network}"
+case "$(uname -m)" in arm64) HOST=arm64 ;; *) HOST=x86_64 ;; esac
+ASSET_RE="https://[^\"]+macos-(universal|$HOST)\\.tar\\.gz"
+
+APP_ID="io.github.steeb_k.IPN"
+APP_NAME="Iroh Private Network.app"
+APP_DST="/Applications/$APP_NAME"
+MACOS="$APP_DST/Contents/MacOS"
+BIN_DIR="/usr/local/bin"
+DAEMONS="/Library/LaunchDaemons"
+AGENTS="/Library/LaunchAgents"
+LOG_DIR="/Library/Logs/IPN"
+
+export PATH="$BIN_DIR:$MACOS:$PATH"
+
+WORKDIR=""
+trap 'rm -rf "${WORKDIR:-}"' EXIT
+
+log()  { printf '%s\n' "ipnctl: $*"; }
+die()  { printf '%s\n' "ipnctl: error: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+need_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    have sudo || die "must run as root (sudo not found)"
+    exec sudo -- "$0" "$@"
+  fi
+}
+
+# Console (logged-in GUI) user, for loading the per-user tray agent from a root ctx.
+console_user() { stat -f %Su /dev/console 2>/dev/null; }
+console_uid()  { id -u "$(console_user)" 2>/dev/null; }
+
+version_gt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$2" ]; }
+installed_version() { have ipn-daemon && ipn-daemon --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1; }
+
+latest_version() {
+  have curl || die "curl is required"
+  curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+    | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/'
+}
+
+fetch_latest_tree() {
+  have curl || die "curl is required"
+  local json url root
+  json="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")" || die "cannot reach $REPO releases API"
+  url="$(printf '%s' "$json" | grep -oE "\"browser_download_url\": *\"$ASSET_RE\"" | sed -E 's/.*"(https[^"]+)".*/\1/' | head -n1)"
+  [ -n "$url" ] || die "latest release has no macos-$HOST (or -universal) tarball"
+  WORKDIR="$(mktemp -d)"
+  curl -fsSL -o "$WORKDIR/pkg.tgz" "$url" || die "download failed"
+  tar -xzf "$WORKDIR/pkg.tgz" -C "$WORKDIR" || die "extract failed"
+  root="$(find "$WORKDIR" -maxdepth 2 -type d -name "$APP_NAME" -exec dirname {} \; | head -n1)"
+  [ -n "$root" ] || die "archive missing $APP_NAME"
+  printf '%s\n' "$root"
+}
+
+daemon_bootout() { launchctl bootout "system/$APP_ID.daemon" >/dev/null 2>&1 || true; }
+update_bootout() { launchctl bootout "system/$APP_ID.update" >/dev/null 2>&1 || true; }
+gui_bootout()    { local u; u="$(console_uid)"; [ -n "$u" ] && launchctl bootout "gui/$u/$APP_ID.gui" >/dev/null 2>&1 || true; }
+
+apply_tree() {
+  local src="$1"
+  [ -d "$src/$APP_NAME" ] || die "release tree '$src' has no $APP_NAME"
+
+  log "stopping services"
+  daemon_bootout
+  mkdir -p "$LOG_DIR" "$BIN_DIR"
+
+  # Replace the app (staged as .new, then swapped).
+  rm -rf "$APP_DST.new"
+  cp -R "$src/$APP_NAME" "$APP_DST.new"
+  rm -rf "$APP_DST"
+  mv "$APP_DST.new" "$APP_DST"
+
+  local b
+  for b in ipn ipn-daemon ipn-cli; do
+    ln -sfn "$MACOS/$b" "$BIN_DIR/$b"
+  done
+  # ipnctl is a real file (atomic swap), not a symlink into the app.
+  install -m 0755 "$src/ipnctl" "$BIN_DIR/ipnctl.t$$"
+  mv -f "$BIN_DIR/ipnctl.t$$" "$BIN_DIR/ipnctl"
+
+  [ -f "$src/LaunchDaemons/$APP_ID.daemon.plist" ] && install -m 0644 "$src/LaunchDaemons/$APP_ID.daemon.plist" "$DAEMONS/$APP_ID.daemon.plist"
+  [ -f "$src/LaunchDaemons/$APP_ID.update.plist" ] && install -m 0644 "$src/LaunchDaemons/$APP_ID.update.plist" "$DAEMONS/$APP_ID.update.plist"
+  [ -f "$src/LaunchAgents/$APP_ID.gui.plist" ]     && install -m 0644 "$src/LaunchAgents/$APP_ID.gui.plist"     "$AGENTS/$APP_ID.gui.plist"
+}
+
+cmd_install() {
+  need_root "--install" "$@"
+  local auto=1 gui=1 a
+  for a in "$@"; do case "$a" in
+    --no-auto-update) auto=0 ;;
+    --no-gui-autostart) gui=0 ;;
+    *) die "unknown flag for --install: $a" ;;
+  esac; done
+
+  local here tree
+  here="$(cd "$(dirname "$0")" && pwd)"
+  if [ -d "$here/$APP_NAME" ]; then tree="$here"; else log "no local release tree; fetching latest"; tree="$(fetch_latest_tree)"; fi
+
+  log "installing $APP_NAME to /Applications"
+  apply_tree "$tree"
+
+  launchctl bootstrap system "$DAEMONS/$APP_ID.daemon.plist" >/dev/null 2>&1 \
+    && log "daemon started (root LaunchDaemon)" || log "WARNING: could not load the daemon"
+  if [ "$auto" = 1 ]; then
+    launchctl bootstrap system "$DAEMONS/$APP_ID.update.plist" >/dev/null 2>&1 \
+      && log "daily auto-update enabled" || true
+  fi
+  if [ "$gui" = 1 ]; then
+    local u; u="$(console_uid)"
+    [ -n "$u" ] && launchctl bootstrap "gui/$u" "$AGENTS/$APP_ID.gui.plist" >/dev/null 2>&1 || true
+    log "tray GUI will start at login"
+  fi
+  log "done. Open \"Iroh Private Network\" from /Applications."
+}
+
+cmd_update() {
+  local check=0 a
+  for a in "$@"; do case "$a" in --check) check=1 ;; *) die "unknown flag for --update: $a" ;; esac; done
+
+  local inst latest
+  inst="$(installed_version || true)"
+  [ -n "$inst" ] || die "not installed; run: ipnctl --install"
+  latest="$(latest_version)"
+  [ -n "$latest" ] || die "could not determine the latest release"
+  log "installed $inst, latest $latest"
+  if ! version_gt "$inst" "$latest"; then log "up to date"; return 0; fi
+  log "update available: $inst -> $latest"
+  [ "$check" = 1 ] && return 0
+  need_root "--update"
+  local tree; tree="$(fetch_latest_tree)"
+  apply_tree "$tree"
+  launchctl bootstrap system "$DAEMONS/$APP_ID.daemon.plist" >/dev/null 2>&1 || true
+  log "updated to $latest"
+}
+
+cmd_uninstall() {
+  need_root "--uninstall" "$@"
+  local purge=0 a
+  for a in "$@"; do case "$a" in --purge) purge=1 ;; *) die "unknown flag for --uninstall: $a" ;; esac; done
+
+  gui_bootout
+  update_bootout
+  daemon_bootout
+  rm -f "$DAEMONS/$APP_ID.daemon.plist" "$DAEMONS/$APP_ID.update.plist" "$AGENTS/$APP_ID.gui.plist"
+  local b
+  for b in ipn ipn-daemon ipn-cli ipnctl; do rm -f "$BIN_DIR/$b"; done
+  rm -rf "$APP_DST" "$LOG_DIR"
+  log "removed the app, launch daemons/agent, and symlinks."
+  if [ "$purge" = 1 ]; then
+    rm -rf "$HOME/Library/Application Support/$APP_ID"
+    log "purged data (any secrets in the Keychain are left intact)."
+  fi
+}
+
+cmd_status() {
+  printf '%-13s %s\n' "installed:" "$(installed_version || echo none)"
+  printf '%-13s %s\n' "latest:"    "$(latest_version 2>/dev/null || echo '?')"
+  printf '%-13s %s\n' "daemon:"    "$(launchctl print "system/$APP_ID.daemon" >/dev/null 2>&1 && echo loaded || echo stopped)"
+  printf '%-13s %s\n' "auto-update:" "$(launchctl print "system/$APP_ID.update" >/dev/null 2>&1 && echo enabled || echo disabled)"
+  printf '%-13s %s\n' "app:"       "$([ -d "$APP_DST" ] && echo "$APP_DST" || echo "not installed")"
+}
+
+usage() {
+  cat <<'EOF'
+Iroh Private Network installer/updater - macOS
+
+  ipnctl --install [--no-auto-update] [--no-gui-autostart]
+  ipnctl --update  [--check]
+  ipnctl --uninstall [--purge]
+  ipnctl --status
+
+The daemon installs as a root LaunchDaemon (needs root for the utun interface);
+the GUI runs per-user. install/update/uninstall use sudo.
+EOF
+}
+
+case "${1:-}" in
+  --install)   shift; cmd_install "$@" ;;
+  --update)    shift; cmd_update "$@" ;;
+  --uninstall) shift; cmd_uninstall "$@" ;;
+  --status)    shift; cmd_status ;;
+  --check)     cmd_update --check ;;
+  -h|--help|"") usage ;;
+  *)           die "unknown command: $1 (try --help)" ;;
+esac
