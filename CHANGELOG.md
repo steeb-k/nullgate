@@ -3,7 +3,18 @@
 All notable changes to IPN. Format follows [Keep a Changelog](https://keepachangelog.com).
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
-## [Unreleased]
+## [0.1.1]
+### Fixed
+- **No console window on Windows** alongside the GUI (release builds are a GUI-subsystem binary).
+- **Friendly name updates immediately** in the open member-detail flyout when set (no need to
+  close and reopen it).
+- **One tray icon on Windows.** Removed a stray, do-nothing second tray icon (GLib's
+  `GNotification` backend was creating its own); the tray icon **opens the window on double-click**
+  (and a left single-click), with the Open/Quit menu on right-click. Desktop notifications are
+  skipped on Windows for now — the tray icon and the in-app "Join Request" chip still signal
+  events (native WinRT toasts are a follow-up).
+
+## [0.1.0]
 ### Changed
 - **About dialog cleaned up.** Shows the app icon and the name "Iroh Private Network", developer
   "kznjk", and **Website** + **Report an Issue** links (to the GitHub repo / issues); the
