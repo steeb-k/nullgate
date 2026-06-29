@@ -5,16 +5,44 @@ move it into a release and add a `CHANGELOG.md` entry (see `docs/development.md`
 
 Legend: **★ recommended next** · ⚠️ known gap/risk in the current code · 💡 idea.
 
+## Release status
+Prereleases are tagged `v0.0.1-test<N>` (local builds, no CI). Latest published: **v0.0.1-test12**
+(public IP advertise + geolocation). Unreleased on `main` since then: state-in-location
+(City, State, Country), inline DB-IP attribution + tooltip, focus-loss fix, and "last seen"
+removed from the main member list — these are built locally but **not yet cut as test13**.
+
 ## ★ Recommended next (short list)
-IPN is a **general-purpose ad-hoc VPN** (not RDP-specific), so current focus is **GUI &
-usability** polish — see the "UX / product" and "Nice-to-haves / quick wins" sections.
+IPN is a **general-purpose ad-hoc VPN** (not RDP-specific). The known-issue hardening list is
+done/mitigated and the GUI has had a big SEED-style pass. Likely next:
+- **Self-host relay setting** — point at your own iroh relay (independence/privacy). Kept in
+  planning; not urgent while n0's public relays work.
+- **A `cargo fmt` + `clippy` clean pass** and a one-shot test runner script (`scripts/test`).
+- **Robustness tests** still missing: offline-during-removal rejoin, mDNS-only (no internet),
+  5+-node pools (see "Robustness").
+- Then **macOS packaging** / **Android** when desktop feels solid.
 
-- **Self-host relay setting** — independence/privacy. Kept in **planning** (not urgent while
-  n0's public relays work).
-
-(Done: virtual-IP race → deterministic IPs; secrets → OS keystore; originator key backup &
-recovery → export/import recovery code in GUI + CLI. Dropped: per-member RDP/SSH "Connect"
-launcher — out of scope now that IPN is a general VPN.)
+## Recently shipped (this session)
+Captured here since it's not all obvious from a glance — see `CHANGELOG.md [Unreleased]` for detail.
+- **All 6 known issues** addressed (see below): deterministic IPs, OS-keystore secrets, MSS
+  clamping, protocol versioning; timestamp + doc-spam mitigations.
+- **Originator key backup & recovery** — export/import an `ipnkey1…` recovery code (GUI + CLI).
+- **Hostname = live OS truth** (re-read each beat, not editable); **friendly names are LOCAL
+  per-client nicknames** (set for *other* members, never broadcast).
+- **Public IP advertised** in the signed presence heartbeat; **Local IP / Public IP** shown.
+- **Geolocation** ("City, State, Country") — originator downloads the DB-IP City DB (CC BY 4.0,
+  ~60 MB, runtime, bi-weekly refresh), resolves each member's public IP, and propagates signed
+  location strings; members need no DB and make no external calls. `geo` module + `geo_e2e`.
+- **GUI redesign (SEED-style)**: static "IPN" titlebar, borrowed `style.css`/`windows.css`,
+  **overlay flyouts** (`adw::OverlaySplitView`) that cover the full window; Members list at the
+  bottom (this device included) with a per-member **detail flyout** (info + copy + kick);
+  **color-coded status dots** (green/gray/red>1wk, last-seen persisted); **Administration** flyout
+  hosts network rename + freeze/rotate/recovery/delete, with **Join requests** inside it (flashing
+  red chip on the row + light-red attention area). "+" hidden when in a network; **About** is a
+  row; **Ctrl+Q**, **`--version`**, **`--minimized`**, remember-window-size, toasts, ticket
+  validation, tooltips/legend, friendlier empty/connecting/error states.
+- **Render memoization** so the page only rebuilds on real changes (keyboard focus / clicks no
+  longer stolen); **join-decline** cleanly resets the joiner to no-network.
+- **New app icon** (`img/icon-spin.*`).
 
 ## Known issues / risks to investigate
 - ✅ **Virtual-IP assignment race — FIXED.** IPs are no longer chosen by the approver; each
@@ -74,18 +102,18 @@ launcher — out of scope now that IPN is a general VPN.)
   (self-eviction relies on it seeing the removal — add a test).
 - Offline / no-internet LAN: confirm mDNS discovery (already wired) lets two devices on the same
   network connect with no relay/Internet; add a test.
-- IPv6 inside the virtual LAN (IPv4-only today); larger/!/configurable subnet than a single /24.
+- IPv6 inside the virtual LAN (IPv4-only today); larger/configurable subnet than a single /24.
+- IPv6 geolocation (today only the IPv4 DB-IP City DB is fetched; v6 peers get no Location).
 
 ## UX / product
-- Editable device name in the UI (instead of the raw hostname).
-- A **pending join requests** panel — today the approval is a transient dialog; if dismissed or
-  missed there's no way to re-approve.
-- Desktop notifications (join request received, member came online).
-- Per-member quick actions: copy address (done), rename. (Dropped the RDP/SSH launcher — IPN is a
-  general VPN, so users point their own tools at the peer IP.)
-- A diagnostics/status view: relay-in-use, direct-vs-relay (shown), throughput, NAT info; expose
-  the existing `conn_probe` logic in-app.
-- Friendlier first-run / onboarding; clearer empty and error states.
+- ~~Editable device name~~ — done as **local nicknames** (per-client, set for other members).
+- ~~Pending join requests panel~~ — done (now inside Administration with a flashing chip).
+- ~~Desktop notifications (join request, member online)~~ — done.
+- ~~Diagnostics view~~ — done (home relay, direct/relay; throughput/NAT still TODO if wanted).
+- ~~Friendlier first-run / empty / error states~~ — done (Create/Join on empty, Connecting page,
+  daemon-down / version-mismatch pages).
+- Per-member quick actions: copy address (done), nickname (done). (Dropped the RDP/SSH launcher.)
+- Throughput / NAT-type in Diagnostics (needs daemon counters/probe) — still open.
 
 (Done: app icon, system tray, minimize-to-tray, "Quit IPN" disconnects then exits.)
 
@@ -97,9 +125,13 @@ launcher — out of scope now that IPN is a general VPN.)
 - Real installers (see `docs/releasing.md` "Planned installers"): Windows MSI + code signing,
   Linux `.deb`/AppImage/Flatpak + a systemd unit, macOS notarized app, Android APK.
 - **Launch on login (autostart), starting minimized to the tray** — register from the installer
-  (Windows: Run key / Startup shortcut; Linux: XDG autostart `.desktop`; macOS: LoginItem).
-  Needs the GUI start-hidden flag (see quick-wins).
+  (Windows: Run key / Startup shortcut; Linux: XDG autostart `.desktop`; macOS: LoginItem). The
+  GUI start-hidden flag (`--minimized` / `IPN_START_MINIMIZED`) already exists; just wire the
+  autostart entry in the installer.
 - A Windows Start-menu shortcut in the bundle.
+- **Installer should put the daemon binary in a stable location (e.g. Program Files), not run it
+  from the unpacked `dist` folder** — currently the installed service locks `dist\…\ipn-daemon.exe`,
+  so rebuilding in place fails until the service is stopped. (Local-dev annoyance.)
 - Auto-update mechanism (and a way to view/rotate logs).
 - Log to a file with rotation; a "view logs" affordance in the GUI.
 
@@ -108,28 +140,21 @@ launcher — out of scope now that IPN is a general VPN.)
 - More e2e: 5+ node scaling, reconnect after a network blip, offline-during-removal rejoin,
   mDNS-only (no internet). (Concurrent-join IP race is covered by roster unit tests.)
 - Property/fuzz tests for the roster fold against adversarial entry sets.
-- Wire `cargo clippy` + `cargo fmt --check` into the dev workflow; clear the existing GUI warning.
+- Wire `cargo clippy` + `cargo fmt --check` into the dev workflow; do a clean pass.
 
 ## Nice-to-haves / quick wins (low effort)
-Polish and small ergonomics — likely an afternoon each or less.
-- ~~`--version` on `ipn`, `ipn-daemon`, `ipn-cli`; show the version in the GUI~~ (done; About dialog).
-- ~~An **About** dialog (version, repo link, license, credits).~~ (done; repo link pending public repo.)
+Remaining small ergonomics (many quick-wins are now done — see "Recently shipped").
 - A `cargo fmt` / `clippy` clean pass.
-- Toasts confirming actions ("Ticket copied", "Member removed", "Network frozen").
-- Validate the Join ticket field (reject input that isn't an `ipn1…` ticket, with a clear hint).
-- Disable a button while its action is in flight (avoid double-submits).
-- Remember window size/position between runs.
-- Show this device's own NodeId somewhere + a copy button (useful for `add-key`/debugging).
-- ~~GUI start-hidden / `--minimized` flag (lets autostart launch straight to the tray).~~ (done:
-  `--minimized` / `IPN_START_MINIMIZED`; installer autostart entry still to wire up.)
+- Disable a button while its action is in flight (avoid double-submits). (Largely moot — dialogs
+  close on submit — but the few main-window actions could use it.)
 - Dev convenience scripts: `scripts/run-dev` (start daemon + GUI) and `scripts/test`
   (unit + all ignored e2e) for quick local checks.
 - A short top-level `CONTRIBUTING.md` that points at `docs/development.md`.
-- A relative "last seen" that updates live without needing a roster change.
-- Tooltips/legend for the status dot and direct-vs-relay labels.
 
 ## Maybe / ideas
-- 💡 More than one network per device at once.
+- 💡 More than one network per device at once. (Hurdles assessed: the crux is the data plane —
+  non-overlapping subnets, per-network connections via the ALPN, and one-TUN-per-network vs a
+  shared routing table; everything above the data plane is a mechanical single→map refactor.)
 - 💡 Per-peer "last seen" history / connection-quality graph.
 - 💡 Optional headless/server mode (a member that's just a reachable host, no GUI).
 
