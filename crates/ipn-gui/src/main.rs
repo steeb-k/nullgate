@@ -263,7 +263,6 @@ struct Ui {
     main_box: gtk::Box,
     admin_box: gtk::Box,
     diag_box: gtk::Box,
-    requests_box: gtk::Box,
     ticket_box: gtk::Box,
     member_box: gtk::Box,
     member_title: adw::WindowTitle,
@@ -354,7 +353,6 @@ fn build_ui(
 
     let admin_box = padded_box();
     let diag_box = padded_box();
-    let requests_box = padded_box();
     let ticket_box = padded_box();
     let member_box = padded_box();
 
@@ -386,14 +384,12 @@ fn build_ui(
 
     let (admin_panel, _) = make_panel("Administration", &admin_box);
     let (diag_panel, _) = make_panel("Diagnostics", &diag_box);
-    let (requests_panel, _) = make_panel("Join requests", &requests_box);
     let (ticket_panel, _) = make_panel("Join ticket", &ticket_box);
     let (member_panel, member_title) = make_panel("Member", &member_box);
 
     let stack = gtk::Stack::new();
     stack.add_named(&admin_panel, Some("admin"));
     stack.add_named(&diag_panel, Some("diagnostics"));
-    stack.add_named(&requests_panel, Some("requests"));
     stack.add_named(&ticket_panel, Some("ticket"));
     stack.add_named(&member_panel, Some("member"));
     split.set_sidebar(Some(&stack));
@@ -408,7 +404,6 @@ fn build_ui(
         main_box,
         admin_box,
         diag_box,
-        requests_box,
         ticket_box,
         member_box,
         member_title,
@@ -683,30 +678,31 @@ fn render_signature(s: &NetworkStatus, pending: &[PendingJoin]) -> String {
     let mut out = String::new();
     let _ = write!(
         out,
-        "{}|{}|{}|{}|{}|{}|{}|{}|",
+        "{}|{}|{}|{}|{}|{}|{}|",
         s.name,
         s.online,
         s.routing,
         s.frozen,
         s.is_originator,
         s.self_ip.as_deref().unwrap_or(""),
-        s.self_label.as_deref().unwrap_or(""),
         s.home_relay.as_deref().unwrap_or(""),
     );
     for m in &s.members {
-        // Only include last-seen for offline members (it's the only field shown
-        // for them), bucketed via `fmt_last_seen` so it changes rarely.
-        let last = if m.online { String::new() } else { fmt_last_seen(m.last_seen) };
+        // Bucket last-seen via `fmt_last_seen` so it changes rarely; include it
+        // always so the dot can flip to red after a week even while offline.
+        let last = fmt_last_seen(m.last_seen);
         let _ = write!(
             out,
-            "[{}|{}|{}|{}|{}|{:?}|{}|{}|{}]",
+            "[{}|{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}]",
             m.node_id,
             m.is_self,
             m.label.as_deref().unwrap_or(""),
             m.hostname.as_deref().unwrap_or(""),
             m.virtual_ip.as_deref().unwrap_or(""),
+            m.local_ip.as_deref().unwrap_or(""),
             m.direct,
             m.online,
+            m.public_ip.as_deref().unwrap_or(""),
             m.observed_addr.as_deref().unwrap_or(""),
             last,
         );
@@ -745,9 +741,8 @@ fn render_all(
     pending: &Rc<RefCell<Vec<PendingJoin>>>,
 ) {
     render_main(ui, s, net, window, pending);
-    render_admin(&ui.admin_box, s, net, window);
+    render_admin(&ui.admin_box, s, net, window, pending);
     render_diag(&ui.diag_box, s);
-    render_requests(&ui.requests_box, net, pending);
 }
 
 /// Build the main page: connection banners, the control group (Administration,
@@ -777,18 +772,25 @@ fn render_main(
         );
     }
 
-    // Control group: Administration (top) → Show join ticket → Diagnostics
-    // (bottom), with Join requests surfaced above when present.
+    // Control group: Administration (top) → Show join ticket → Diagnostics →
+    // About. Pending join requests live inside Administration; a flashing chip on
+    // the Administration row flags them.
     let controls = adw::PreferencesGroup::new();
     let n_pending = pending.borrow().len();
-    if n_pending > 0 {
-        let row = flyout_row("Join requests", &format!("{n_pending} waiting"), "dialog-question-symbolic");
-        let ui2 = ui.clone();
-        row.connect_activated(move |_| ui2.open("requests"));
-        controls.add(&row);
-    }
     {
-        let row = flyout_row("Administration", "Name, freeze, rotate, recovery, delete/leave", "emblem-system-symbolic");
+        let row = adw::ActionRow::builder()
+            .title("Administration")
+            .subtitle("Join requests, name, freeze, rotate, recovery, delete/leave")
+            .activatable(true)
+            .build();
+        row.add_prefix(&gtk::Image::from_icon_name("emblem-system-symbolic"));
+        if n_pending > 0 {
+            let chip = gtk::Label::new(Some("Join Request"));
+            chip.add_css_class("attention-chip");
+            chip.set_valign(gtk::Align::Center);
+            row.add_suffix(&chip);
+        }
+        row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
         let ui2 = ui.clone();
         row.connect_activated(move |_| ui2.open("admin"));
         controls.add(&row);
@@ -842,11 +844,7 @@ fn member_row(
     net: &Net,
     window: &adw::ApplicationWindow,
 ) -> adw::ActionRow {
-    let dot = gtk::Label::new(Some("●"));
-    dot.add_css_class("status-dot");
-    dot.add_css_class(if m.online { "success" } else { "dim-label" });
-    dot.set_valign(gtk::Align::Center);
-    dot.set_tooltip_text(Some(if m.online { "Online" } else { "Offline" }));
+    let dot = status_dot(m.online, m.last_seen);
 
     let mut title = m
         .label
@@ -906,8 +904,42 @@ fn render_diag(b: &gtk::Box, s: &NetworkStatus) {
     b.append(&g);
 }
 
-fn render_admin(b: &gtk::Box, s: &NetworkStatus, net: &Net, window: &adw::ApplicationWindow) {
+fn render_admin(
+    b: &gtk::Box,
+    s: &NetworkStatus,
+    net: &Net,
+    window: &adw::ApplicationWindow,
+    pending: &Rc<RefCell<Vec<PendingJoin>>>,
+) {
     clear_box(b);
+
+    // Pending join requests — first, on a light-red attention background.
+    {
+        let plist = pending.borrow();
+        if !plist.is_empty() {
+            let area = gtk::Box::new(gtk::Orientation::Vertical, 8);
+            area.add_css_class("attention-bg");
+            let title = gtk::Label::new(Some("Join requests"));
+            title.add_css_class("title-4");
+            title.set_halign(gtk::Align::Center);
+            area.append(&title);
+            let hint = gtk::Label::new(Some(
+                "Approve only if the emoji code matches the joining device's screen.",
+            ));
+            hint.add_css_class("dim-label");
+            hint.set_wrap(true);
+            hint.set_justify(gtk::Justification::Center);
+            hint.set_halign(gtk::Align::Center);
+            area.append(&hint);
+            for (i, req) in plist.iter().enumerate() {
+                if i > 0 {
+                    area.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+                }
+                area.append(&request_card(req, net, pending));
+            }
+            b.append(&area);
+        }
+    }
 
     // Network name (rename here, not on the main screen).
     let name_group = adw::PreferencesGroup::new();
@@ -984,80 +1016,54 @@ fn render_admin(b: &gtk::Box, s: &NetworkStatus, net: &Net, window: &adw::Applic
     b.append(&danger);
 }
 
-fn render_requests(b: &gtk::Box, net: &Net, pending: &Rc<RefCell<Vec<PendingJoin>>>) {
-    clear_box(b);
-    let plist = pending.borrow();
-    if plist.is_empty() {
-        b.append(
-            &adw::StatusPage::builder()
-                .icon_name("dialog-question-symbolic")
-                .title("No pending requests")
-                .css_classes(["empty-state"])
-                .vexpand(true)
-                .build(),
-        );
-        return;
-    }
-    let hint = gtk::Label::new(Some(
-        "Approve only if the emoji code matches the joining device's screen.",
-    ));
-    hint.add_css_class("dim-label");
-    hint.set_wrap(true);
-    hint.set_justify(gtk::Justification::Center);
-    hint.set_halign(gtk::Align::Center);
-    b.append(&hint);
+/// One pending-join card: who + big emoji code + Approve/Deny.
+fn request_card(req: &PendingJoin, net: &Net, pending: &Rc<RefCell<Vec<PendingJoin>>>) -> gtk::Box {
+    let card = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    card.set_margin_top(8);
+    card.set_margin_bottom(8);
 
-    for (i, req) in plist.iter().enumerate() {
-        if i > 0 {
-            b.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        }
-        let card = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        card.set_margin_top(8);
-        card.set_margin_bottom(8);
+    let who = gtk::Label::new(Some(&format!("“{}” wants to join", req.hostname)));
+    who.add_css_class("title-3");
+    who.set_halign(gtk::Align::Center);
+    who.set_wrap(true);
+    card.append(&who);
 
-        let who = gtk::Label::new(Some(&format!("“{}” wants to join", req.hostname)));
-        who.add_css_class("title-3");
-        who.set_halign(gtk::Align::Center);
-        who.set_wrap(true);
-        card.append(&who);
+    // Big emojis, matching the joiner's "Verify this code" page.
+    card.append(&sas_label(&req.sas));
 
-        // Big emojis, matching the joiner's "Verify this code" page.
-        card.append(&sas_label(&req.sas));
+    let btns = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    btns.set_halign(gtk::Align::Center);
+    let deny = gtk::Button::with_label("Deny");
+    deny.add_css_class("pill");
+    let approve = gtk::Button::with_label("Approve");
+    approve.add_css_class("pill");
+    approve.add_css_class("suggested-action");
 
-        let btns = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        btns.set_halign(gtk::Align::Center);
-        let deny = gtk::Button::with_label("Deny");
-        deny.add_css_class("pill");
-        let approve = gtk::Button::with_label("Approve");
-        approve.add_css_class("pill");
-        approve.add_css_class("suggested-action");
-
-        let net_a = net.clone();
-        let pending_a = pending.clone();
-        let id_a = req.node_id.clone();
-        approve.connect_clicked(move |_| {
-            pending_a.borrow_mut().retain(|p| p.node_id != id_a);
-            net_a.request(IpcRequest::ApproveJoin { node_id: id_a.clone() }, |r| match r {
-                Ok(IpcResponse::Ok) => Some(UiMsg::Toast("Approved".into())),
-                Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
-                _ => None,
-            });
-            net_a.refresh();
+    let net_a = net.clone();
+    let pending_a = pending.clone();
+    let id_a = req.node_id.clone();
+    approve.connect_clicked(move |_| {
+        pending_a.borrow_mut().retain(|p| p.node_id != id_a);
+        net_a.request(IpcRequest::ApproveJoin { node_id: id_a.clone() }, |r| match r {
+            Ok(IpcResponse::Ok) => Some(UiMsg::Toast("Approved".into())),
+            Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
+            _ => None,
         });
-        let net_d = net.clone();
-        let pending_d = pending.clone();
-        let id_d = req.node_id.clone();
-        deny.connect_clicked(move |_| {
-            pending_d.borrow_mut().retain(|p| p.node_id != id_d);
-            net_d.request(IpcRequest::DenyJoin { node_id: id_d.clone() }, |_| None);
-            net_d.toast("Join denied");
-            net_d.refresh();
-        });
-        btns.append(&deny);
-        btns.append(&approve);
-        card.append(&btns);
-        b.append(&card);
-    }
+        net_a.refresh();
+    });
+    let net_d = net.clone();
+    let pending_d = pending.clone();
+    let id_d = req.node_id.clone();
+    deny.connect_clicked(move |_| {
+        pending_d.borrow_mut().retain(|p| p.node_id != id_d);
+        net_d.request(IpcRequest::DenyJoin { node_id: id_d.clone() }, |_| None);
+        net_d.toast("Join denied");
+        net_d.refresh();
+    });
+    btns.append(&deny);
+    btns.append(&approve);
+    card.append(&btns);
+    card
 }
 
 /// Fill + open the per-member detail flyout.
@@ -1083,27 +1089,36 @@ fn fill_member(
     clear_box(&ui.member_box);
     let g = adw::PreferencesGroup::new();
 
-    if m.is_self {
+    // Status (top) with a colored dot (green / gray / red>1wk).
+    let status_text = if m.online {
+        if m.is_self { "Online (this device)".to_string() } else { "Online".to_string() }
+    } else if m.last_seen == 0 {
+        "Offline".to_string()
+    } else {
+        format!("Offline · last seen {}", fmt_last_seen(m.last_seen))
+    };
+    let status_row = property_row("Status", &status_text);
+    status_row.add_prefix(&status_dot(m.online, m.last_seen));
+    g.add(&status_row);
+
+    // Friendly name — set by THIS client for another member (local; not shared).
+    if !m.is_self {
         let name_row = adw::ActionRow::builder()
             .title("Friendly name")
             .subtitle(m.label.clone().unwrap_or_else(|| "(none)".into()))
             .build();
-        let edit = icon_button("document-edit-symbolic", "Set this device's friendly name");
+        let edit = icon_button("document-edit-symbolic", "Set a local nickname for this member");
         let window2 = window.clone();
         let net2 = net.clone();
+        let id = m.node_id.clone();
         let cur = m.label.clone();
-        edit.connect_clicked(move |_| set_label_dialog(&window2, &net2, cur.clone()));
+        edit.connect_clicked(move |_| set_nickname_dialog(&window2, &net2, &id, cur.clone()));
         name_row.add_suffix(&edit);
         g.add(&name_row);
-    } else if let Some(l) = &m.label {
-        g.add(&property_row("Friendly name", l));
     }
 
     g.add(&property_row("Hostname", &m.hostname.clone().unwrap_or_else(|| "—".into())));
-    g.add(&property_row("Status", if m.online { "Online" } else { "Offline" }));
-    if !m.is_self && !m.online {
-        g.add(&property_row("Last seen", &fmt_last_seen(m.last_seen)));
-    }
+
     if let Some(ip) = &m.virtual_ip {
         let row = property_row("Virtual IP", ip);
         let copy = icon_button("edit-copy-symbolic", "Copy virtual IP");
@@ -1117,19 +1132,9 @@ fn fill_member(
         row.add_suffix(&copy);
         g.add(&row);
     }
-    if !m.is_self && m.online {
-        g.add(&property_row(
-            "Connection",
-            match m.direct {
-                Some(true) => "Direct (peer-to-peer)",
-                Some(false) => "Via relay",
-                None => "—",
-            },
-        ));
-    }
-    if let Some(addr) = &m.observed_addr {
-        g.add(&property_row("Observed address", addr));
-    }
+    g.add(&property_row("Local IP", m.local_ip.as_deref().unwrap_or("—")));
+    g.add(&property_row("Public IP", m.public_ip.as_deref().unwrap_or("—")));
+
     let id_row = property_row("Node ID", &m.node_id);
     let copy = icon_button("edit-copy-symbolic", "Copy node ID");
     let nid = m.node_id.clone();
@@ -1141,6 +1146,12 @@ fn fill_member(
     });
     id_row.add_suffix(&copy);
     g.add(&id_row);
+
+    // Observed address — kept, at the bottom.
+    g.add(&property_row(
+        "Observed address",
+        m.observed_addr.as_deref().unwrap_or("—"),
+    ));
     ui.member_box.append(&g);
 
     if !m.is_self && is_originator {
@@ -1417,17 +1428,22 @@ fn join_dialog(window: &adw::ApplicationWindow, net: &Net) {
     dialog.present();
 }
 
-fn set_label_dialog(window: &adw::ApplicationWindow, net: &Net, current: Option<String>) {
+fn set_nickname_dialog(
+    window: &adw::ApplicationWindow,
+    net: &Net,
+    node_id: &str,
+    current: Option<String>,
+) {
     let entry = gtk::Entry::builder()
         .text(current.unwrap_or_default())
-        .placeholder_text("Friendly name (leave blank to clear)")
+        .placeholder_text("Nickname (leave blank to clear)")
         .build();
     let dialog = adw::MessageDialog::builder()
         .transient_for(window)
-        .heading("Set this device's name")
+        .heading("Set a friendly name")
         .body(
-            "A friendly label other members see. The hostname (your real OS name) is always \
-             shown too and can't be changed here.",
+            "A nickname for this member, stored only on this device (not shared). The hostname \
+             stays the shared identifier.",
         )
         .extra_child(&entry)
         .build();
@@ -1436,17 +1452,21 @@ fn set_label_dialog(window: &adw::ApplicationWindow, net: &Net, current: Option<
     dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
     dialog.set_default_response(Some("save"));
     let net = net.clone();
+    let node_id = node_id.to_string();
     dialog.connect_response(None, move |_, resp| {
         if resp != "save" {
             return;
         }
         let text = entry.text().to_string();
-        let label = if text.trim().is_empty() { None } else { Some(text) };
-        net.request(IpcRequest::SetLabel { label }, |r| match r {
-            Ok(IpcResponse::Ok) => Some(UiMsg::Toast("Name updated".into())),
-            Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
-            _ => None,
-        });
+        let name = if text.trim().is_empty() { None } else { Some(text) };
+        net.request(
+            IpcRequest::SetNickname { node_id: node_id.clone(), name },
+            |r| match r {
+                Ok(IpcResponse::Ok) => Some(UiMsg::Toast("Nickname updated".into())),
+                Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
+                _ => None,
+            },
+        );
     });
     dialog.present();
 }
@@ -1632,6 +1652,32 @@ fn qr_picture(data: &str) -> Option<gtk::Picture> {
 }
 
 // --- helpers ---
+
+const WEEK_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// A colored status dot: green online, gray offline, red if offline > 1 week.
+fn status_dot(online: bool, last_seen: u64) -> gtk::Label {
+    let dot = gtk::Label::new(Some("●"));
+    dot.add_css_class("status-dot");
+    dot.set_valign(gtk::Align::Center);
+    let (class, tip) = if online {
+        ("success", "Online")
+    } else if last_seen != 0 && now_ms().saturating_sub(last_seen) > WEEK_MS {
+        ("error", "Offline (over a week)")
+    } else {
+        ("dim-label", "Offline")
+    };
+    dot.add_css_class(class);
+    dot.set_tooltip_text(Some(tip));
+    dot
+}
 
 fn short_id(hex: &str) -> String {
     hex.chars().take(10).collect()

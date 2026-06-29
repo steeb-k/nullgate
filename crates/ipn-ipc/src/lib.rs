@@ -72,9 +72,10 @@ pub enum IpcRequest {
     GetTicket,
     /// Rename the network (shared across members via the signed roster).
     SetNetworkName { name: String },
-    /// Set (or clear, with `None`) this device's friendly label. The hostname is
-    /// always the real OS hostname and is never settable.
-    SetLabel { label: Option<String> },
+    /// Set (or clear, with `None`) this client's **local** friendly nickname for
+    /// another member (by NodeId hex). Never broadcast; the hostname is the shared
+    /// identifier.
+    SetNickname { node_id: String, name: Option<String> },
     /// Export the originator master key as a recovery code (originator only).
     ExportOriginatorKey,
     /// Import an originator recovery code to gain originator powers on this network.

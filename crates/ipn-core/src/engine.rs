@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::Duration;
 
@@ -107,11 +107,15 @@ impl StoredConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemberView {
     pub node_id: String,
-    /// The device's actual current OS hostname (source of truth).
+    /// The device's actual current OS hostname (the shared identifier).
     pub hostname: Option<String>,
-    /// Optional friendly name the member set for itself.
+    /// This client's **local** friendly nickname for the member (not shared).
     pub label: Option<String>,
     pub virtual_ip: Option<String>,
+    /// Peer's private/LAN IP (no port), if known.
+    pub local_ip: Option<String>,
+    /// Peer's public/internet-facing IP (no port), if known.
+    pub public_ip: Option<String>,
     pub observed_addr: Option<String>,
     pub direct: Option<bool>,
     pub online: bool,
@@ -127,8 +131,6 @@ pub struct NetworkStatus {
     pub frozen: bool,
     pub self_node_id: String,
     pub self_ip: Option<String>,
-    /// This device's own friendly label (for prefilling the "set name" UI).
-    pub self_label: Option<String>,
     pub is_originator: bool,
     /// Whether the TUN is up so RDP/SSH traffic is actually routed (needs elevation).
     pub routing: bool,
@@ -211,9 +213,10 @@ struct Inner {
     node: IrohNode,
     device_key: SigningKey,
     my_id: Id,
-    /// This device's member-chosen friendly label (the OS hostname is read live,
-    /// never cached, so it always reflects the actual current hostname).
-    label: StdRwLock<Option<String>>,
+    /// This client's **local** friendly nicknames for other members, keyed by
+    /// NodeId hex. Never broadcast — purely local display. The OS hostname (read
+    /// live) is the shared identifier.
+    nicknames: StdRwLock<HashMap<String, String>>,
     data_dir: PathBuf,
     state: Mutex<State>,
     events: broadcast::Sender<EngineEvent>,
@@ -236,6 +239,8 @@ struct Inner {
     /// Our mesh/join protocol version (normally `admission::PROTOCOL_VERSION`;
     /// overridable in tests to exercise the mismatch path).
     protocol_version: AtomicU32,
+    /// Last time (ms) we flushed the persisted last-seen map (throttle).
+    last_seen_saved: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -260,14 +265,14 @@ impl Engine {
         let device_key = node.device_signing_key();
         let my_id = node.node_id_bytes();
         debug_assert_eq!(device_key.verifying_key().to_bytes(), my_id);
-        let label = load_label(&data_dir);
+        let nicknames = load_nicknames(&data_dir);
 
         let (events, _) = broadcast::channel(64);
         let inner = Arc::new(Inner {
             node,
             device_key,
             my_id,
-            label: StdRwLock::new(label),
+            nicknames: StdRwLock::new(nicknames),
             data_dir,
             state: Mutex::new(State {
                 config: None,
@@ -286,11 +291,21 @@ impl Engine {
             net_tasks: StdMutex::new(Vec::new()),
             was_member: AtomicBool::new(false),
             protocol_version: AtomicU32::new(admission::PROTOCOL_VERSION),
+            last_seen_saved: AtomicU64::new(0),
         });
 
         // Accept loops for our custom ALPNs.
         spawn_accept_loop(inner.clone(), mesh_rx, handle_mesh_incoming);
         spawn_accept_loop(inner.clone(), join_rx, handle_join_incoming);
+
+        // Seed last-seen times from disk so "offline > 1 week" survives restarts.
+        {
+            let seen = load_last_seen(&inner.data_dir);
+            let mut st = inner.state.lock().await;
+            for (id, ts) in seen {
+                st.presence.set_last_seen(id, ts);
+            }
+        }
 
         // Load + activate a stored network, if any.
         if let Some(cfg) = load_config(&inner.data_dir)? {
@@ -397,12 +412,10 @@ impl Engine {
             originator_id: ticket.originator_id,
             originator_secret: None,
         };
-        activate(&self.inner, cfg.clone()).await?;
-
-        // From here on the device is provisionally activated. If the handshake
-        // fails OR the member declines, tear everything back down so a rejected
-        // device returns cleanly to the no-network state (config cleared, presence
-        // task aborted) rather than lingering "in" the network.
+        // Run the handshake WITHOUT activating yet: we only open the network once
+        // we're accepted, so the joiner never shows a network while pending and a
+        // decline leaves it cleanly at no-network. If activation/persist fails
+        // *after* acceptance, tear it back down.
         match join_handshake(&self.inner, &cfg, &ticket).await {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -701,12 +714,24 @@ impl Engine {
         Ok(())
     }
 
-    /// Set (or clear, with `None`/empty) this device's friendly label. The label
-    /// is persisted and broadcast via presence; the OS hostname is never editable.
-    pub async fn set_label(&self, label: Option<String>) -> Result<()> {
-        let label = label.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-        *self.inner.label.write().unwrap() = label.clone();
-        save_label(&self.inner.data_dir, label.as_deref());
+    /// Set (or clear, with `None`/empty) this client's **local** friendly nickname
+    /// for another member. Stored locally and never broadcast; the OS hostname is
+    /// the shared identifier.
+    pub async fn set_nickname(&self, node_id_hex: &str, name: Option<String>) -> Result<()> {
+        let _ = parse_id(node_id_hex)?; // validate it's a real NodeId hex
+        let name = name.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        {
+            let mut map = self.inner.nicknames.write().unwrap();
+            match name {
+                Some(n) => {
+                    map.insert(node_id_hex.to_string(), n);
+                }
+                None => {
+                    map.remove(node_id_hex);
+                }
+            }
+            save_nicknames(&self.inner.data_dir, &map);
+        }
         let _ = self.inner.events.send(EngineEvent::Changed);
         Ok(())
     }
@@ -715,32 +740,44 @@ impl Engine {
     pub async fn status(&self) -> Result<NetworkStatus> {
         let st = self.inner.state.lock().await;
         let cfg = st.config.as_ref().context("no network")?;
+        let nicks = self.inner.nicknames.read().unwrap();
+        let self_addr = self.inner.node.addr();
+        let (self_local, self_public) = split_local_public(self_addr.ip_addrs().copied());
         let mut members = Vec::new();
         for (id, m) in st.roster.members() {
             let ps = st.presence.get(id);
             let is_self = *id == self.inner.my_id;
+            let node_hex = data_encoding::HEXLOWER.encode(id);
+            let (local_ip, public_ip) = if is_self {
+                (self_local.clone(), self_public.clone())
+            } else {
+                (
+                    ps.and_then(|p| p.local_ip.clone()),
+                    ps.and_then(|p| p.public_ip.clone()),
+                )
+            };
             members.push(MemberView {
-                node_id: data_encoding::HEXLOWER.encode(id),
                 hostname: if is_self {
                     Some(current_hostname())
                 } else {
                     ps.and_then(|p| p.hostname.clone())
                         .or_else(|| Some(m.hostname.clone()))
                 },
-                label: if is_self {
-                    self.inner.label.read().unwrap().clone()
-                } else {
-                    ps.and_then(|p| p.label.clone())
-                },
+                // Local nickname this client set for the member (never shared).
+                label: nicks.get(&node_hex).cloned(),
                 virtual_ip: Some(m.virtual_ip.to_string()),
+                local_ip,
+                public_ip,
                 observed_addr: ps.and_then(|p| p.observed_addr.clone()),
                 direct: ps.and_then(|p| p.direct),
                 online: is_self || ps.map(|p| p.online).unwrap_or(false),
                 last_seen: ps.map(|p| p.last_seen).unwrap_or(0),
                 is_self,
                 is_originator_device: m.added_by == cfg.originator_id && false, // device==originator-master only at genesis; informational
+                node_id: node_hex,
             });
         }
+        drop(nicks);
         members.sort_by(|a, b| b.online.cmp(&a.online).then(a.node_id.cmp(&b.node_id)));
         Ok(NetworkStatus {
             // Prefer the shared roster name; fall back to the local config name.
@@ -756,7 +793,6 @@ impl Engine {
                 .roster
                 .member(&self.inner.my_id)
                 .map(|m| m.virtual_ip.to_string()),
-            self_label: self.inner.label.read().unwrap().clone(),
             is_originator: cfg.originator_secret.is_some(),
             routing: self.inner.tun.read().unwrap().is_some(),
             online: st.doc.is_some(),
@@ -807,8 +843,7 @@ async fn activate(inner: &Arc<Inner>, cfg: StoredConfig) -> Result<()> {
                     if let Ok(p) = ciborium::from_reader::<Presence, _>(m.content.as_ref()) {
                         if p.verify(&net_id) && p.node_id != ti.my_id {
                             let mut st = ti.state.lock().await;
-                            st.presence
-                                .record_heartbeat(p.node_id, p.hostname, p.label, p.ts);
+                            st.presence.record_heartbeat(p.node_id, p.hostname, p.ts);
                             drop(st);
                             let _ = ti.events.send(EngineEvent::Changed);
                         }
@@ -917,7 +952,7 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
             .lock()
             .await
             .presence
-            .record_connection(id, None, None, false);
+            .record_connection(id, None, None, None, None, false);
     }
 
     // Bring up the TUN with our roster-assigned IP (best-effort; needs elevation).
@@ -971,7 +1006,6 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
             cfg.secret().network_id(),
             &inner.device_key,
             current_hostname(),
-            inner.label.read().unwrap().clone(),
             now_ms(),
         );
         let mut buf = Vec::new();
@@ -985,9 +1019,25 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
     // Refresh observed-address / direct info for live peers.
     let live: Vec<Id> = inner.conns.read().unwrap().keys().copied().collect();
     for peer in live {
-        let (addr, direct) = observed(inner, &peer).await;
+        let ci = conn_info(inner, &peer).await;
         let mut st = inner.state.lock().await;
-        st.presence.record_connection(peer, addr, direct, true);
+        st.presence
+            .record_connection(peer, ci.observed, ci.direct, ci.local_ip, ci.public_ip, true);
+    }
+
+    // Persist last-seen (throttled) so "offline > 1 week" survives restarts.
+    let now = now_ms();
+    if now.saturating_sub(inner.last_seen_saved.load(Ordering::Relaxed)) > 30_000 {
+        inner.last_seen_saved.store(now, Ordering::Relaxed);
+        let map: std::collections::HashMap<String, u64> = {
+            let st = inner.state.lock().await;
+            st.presence
+                .iter()
+                .filter(|(_, p)| p.last_seen > 0)
+                .map(|(id, p)| (data_encoding::HEXLOWER.encode(id), p.last_seen))
+                .collect()
+        };
+        save_last_seen(&inner.data_dir, &map);
     }
 
     let _ = inner.events.send(EngineEvent::Changed);
@@ -1158,8 +1208,10 @@ async fn join_handshake(inner: &Arc<Inner>, cfg: &StoredConfig, ticket: &Ticket)
     let resp: JoinResponse = read_msg(&mut recv).await.context("read join response")?;
     match resp {
         JoinResponse::Approved => {
-            // Persist now that we're admitted, and pull the roster from the member
-            // who admitted us (our virtual IP is derived once we appear in it).
+            // Accepted — only now open the network: activate the doc/presence,
+            // persist, and pull the roster from the member who admitted us (our
+            // virtual IP is derived once we appear in it).
+            activate(inner, cfg.clone()).await?;
             save_config(&inner.data_dir, cfg)?;
             if let Some(doc) = inner.state.lock().await.doc.clone() {
                 let _ = doc.start_sync(vec![ticket.bootstrap.clone()]).await;
@@ -1197,7 +1249,7 @@ async fn register_mesh(inner: &Arc<Inner>, peer: Id, conn: Connection) {
     {
         inner.conns.write().unwrap().insert(peer, conn.clone());
         let mut st = inner.state.lock().await;
-        st.presence.record_connection(peer, None, None, true);
+        st.presence.record_connection(peer, None, None, None, None, true);
     }
     let _ = inner.events.send(EngineEvent::Changed);
 
@@ -1230,7 +1282,7 @@ async fn register_mesh(inner: &Arc<Inner>, peer: Id, conn: Connection) {
         let _ = conn.closed().await;
         inner2.conns.write().unwrap().remove(&peer);
         let mut st = inner2.state.lock().await;
-        st.presence.record_connection(peer, None, None, false);
+        st.presence.record_connection(peer, None, None, None, None, false);
         drop(st);
         let _ = inner2.events.send(EngineEvent::Changed);
     });
@@ -1291,32 +1343,92 @@ async fn enable_tun(inner: &Arc<Inner>, ip: Ipv4Addr) {
     }
 }
 
-/// Classify the live path to a peer (direct vs relay) and its observed address.
-async fn observed(inner: &Arc<Inner>, peer: &Id) -> (Option<String>, Option<bool>) {
+#[derive(Default)]
+struct ConnInfo {
+    /// Active address (IP:port or relay URL) — shown as "Observed address".
+    observed: Option<String>,
+    /// Direct (true) vs relay (false); `None` if unknown.
+    direct: Option<bool>,
+    /// First known private/LAN IP (no port).
+    local_ip: Option<String>,
+    /// First known public IP (no port).
+    public_ip: Option<String>,
+}
+
+/// Inspect what iroh knows about a peer's connection: its active path (direct vs
+/// relay + observed addr) and its candidate private/public IP addresses.
+async fn conn_info(inner: &Arc<Inner>, peer: &Id) -> ConnInfo {
+    let mut out = ConnInfo::default();
     let Ok(eid) = EndpointId::from_bytes(peer) else {
-        return (None, None);
+        return out;
     };
     let Some(info) = inner.node.endpoint.remote_info(eid).await else {
-        return (None, None);
+        return out;
     };
     use iroh::endpoint::TransportAddrUsage;
-    let mut ip = None;
+    let mut has_direct = false;
     let mut relay = false;
     for a in info.addrs() {
-        if matches!(a.usage(), TransportAddrUsage::Active) {
-            if a.addr().is_ip() {
-                ip = Some(format!("{}", a.addr()));
-            } else if a.addr().is_relay() {
-                relay = true;
+        let active = matches!(a.usage(), TransportAddrUsage::Active);
+        match a.addr() {
+            TransportAddr::Ip(sa) => {
+                let ip = sa.ip();
+                if is_private_ip(&ip) {
+                    out.local_ip.get_or_insert_with(|| ip.to_string());
+                } else if !ip.is_unspecified() {
+                    out.public_ip.get_or_insert_with(|| ip.to_string());
+                }
+                if active {
+                    has_direct = true;
+                    out.observed = Some(sa.to_string());
+                }
             }
+            TransportAddr::Relay(url) => {
+                if active {
+                    relay = true;
+                    out.observed.get_or_insert_with(|| url.to_string());
+                }
+            }
+            _ => {}
         }
     }
-    let direct = match (ip.is_some(), relay) {
+    out.direct = match (has_direct, relay) {
         (true, _) => Some(true),
         (false, true) => Some(false),
-        (false, false) => None,
+        _ => None,
     };
-    (ip, direct)
+    out
+}
+
+/// Whether an IP is private/LAN (so it's a "Local IP" rather than "Public IP").
+fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            let o = v6.octets();
+            v6.is_loopback()
+                || (o[0] & 0xfe) == 0xfc // unique-local fc00::/7
+                || (o[0] == 0xfe && (o[1] & 0xc0) == 0x80) // link-local fe80::/10
+        }
+    }
+}
+
+/// Partition a set of socket addresses into (first private IP, first public IP),
+/// IP only. Used for the local device's own Local/Public IP.
+fn split_local_public(
+    addrs: impl Iterator<Item = std::net::SocketAddr>,
+) -> (Option<String>, Option<String>) {
+    let mut local = None;
+    let mut public = None;
+    for sa in addrs {
+        let ip = sa.ip();
+        if is_private_ip(&ip) {
+            local.get_or_insert_with(|| ip.to_string());
+        } else if !ip.is_unspecified() {
+            public.get_or_insert_with(|| ip.to_string());
+        }
+    }
+    (local, public)
 }
 
 async fn publish(inner: &Arc<Inner>, entry: &crate::roster::Entry) -> Result<()> {
@@ -1386,28 +1498,39 @@ fn current_hostname() -> String {
         .unwrap_or_else(|| "ipn-device".into())
 }
 
-fn label_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("label")
-}
-
-/// Load this device's friendly label, if set (a plain UTF-8 file).
-fn load_label(data_dir: &Path) -> Option<String> {
-    std::fs::read_to_string(label_path(data_dir))
+/// This client's local nicknames for other members (NodeId hex → name).
+fn load_nicknames(data_dir: &Path) -> HashMap<String, String> {
+    std::fs::read(data_dir.join("nicknames.cbor"))
         .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .and_then(|b| ciborium::from_reader(b.as_slice()).ok())
+        .unwrap_or_default()
 }
 
-/// Persist (or clear) this device's friendly label. Best-effort.
-fn save_label(data_dir: &Path, label: Option<&str>) {
+fn save_nicknames(data_dir: &Path, map: &HashMap<String, String>) {
     let _ = std::fs::create_dir_all(data_dir);
-    match label {
-        Some(l) => {
-            let _ = std::fs::write(label_path(data_dir), l);
-        }
-        None => {
-            let _ = std::fs::remove_file(label_path(data_dir));
-        }
+    let mut buf = Vec::new();
+    if ciborium::into_writer(map, &mut buf).is_ok() {
+        let _ = std::fs::write(data_dir.join("nicknames.cbor"), buf);
+    }
+}
+
+/// Persisted last-seen times (NodeId hex → ms) so "offline > 1 week" survives
+/// daemon restarts. Loaded into the presence tracker at startup.
+fn load_last_seen(data_dir: &Path) -> Vec<(Id, u64)> {
+    let map: HashMap<String, u64> = std::fs::read(data_dir.join("last_seen.cbor"))
+        .ok()
+        .and_then(|b| ciborium::from_reader(b.as_slice()).ok())
+        .unwrap_or_default();
+    map.into_iter()
+        .filter_map(|(hex, ts)| parse_id(&hex).ok().map(|id| (id, ts)))
+        .collect()
+}
+
+fn save_last_seen(data_dir: &Path, map: &HashMap<String, u64>) {
+    let _ = std::fs::create_dir_all(data_dir);
+    let mut buf = Vec::new();
+    if ciborium::into_writer(map, &mut buf).is_ok() {
+        let _ = std::fs::write(data_dir.join("last_seen.cbor"), buf);
     }
 }
 

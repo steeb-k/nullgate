@@ -49,8 +49,8 @@ enum Cmd {
     Disconnect,
     /// Rename the network (shared across all members).
     Rename { name: String },
-    /// Set this device's friendly label (omit the name to clear it).
-    SetName { name: Option<String> },
+    /// Set a local friendly nickname for another member (omit the name to clear it).
+    Nickname { node_id: String, name: Option<String> },
     /// Export the originator recovery code (originator only).
     ExportKey,
     /// Import an originator recovery code to gain originator powers.
@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
         Cmd::Connect => IpcRequest::Connect,
         Cmd::Disconnect => IpcRequest::Disconnect,
         Cmd::Rename { name } => IpcRequest::SetNetworkName { name },
-        Cmd::SetName { name } => IpcRequest::SetLabel { label: name },
+        Cmd::Nickname { node_id, name } => IpcRequest::SetNickname { node_id, name },
         Cmd::ExportKey => IpcRequest::ExportOriginatorKey,
         Cmd::ImportKey { code } => IpcRequest::ImportOriginatorKey { code },
     };

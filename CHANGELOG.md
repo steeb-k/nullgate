@@ -5,6 +5,18 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 ### Changed
+- **Friendly names are now local nicknames.** A nickname is set by *each client for other
+  members* and stored **locally** (never broadcast); the **hostname** is the shared identifier.
+  (Replaces the old self-set, broadcast label.) Set it from a member's detail page; CLI
+  `ipn-cli nickname <node-id> [name]`.
+- **Join requests live under Administration.** No standalone section; a **flashing red "Join
+  Request" chip** appears on the Administration row when one is pending, and the request shows as
+  the first item in the Administration flyout on a light-red background.
+- **Member detail** reordered and expanded: **Status** (with a colored dot) at top, then friendly
+  name, hostname, virtual IP, **Local IP**, **Public IP** (from iroh's known addresses), and
+  **Observed address** at the bottom.
+- **Status dots are color-coded** everywhere: green (online) / gray (offline) / **red (offline
+  > 1 week)**. Last-seen is persisted so the red state survives daemon restarts.
 - **New app icon** (`img/icon-spin.*`): embedded in the Windows `.exe` and installed as the Linux
   hicolor icon. The tray icon is unchanged. (Takes effect on the next build.)
 - **GUI redesigned (SEED-style).** A static "IPN / Iroh Private Network" titlebar; a stylesheet
@@ -30,6 +42,9 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   on-disk secrets are not migrated.
 
 ### Fixed
+- **Joiner doesn't show the network until accepted.** Activation is deferred until the join is
+  approved, so a pending joiner stays on the empty screen and a decline leaves it there (no stale
+  network view, no close/reopen needed).
 - **Emoji code is laid out consistently.** The SAS now renders in a fixed, symmetric **2 / 3 / 2**
   grid on both the joiner's "Verify this code" dialog and the originator's join-requests flyout
   (they previously wrapped differently — 3/3/1 vs 3/4 — depending on container width).

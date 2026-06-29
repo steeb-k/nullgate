@@ -29,3 +29,27 @@ headerbar {
 .empty-state .icon {
   margin-bottom: 12px;
 }
+
+/* Flashing red "Join Request" chip shown next to Administration when a request
+ * is pending. */
+@keyframes ipn-pulse {
+  0%   { opacity: 1; }
+  50%  { opacity: 0.35; }
+  100% { opacity: 1; }
+}
+.attention-chip {
+  background-color: @error_color;
+  color: #ffffff;
+  border-radius: 9px;
+  padding: 1px 8px;
+  font-size: 0.8em;
+  font-weight: bold;
+  animation: ipn-pulse 1.1s ease-in-out infinite;
+}
+
+/* Light-red background for the pending-request group inside Administration. */
+.attention-bg {
+  background-color: alpha(@error_color, 0.12);
+  border-radius: 12px;
+  padding: 6px;
+}

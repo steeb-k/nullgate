@@ -114,24 +114,20 @@ async fn create_join_and_see_each_other() {
         "A's actual hostname should propagate to B"
     );
 
-    // A sets a friendly label; it propagates to B over presence (the hostname is
-    // unaffected — still the real OS name).
-    a.set_label(Some("Alpha".into())).await.unwrap();
-    let labeled = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let sb = b.status().await.unwrap();
-            if let Some(a_view) = sb.members.iter().find(|m| !m.is_self) {
-                if a_view.label.as_deref() == Some("Alpha") {
-                    return a_view.clone();
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    })
-    .await
-    .expect("A's label did not propagate to B");
+    // Friendly names are LOCAL nicknames: B nicknames A; it shows in B's view only
+    // (no propagation), and A's real hostname is unaffected.
+    b.set_nickname(&a_from_b.node_id, Some("Alpha".into())).await.unwrap();
+    let sb = b.status().await.unwrap();
+    let a_view = sb.members.iter().find(|m| !m.is_self).unwrap();
+    assert_eq!(a_view.label.as_deref(), Some("Alpha"), "B's local nickname for A");
     assert!(
-        labeled.hostname.as_deref().is_some_and(|h| !h.is_empty()),
-        "hostname remains the real OS name alongside the label"
+        a_view.hostname.as_deref().is_some_and(|h| !h.is_empty()),
+        "hostname remains the real OS name alongside the nickname"
+    );
+    // A never sees B's local nickname for it.
+    let sa = a.status().await.unwrap();
+    assert!(
+        sa.members.iter().find(|m| m.is_self).and_then(|m| m.label.clone()).is_none(),
+        "a local nickname must not propagate to the nicknamed device"
     );
 }
