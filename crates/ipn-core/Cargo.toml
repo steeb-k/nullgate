@@ -42,6 +42,12 @@ hostname.workspace = true
 tun-rs.workspace = true
 keyring.workspace = true
 
+# geolocation (originator only): read the DB-IP City MMDB + download it
+maxminddb.workspace = true
+serde_json.workspace = true
+rust_iso3166.workspace = true
+ureq.workspace = true
+
 # diagnostics
 tracing.workspace = true
 thiserror.workspace = true

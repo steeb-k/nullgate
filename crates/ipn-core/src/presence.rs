@@ -115,10 +115,82 @@ fn signing_bytes(
     buf
 }
 
+/// Originator-asserted geolocation for members, signed with the **originator
+/// master key** so peers can trust it. Maps each member's NodeId to a
+/// `"City, Country"` string the originator resolved from its advertised public IP.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Locations {
+    pub network_id: Id,
+    pub ts: u64,
+    pub entries: Vec<(Id, String)>,
+    pub signature: Vec<u8>,
+}
+
+impl Locations {
+    pub fn signed(network_id: Id, originator_key: &SigningKey, entries: Vec<(Id, String)>, ts: u64) -> Self {
+        let sig = originator_key.sign(&loc_signing_bytes(&network_id, &entries, ts));
+        Self {
+            network_id,
+            ts,
+            entries,
+            signature: sig.to_bytes().to_vec(),
+        }
+    }
+
+    /// Verify the message was signed by this network's originator master key.
+    pub fn verify(&self, network_id: &Id, originator_id: &Id) -> bool {
+        if &self.network_id != network_id {
+            return false;
+        }
+        let Ok(sig): Result<[u8; 64], _> = self.signature.as_slice().try_into() else {
+            return false;
+        };
+        let Ok(vk) = VerifyingKey::from_bytes(originator_id) else {
+            return false;
+        };
+        vk.verify_strict(
+            &loc_signing_bytes(&self.network_id, &self.entries, self.ts),
+            &Signature::from_bytes(&sig),
+        )
+        .is_ok()
+    }
+}
+
+fn loc_signing_bytes(network_id: &Id, entries: &[(Id, String)], ts: u64) -> Vec<u8> {
+    #[derive(Serialize)]
+    struct View<'a> {
+        domain: &'static str,
+        network_id: &'a Id,
+        entries: &'a [(Id, String)],
+        ts: u64,
+    }
+    let mut buf = Vec::new();
+    ciborium::into_writer(
+        &View {
+            domain: "ipn-locations-v1",
+            network_id,
+            entries,
+            ts,
+        },
+        &mut buf,
+    )
+    .expect("serialize locations view");
+    buf
+}
+
+/// Envelope for everything sent on the presence gossip topic.
+#[derive(Serialize, Deserialize)]
+pub enum GossipMsg {
+    Presence(Presence),
+    Locations(Locations),
+}
+
 /// What the UI shows for one peer.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct PeerStatus {
     pub hostname: Option<String>,
+    /// "City, Country" resolved by the originator (propagated, not self-reported).
+    pub location: Option<String>,
     pub virtual_ip: Option<Ipv4Addr>,
     /// Peer's private/LAN address (IP only), if iroh knows one.
     pub local_ip: Option<String>,
@@ -197,6 +269,11 @@ impl PresenceTracker {
     /// Set the roster-assigned virtual IP for a peer.
     pub fn set_virtual_ip(&mut self, node_id: Id, ip: Ipv4Addr) {
         self.peers.entry(node_id).or_default().virtual_ip = Some(ip);
+    }
+
+    /// Set a peer's resolved location (from the originator's propagated map).
+    pub fn set_location(&mut self, node_id: Id, location: Option<String>) {
+        self.peers.entry(node_id).or_default().location = location;
     }
 
     pub fn get(&self, node_id: &Id) -> Option<&PeerStatus> {

@@ -84,6 +84,12 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   address. New `roster` unit tests cover determinism and the concurrent case.
 
 ### Added
+- **Member geolocation (Location).** Each member detail shows a **Location** ("City, Country")
+  under Public IP. The **originator** downloads the DB-IP City database (~60 MB, **CC BY 4.0**),
+  resolves every member's advertised public IP, and **propagates the resolved strings** (signed
+  with the originator master key) to everyone — members need no database and make **no external
+  calls**. Refreshed bi-weekly. Required attribution ("IP Geolocation by DB-IP", linking to
+  db-ip.com) is shown next to the Location field. New `geo` module + `geo_e2e` smoke test.
 - **Rename the network (shared).** The network name can be changed after creation and propagates
   to all members via the signed roster (a new `SetName` op; any current member, last-writer-wins).
   CLI `ipn-cli rename <name>`; the GUI exposes it inline (pencil).

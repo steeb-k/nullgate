@@ -38,7 +38,7 @@ use crate::network::{
     decode_recovery_key, encode_recovery_key, generate_originator_key, NetworkSecret, Ticket,
 };
 use crate::node::IrohNode;
-use crate::presence::{Presence, PresenceTracker};
+use crate::presence::{GossipMsg, Locations, Presence, PresenceTracker};
 use crate::roster::{now_ms, sign, Config, Id, Op, Roster};
 use crate::router::{clamp_tcp_mss, dst_ipv4, RouteTable};
 use crate::tun_device::RealTun;
@@ -116,6 +116,8 @@ pub struct MemberView {
     pub local_ip: Option<String>,
     /// Peer's public/internet-facing IP (no port), if known.
     pub public_ip: Option<String>,
+    /// "City, Country" resolved by the originator from the public IP, if available.
+    pub location: Option<String>,
     pub observed_addr: Option<String>,
     pub direct: Option<bool>,
     pub online: bool,
@@ -241,6 +243,10 @@ struct Inner {
     protocol_version: AtomicU32,
     /// Last time (ms) we flushed the persisted last-seen map (throttle).
     last_seen_saved: AtomicU64,
+    /// Geolocation DB, loaded only on the originator (it resolves + propagates).
+    geo: StdRwLock<Option<crate::geo::GeoDb>>,
+    /// Guards against launching multiple concurrent geo-DB downloads.
+    geo_downloading: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -292,6 +298,8 @@ impl Engine {
             was_member: AtomicBool::new(false),
             protocol_version: AtomicU32::new(admission::PROTOCOL_VERSION),
             last_seen_saved: AtomicU64::new(0),
+            geo: StdRwLock::new(None),
+            geo_downloading: AtomicBool::new(false),
         });
 
         // Accept loops for our custom ALPNs.
@@ -768,6 +776,7 @@ impl Engine {
                 virtual_ip: Some(m.virtual_ip.to_string()),
                 local_ip,
                 public_ip,
+                location: ps.and_then(|p| p.location.clone()),
                 observed_addr: ps.and_then(|p| p.observed_addr.clone()),
                 direct: ps.and_then(|p| p.direct),
                 online: is_self || ps.map(|p| p.online).unwrap_or(false),
@@ -836,15 +845,31 @@ async fn activate(inner: &Arc<Inner>, cfg: StoredConfig) -> Result<()> {
     {
         let ti = inner.clone();
         let net_id = secret.network_id();
+        let originator_id = cfg.originator_id;
         let h = tokio::spawn(async move {
             while let Some(ev) = receiver.next().await {
                 let Ok(ev) = ev else { continue };
-                if let Event::Received(m) = ev {
-                    if let Ok(p) = ciborium::from_reader::<Presence, _>(m.content.as_ref()) {
+                let Event::Received(m) = ev else { continue };
+                let Ok(msg) = ciborium::from_reader::<GossipMsg, _>(m.content.as_ref()) else {
+                    continue;
+                };
+                match msg {
+                    GossipMsg::Presence(p) => {
                         if p.verify(&net_id) && p.node_id != ti.my_id {
                             let mut st = ti.state.lock().await;
                             st.presence
                                 .record_heartbeat(p.node_id, p.hostname, p.public_ip, p.ts);
+                            drop(st);
+                            let _ = ti.events.send(EngineEvent::Changed);
+                        }
+                    }
+                    GossipMsg::Locations(loc) => {
+                        // Trust only the originator's signed location assertions.
+                        if loc.verify(&net_id, &originator_id) {
+                            let mut st = ti.state.lock().await;
+                            for (id, location) in loc.entries {
+                                st.presence.set_location(id, Some(location));
+                            }
                             drop(st);
                             let _ = ti.events.send(EngineEvent::Changed);
                         }
@@ -1005,7 +1030,7 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
     if let Some(sender) = sender {
         // Advertise our own public IP (same source the self view uses) so peers
         // can show it even over a relay path where they can't observe it directly.
-        let public_ip = {
+        let my_public_ip = {
             let addr = inner.node.addr();
             split_local_public(addr.ip_addrs().copied()).1
         };
@@ -1013,16 +1038,67 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
             cfg.secret().network_id(),
             &inner.device_key,
             current_hostname(),
-            public_ip,
+            my_public_ip.clone(),
             now_ms(),
         );
         let mut buf = Vec::new();
-        let _ = ciborium::into_writer(&p, &mut buf);
+        let _ = ciborium::into_writer(&GossipMsg::Presence(p), &mut buf);
         let _ = sender.broadcast(Bytes::from(buf)).await;
+
+        // Originator only: resolve each member's public IP to a location and
+        // propagate a signed map so members can show it without the DB.
+        if cfg.originator_secret.is_some() {
+            // Gather (node_id, public_ip) for everyone (under the async lock).
+            let pairs: Vec<(Id, Option<String>)> = {
+                let st = inner.state.lock().await;
+                roster
+                    .members()
+                    .map(|(id, _)| {
+                        let pip = if *id == inner.my_id {
+                            my_public_ip.clone()
+                        } else {
+                            st.presence.get(id).and_then(|p| p.public_ip.clone())
+                        };
+                        (*id, pip)
+                    })
+                    .collect()
+            };
+            // Resolve synchronously (don't hold the geo lock across an await).
+            let entries: Vec<(Id, String)> = {
+                let guard = inner.geo.read().unwrap();
+                match guard.as_ref() {
+                    Some(geo) => pairs
+                        .into_iter()
+                        .filter_map(|(id, pip)| {
+                            let ip: std::net::Ipv4Addr = pip?.parse().ok()?;
+                            geo.lookup(ip).map(|loc| (id, loc))
+                        })
+                        .collect(),
+                    None => Vec::new(),
+                }
+            };
+            if !entries.is_empty() {
+                let orig = SigningKey::from_bytes(&cfg.originator_secret.unwrap());
+                let loc =
+                    Locations::signed(cfg.secret().network_id(), &orig, entries.clone(), now_ms());
+                let mut lbuf = Vec::new();
+                let _ = ciborium::into_writer(&GossipMsg::Locations(loc), &mut lbuf);
+                let _ = sender.broadcast(Bytes::from(lbuf)).await;
+                // Apply to our own view (gossip doesn't loop back to us).
+                let mut st = inner.state.lock().await;
+                for (id, l) in entries {
+                    st.presence.set_location(id, Some(l));
+                }
+            }
+        }
+
         if !peers.is_empty() {
             let _ = sender.join_peers(peers).await;
         }
     }
+
+    // Originator: keep the geo DB present + fresh (downloads in the background).
+    ensure_geo(inner).await;
 
     // Refresh observed-address / direct info for live peers.
     let live: Vec<Id> = inner.conns.read().unwrap().keys().copied().collect();
@@ -1406,6 +1482,68 @@ async fn conn_info(inner: &Arc<Inner>, peer: &Id) -> ConnInfo {
         _ => None,
     };
     out
+}
+
+/// Originator-only: make sure the geo DB is loaded, and (re)download it in the
+/// background if it's missing or older than two weeks. No-op for non-originators.
+async fn ensure_geo(inner: &Arc<Inner>) {
+    let is_orig = {
+        let st = inner.state.lock().await;
+        st.config
+            .as_ref()
+            .map(|c| c.originator_secret.is_some())
+            .unwrap_or(false)
+    };
+    if !is_orig {
+        return;
+    }
+    let path = inner.data_dir.join(crate::geo::DB_FILENAME);
+    let loaded = inner.geo.read().unwrap().is_some();
+    let exists = path.exists();
+
+    if exists && !loaded {
+        match crate::geo::GeoDb::open(&path) {
+            Ok(db) => {
+                *inner.geo.write().unwrap() = Some(db);
+                tracing::info!("geo db loaded");
+            }
+            Err(e) => tracing::warn!("geo db load failed: {e:#}"),
+        }
+    }
+
+    // Download if missing or >14 days old (DB-IP Lite updates monthly).
+    let stale = file_older_than(&path, 14 * 24 * 3600);
+    if (!exists || stale) && !inner.geo_downloading.swap(true, Ordering::SeqCst) {
+        let inner = inner.clone();
+        tokio::spawn(async move {
+            let p = inner.data_dir.join(crate::geo::DB_FILENAME);
+            let dl = tokio::task::spawn_blocking({
+                let p = p.clone();
+                move || crate::geo::download(&p)
+            })
+            .await;
+            match dl {
+                Ok(Ok(())) => match crate::geo::GeoDb::open(&p) {
+                    Ok(db) => {
+                        *inner.geo.write().unwrap() = Some(db);
+                        tracing::info!("geo db downloaded + loaded");
+                        let _ = inner.events.send(EngineEvent::Changed);
+                    }
+                    Err(e) => tracing::warn!("geo db load after download failed: {e:#}"),
+                },
+                other => tracing::warn!("geo db download failed: {other:?}"),
+            }
+            inner.geo_downloading.store(false, Ordering::SeqCst);
+        });
+    }
+}
+
+/// Whether a file is missing or older than `secs` seconds (best-effort).
+fn file_older_than(path: &Path, secs: u64) -> bool {
+    match std::fs::metadata(path).and_then(|m| m.modified()) {
+        Ok(modified) => modified.elapsed().map(|d| d.as_secs() > secs).unwrap_or(true),
+        Err(_) => true,
+    }
 }
 
 /// Whether an IP is private/LAN (so it's a "Local IP" rather than "Public IP").

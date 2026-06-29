@@ -44,6 +44,14 @@ unavailable the daemon errors clearly rather than regenerating identity (which w
 evict the device). `network.cbor` holds only non-secret fields (name, subnet, originator pubkey).
 This assumes one daemon instance per machine/user account.
 
+## Geolocation
+Member "Location" (City, Country) is resolved **only by the originator**, which downloads the
+DB-IP City database (CC BY 4.0) and looks up each member's advertised public IP **locally** — no
+per-IP queries to any third party. It then propagates the resolved strings to members in a gossip
+message **signed by the originator master key**, so members trust them without needing the
+database or any internet lookup of their own. Attribution ("IP Geolocation by DB-IP",
+https://db-ip.com) is shown wherever Location appears, as the CC BY 4.0 license requires.
+
 ## Shared-doc abuse
 Every member holds the iroh-docs write capability (that's what enables web-of-trust adds), so a
 malicious member could append junk to the replica. Reading is bounded — only `e/` entries, small

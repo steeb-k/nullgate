@@ -693,7 +693,7 @@ fn render_signature(s: &NetworkStatus, pending: &[PendingJoin]) -> String {
         let last = fmt_last_seen(m.last_seen);
         let _ = write!(
             out,
-            "[{}|{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}]",
+            "[{}|{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}]",
             m.node_id,
             m.is_self,
             m.label.as_deref().unwrap_or(""),
@@ -703,6 +703,7 @@ fn render_signature(s: &NetworkStatus, pending: &[PendingJoin]) -> String {
             m.direct,
             m.online,
             m.public_ip.as_deref().unwrap_or(""),
+            m.location.as_deref().unwrap_or(""),
             m.observed_addr.as_deref().unwrap_or(""),
             last,
         );
@@ -1134,6 +1135,7 @@ fn fill_member(
     }
     g.add(&property_row("Local IP", m.local_ip.as_deref().unwrap_or("—")));
     g.add(&property_row("Public IP", m.public_ip.as_deref().unwrap_or("—")));
+    g.add(&property_row("Location", m.location.as_deref().unwrap_or("—")));
 
     let id_row = property_row("Node ID", &m.node_id);
     let copy = icon_button("edit-copy-symbolic", "Copy node ID");
@@ -1153,6 +1155,20 @@ fn fill_member(
         m.observed_addr.as_deref().unwrap_or("—"),
     ));
     ui.member_box.append(&g);
+
+    // Required CC BY 4.0 attribution for the Location data (clickable link).
+    let attrib = gtk::Label::new(None);
+    attrib.set_markup(
+        "<small>Location is approximate, from the public IP. \
+         <a href=\"https://db-ip.com/\">IP Geolocation by DB-IP</a></small>",
+    );
+    attrib.add_css_class("dim-label");
+    attrib.set_wrap(true);
+    attrib.set_halign(gtk::Align::Start);
+    attrib.set_margin_start(12);
+    attrib.set_margin_end(12);
+    attrib.set_margin_top(4);
+    ui.member_box.append(&attrib);
 
     if !m.is_self && is_originator {
         let danger = adw::PreferencesGroup::new();

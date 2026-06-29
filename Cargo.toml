@@ -62,6 +62,11 @@ tun-rs = { version = "2", features = ["async_tokio"] }
 # OS keystore for secrets at rest (Credential Manager / Keychain / Secret Service),
 # with a file fallback handled in code.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+# Geolocation (originator only): read the DB-IP City MMDB + download it at runtime.
+maxminddb = "0.24"
+serde_json = "1"
+rust_iso3166 = "0.1"
+ureq = "2"
 
 # --- ipc / service ---
 interprocess = { version = "2", features = ["tokio"] }

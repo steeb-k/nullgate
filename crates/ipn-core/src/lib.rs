@@ -13,6 +13,7 @@
 
 pub mod admission;
 pub mod engine;
+pub mod geo;
 pub mod membership;
 pub mod network;
 pub mod node;
