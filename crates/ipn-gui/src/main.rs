@@ -184,10 +184,9 @@ fn install_app_icon() {
     let base = dirs.cache_dir().join("ipn").join("icons");
     let apps = base.join("hicolor").join("512x512").join("apps");
     if std::fs::create_dir_all(&apps).is_ok() {
+        // Always (over)write so a replaced icon takes effect on next launch.
         let dest = apps.join(format!("{APP_ID}.png"));
-        if !dest.exists() {
-            let _ = std::fs::write(&dest, include_bytes!("../../../img/icon-spin.png"));
-        }
+        let _ = std::fs::write(&dest, include_bytes!("../../../img/icon-spin.png"));
         gtk::IconTheme::for_display(&display).add_search_path(&base);
     }
     gtk::Window::set_default_icon_name(APP_ID);
