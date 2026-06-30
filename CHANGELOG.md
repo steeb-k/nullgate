@@ -3,6 +3,32 @@
 All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepachangelog.com).
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
+## [0.1.7]
+### Added
+- **Per-member notes.** Each member's detail page now has a **Notes** entry (below Status, for
+  members other than this device) that opens a full-height editable text area. Notes are stored
+  **locally** and never shared with other members (like nicknames). They autosave when you leave
+  the field. CLI `nullgate-cli note <node-id> [text]`.
+
+### Changed
+- **Flyout Back steps back one level** instead of jumping to the main page. Drilling member →
+  Notes and hitting Back now returns to the member page (Back again closes the flyout). Alt+Left,
+  Backspace, and dismissing the flyout all follow the same history.
+
+### Fixed
+- **Linux launcher/dock icon now resolves.** The `.desktop` was missing `StartupWMClass`, so the
+  desktop environment couldn't tie the running window to the launcher entry and fell back to a
+  generic/broken icon. Added `StartupWMClass=io.github.steeb_k.Nullgate` (matching the app ID, as
+  GTK reports it). Also regenerated the multi-size Windows `.ico` from the per-size PNGs.
+- **Using a spent or expired join code now gives a clear message instead of silently failing.**
+  Single-use codes (and stale codes superseded by regeneration) are validated at the moment of
+  joining: the joiner is told *"This invite code has already been used / is no longer valid — ask
+  for a new one,"* and the existing member isn't even prompted to approve a dead code. As a
+  backstop, a joiner that's approved but then rejected by the roster fold (e.g. a code consumed by
+  a simultaneous join) no longer lands in a half-joined limbo — it reports the failure and cleanly
+  backs out instead of sitting "in" the network with no IP. IPC protocol bumped to **v3** for the
+  new note request.
+
 ## [0.1.6]
 ### Added
 - **Privilege tiers — Originator, Controller, Peer.** Membership now carries a role. **Peers**

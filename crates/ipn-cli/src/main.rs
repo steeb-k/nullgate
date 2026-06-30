@@ -73,6 +73,8 @@ enum Cmd {
     Rename { name: String },
     /// Set a local friendly nickname for another member (omit the name to clear it).
     Nickname { node_id: String, name: Option<String> },
+    /// Set a local free-text note for another member (omit the text to clear it).
+    Note { node_id: String, note: Option<String> },
     /// Export the originator recovery code (originator only).
     ExportKey,
     /// Import an originator recovery code to gain originator powers.
@@ -116,6 +118,7 @@ async fn main() -> Result<()> {
         Cmd::Disconnect => IpcRequest::Disconnect,
         Cmd::Rename { name } => IpcRequest::SetNetworkName { name },
         Cmd::Nickname { node_id, name } => IpcRequest::SetNickname { node_id, name },
+        Cmd::Note { node_id, note } => IpcRequest::SetNote { node_id, note },
         Cmd::ExportKey => IpcRequest::ExportOriginatorKey,
         Cmd::ImportKey { code } => IpcRequest::ImportOriginatorKey { code },
     };

@@ -22,7 +22,10 @@ pub use ipn_core::{AuditEntry, MemberView, NetworkStatus};
 /// `SetRemoteAccessDisabled`, `SetHidden`, `GetAuditLog`) and the `AuditLog`
 /// response. A v1 daemon can't decode these, so the version handshake must reject
 /// the pairing rather than let requests silently fail.
-pub const PROTO_VERSION: u32 = 2;
+///
+/// v3 (0.1.7): added the per-member local-note request (`SetNote`) and the
+/// `MemberView.note` field.
+pub const PROTO_VERSION: u32 = 3;
 
 /// Where the GUI and daemon rendezvous. On Windows this path is only hashed into
 /// a named-pipe name; on Unix it's the actual socket path (fixed, not `$TMPDIR`,
@@ -96,6 +99,9 @@ pub enum IpcRequest {
     /// another member (by NodeId hex). Never broadcast; the hostname is the shared
     /// identifier.
     SetNickname { node_id: String, name: Option<String> },
+    /// Set (or clear, with `None`) this client's **local** free-text note for a
+    /// member (by NodeId hex). Never broadcast.
+    SetNote { node_id: String, note: Option<String> },
     /// Export the originator master key as a recovery code (originator only).
     ExportOriginatorKey,
     /// Import an originator recovery code to gain originator powers on this network.

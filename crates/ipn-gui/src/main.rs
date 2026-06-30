@@ -330,15 +330,36 @@ struct Ui {
     member_box: gtk::Box,
     audit_box: gtk::Box,
     member_title: adw::WindowTitle,
+    notes_view: gtk::TextView,
+    notes_target: Rc<RefCell<Option<String>>>,
+    /// Panels drilled through, so Back steps back one level instead of closing.
+    nav_stack: Rc<RefCell<Vec<String>>>,
 }
 
 impl Ui {
     /// Reveal a flyout by stack name (it overlays the content; window stays behind).
+    /// If a flyout is already open, the current panel is pushed onto the history so
+    /// Back returns to it.
     fn open(&self, name: &str) {
+        if self.split.shows_sidebar() {
+            if let Some(cur) = self.stack.visible_child_name() {
+                if cur != name {
+                    self.nav_stack.borrow_mut().push(cur.to_string());
+                }
+            }
+        }
         self.stack.set_visible_child_name(name);
         self.split.set_show_sidebar(true);
     }
+    /// Step back one panel, or close the flyout if we're at the first one.
+    fn back(&self) {
+        match self.nav_stack.borrow_mut().pop() {
+            Some(prev) => self.stack.set_visible_child_name(&prev),
+            None => self.split.set_show_sidebar(false),
+        }
+    }
     fn close_flyout(&self) {
+        self.nav_stack.borrow_mut().clear();
         self.split.set_show_sidebar(false);
     }
 }
@@ -426,6 +447,21 @@ fn build_ui(
     let member_box = padded_box();
     let audit_box = padded_box();
 
+    // The flyout stack and a navigation history of the panels we drilled through,
+    // so a panel's Back button steps back one level (e.g. member → notes → back →
+    // member) instead of jumping straight to the main page.
+    let stack = gtk::Stack::new();
+    let nav_stack: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let go_back = {
+        let split = split.clone();
+        let stack = stack.clone();
+        let nav_stack = nav_stack.clone();
+        move || match nav_stack.borrow_mut().pop() {
+            Some(prev) => stack.set_visible_child_name(&prev),
+            None => split.set_show_sidebar(false),
+        }
+    };
+
     // Build a flyout panel (back-button top bar + scrollable content). Returns the
     // panel widget and its title widget (so dynamic titles can be updated).
     let make_panel = |title: &str, content: &gtk::Box| -> (adw::ToolbarView, adw::WindowTitle) {
@@ -441,8 +477,8 @@ fn build_ui(
             .css_classes(["flat", "circular"])
             .build();
         {
-            let split = split.clone();
-            back.connect_clicked(move |_| split.set_show_sidebar(false));
+            let go_back = go_back.clone();
+            back.connect_clicked(move |_| go_back());
         }
         hb.pack_end(&back);
         tv.add_top_bar(&hb);
@@ -458,12 +494,66 @@ fn build_ui(
     let (member_panel, member_title) = make_panel("Member", &member_box);
     let (audit_panel, _) = make_panel("Activity log", &audit_box);
 
-    let stack = gtk::Stack::new();
+    // Notes panel: a plain editable text area that fills the flyout below the
+    // header and scrolls within itself (the text field scrolls, not the page).
+    let notes_view = gtk::TextView::builder()
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .top_margin(12)
+        .bottom_margin(12)
+        .left_margin(12)
+        .right_margin(12)
+        .build();
+    let notes_scroll = gtk::ScrolledWindow::builder()
+        .child(&notes_view)
+        .vexpand(true)
+        .hexpand(true)
+        .build();
+    let notes_panel = adw::ToolbarView::new();
+    {
+        let hb = adw::HeaderBar::new();
+        hb.set_show_start_title_buttons(false);
+        hb.set_show_end_title_buttons(false);
+        hb.set_title_widget(Some(&adw::WindowTitle::new("Notes", "")));
+        let back = gtk::Button::builder()
+            .icon_name("go-previous-symbolic")
+            .tooltip_text("Back")
+            .css_classes(["flat", "circular"])
+            .build();
+        let go_back = go_back.clone();
+        back.connect_clicked(move |_| go_back());
+        hb.pack_end(&back);
+        notes_panel.add_top_bar(&hb);
+    }
+    notes_panel.set_content(Some(
+        &adw::Clamp::builder().maximum_size(520).child(&notes_scroll).build(),
+    ));
+
+    // Which member the open note belongs to (set when the flyout is opened).
+    let notes_target: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    // Autosave when focus leaves the text area (covers Back, scrim-dismiss, etc.).
+    {
+        let net2 = net.clone();
+        let notes_target = notes_target.clone();
+        let buffer = notes_view.buffer();
+        let focus = gtk::EventControllerFocus::new();
+        focus.connect_leave(move |_| {
+            let Some(node_id) = notes_target.borrow().clone() else {
+                return;
+            };
+            let (s, e) = buffer.bounds();
+            let text = buffer.text(&s, &e, false).to_string();
+            let note = if text.trim().is_empty() { None } else { Some(text) };
+            net2.request(IpcRequest::SetNote { node_id, note }, |_| None);
+        });
+        notes_view.add_controller(focus);
+    }
+
     stack.add_named(&admin_panel, Some("admin"));
     stack.add_named(&diag_panel, Some("diagnostics"));
     stack.add_named(&ticket_panel, Some("ticket"));
     stack.add_named(&member_panel, Some("member"));
     stack.add_named(&audit_panel, Some("audit"));
+    stack.add_named(&notes_panel, Some("notes"));
     split.set_sidebar(Some(&stack));
 
     let toast_overlay = adw::ToastOverlay::new();
@@ -480,6 +570,9 @@ fn build_ui(
         member_box,
         audit_box,
         member_title,
+        notes_view,
+        notes_target,
+        nav_stack,
     };
 
     render_placeholder(&ui, &connecting_page());
@@ -617,7 +710,7 @@ fn build_ui(
     // "Back" navigation: Alt+Left, or Backspace (unless typing in a text field),
     // backs out of an open flyout to the main page.
     {
-        let split = ui.split.clone();
+        let ui2 = ui.clone();
         let window2 = window.clone();
         let key = gtk::EventControllerKey::new();
         key.connect_key_pressed(move |_, keyval, _, state| {
@@ -626,13 +719,24 @@ fn build_ui(
                 .is_some_and(|w| w.is::<gtk::Text>() || w.is::<gtk::TextView>());
             let is_back = (alt && keyval == gtk::gdk::Key::Left)
                 || (keyval == gtk::gdk::Key::BackSpace && !typing);
-            if is_back && split.shows_sidebar() {
-                split.set_show_sidebar(false);
+            if is_back && ui2.split.shows_sidebar() {
+                ui2.back();
                 return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed
         });
         window.add_controller(key);
+    }
+
+    // If the flyout is dismissed any other way (scrim click / Escape), forget the
+    // navigation history so the next drill-in starts clean.
+    {
+        let ui2 = ui.clone();
+        ui.split.connect_show_sidebar_notify(move |s| {
+            if !s.shows_sidebar() {
+                ui2.nav_stack.borrow_mut().clear();
+            }
+        });
     }
 
     {
@@ -846,7 +950,7 @@ fn render_signature(s: &NetworkStatus, pending: &[PendingJoin]) -> String {
         let last = if m.online { String::new() } else { fmt_last_seen(m.last_seen) };
         let _ = write!(
             out,
-            "[{}|{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}]",
+            "[{}|{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}]",
             m.node_id,
             m.is_self,
             m.label.as_deref().unwrap_or(""),
@@ -862,6 +966,7 @@ fn render_signature(s: &NetworkStatus, pending: &[PendingJoin]) -> String {
             m.role,
             m.access_disabled,
             m.hidden,
+            m.note.as_deref().unwrap_or(""),
         );
     }
     out.push('#');
@@ -1360,6 +1465,33 @@ fn fill_member(
     let status_row = property_row("Status", &status_text);
     status_row.add_prefix(&status_dot(m.online, m.last_seen, m.access_disabled, m.hidden));
     g.add(&status_row);
+
+    // Notes — a local, free-text note about this member (never shared).
+    if !m.is_self {
+        let preview = match m.note.as_deref() {
+            Some(n) if !n.trim().is_empty() => {
+                let first = n.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+                if first.chars().count() > 40 {
+                    format!("{}…", first.chars().take(40).collect::<String>())
+                } else {
+                    first.to_string()
+                }
+            }
+            _ => "Add a note".to_string(),
+        };
+        let notes_row = action_row("Notes", &preview);
+        notes_row.add_prefix(&gtk::Image::from_icon_name("document-edit-symbolic"));
+        let ui2 = ui.clone();
+        let m2 = m.clone();
+        notes_row.connect_activated(move |_| {
+            *ui2.notes_target.borrow_mut() = Some(m2.node_id.clone());
+            ui2.notes_view
+                .buffer()
+                .set_text(m2.note.as_deref().unwrap_or(""));
+            ui2.open("notes");
+        });
+        g.add(&notes_row);
+    }
 
     // Friendly name — set by THIS client for another member (local; not shared).
     if !m.is_self {

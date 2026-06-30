@@ -86,6 +86,18 @@ pub enum InviteKind {
     Controller,
 }
 
+/// The result of checking a ticket's invite nonce against the current roster —
+/// used to give a joiner a clear reason instead of a silent fold rejection.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InviteCheck {
+    /// The nonce is current and (if single-use) unspent — a join will be accepted.
+    Ok,
+    /// A single-use code that's already been used.
+    Spent,
+    /// Not the current code (superseded by a newer ticket, or never valid).
+    Stale,
+}
+
 /// A membership operation. Every variant carries a logical timestamp (`ts`,
 /// milliseconds since the Unix epoch) used only to order a concurrent set of
 /// entries deterministically; exact wall-clock accuracy is not required.
@@ -238,6 +250,9 @@ pub struct Roster {
     /// `(nonce, single_use)`.
     peer_invite: Option<(Nonce, bool)>,
     controller_invite: Option<(Nonce, bool)>,
+    /// Whether the current single-use invite has already been consumed.
+    peer_invite_spent: bool,
+    controller_invite_spent: bool,
 }
 
 impl Roster {
@@ -377,6 +392,15 @@ impl Roster {
             }
         }
 
+        // Record whether each current single-use invite has been spent, so the
+        // join path can reject a reused code with a clear reason.
+        roster.peer_invite_spent = roster
+            .peer_invite
+            .is_some_and(|(n, _)| consumed.contains(&n));
+        roster.controller_invite_spent = roster
+            .controller_invite
+            .is_some_and(|(n, _)| consumed.contains(&n));
+
         // Resolve final virtual IPs: honor each member's recorded address, probing
         // forward only on a genuine collision. Processed in admission order so a
         // later join never displaces an earlier member's IP.
@@ -423,6 +447,27 @@ impl Roster {
         match kind {
             InviteKind::Peer => self.peer_invite,
             InviteKind::Controller => self.controller_invite,
+        }
+    }
+
+    /// Check a ticket's `nonce` against the current invite for `kind`: whether a
+    /// join citing it would be accepted, already spent, or stale.
+    pub fn check_invite(&self, kind: InviteKind, nonce: Nonce) -> InviteCheck {
+        let spent = match kind {
+            InviteKind::Peer => self.peer_invite_spent,
+            InviteKind::Controller => self.controller_invite_spent,
+        };
+        match self.current_invite(kind) {
+            None => InviteCheck::Stale,
+            Some((cur, single_use)) => {
+                if nonce != cur {
+                    InviteCheck::Stale
+                } else if single_use && spent {
+                    InviteCheck::Spent
+                } else {
+                    InviteCheck::Ok
+                }
+            }
         }
     }
 
@@ -707,6 +752,26 @@ mod tests {
         let r = Roster::build(&cfg, &entries);
         assert!(r.is_member(&id(&a)), "first single-use join admitted");
         assert!(!r.is_member(&id(&b)), "second single-use join rejected");
+    }
+
+    #[test]
+    fn check_invite_reports_ok_spent_and_stale() {
+        let (cfg, om, devo, mut entries) = setup();
+        entries.push(sign(
+            NET,
+            &om,
+            Op::SetInvite { kind: InviteKind::Peer, nonce: nonce(30), single_use: true, ts: 4 },
+        ));
+        let r = Roster::build(&cfg, &entries);
+        assert_eq!(r.check_invite(InviteKind::Peer, nonce(30)), InviteCheck::Ok);
+        assert_eq!(r.check_invite(InviteKind::Peer, nonce(99)), InviteCheck::Stale);
+
+        // Consume the single-use invite; it now reports Spent.
+        let a = key(3);
+        entries.push(add(NET, &devo, &a, 3, Role::Peer, nonce(30), 5));
+        let r = Roster::build(&cfg, &entries);
+        assert!(r.is_member(&id(&a)));
+        assert_eq!(r.check_invite(InviteKind::Peer, nonce(30)), InviteCheck::Spent);
     }
 
     #[test]

@@ -9,3 +9,4 @@ Terminal=false
 Categories=Network;Security;
 Keywords=vpn;p2p;iroh;lan;mesh;
 StartupNotify=true
+StartupWMClass=io.github.steeb_k.Nullgate

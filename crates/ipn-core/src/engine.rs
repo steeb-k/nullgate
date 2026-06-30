@@ -41,7 +41,7 @@ use crate::network::{
 };
 use crate::node::IrohNode;
 use crate::presence::{GossipMsg, Locations, Presence, PresenceTracker};
-use crate::roster::{now_ms, sign, Config, Id, InviteKind, Nonce, Op, Role, Roster};
+use crate::roster::{now_ms, sign, Config, Id, InviteCheck, InviteKind, Nonce, Op, Role, Roster};
 use crate::router::{clamp_tcp_mss, dst_ipv4, RouteTable};
 use crate::tun_device::RealTun;
 
@@ -113,6 +113,9 @@ pub struct MemberView {
     pub hostname: Option<String>,
     /// This client's **local** friendly nickname for the member (not shared).
     pub label: Option<String>,
+    /// This client's **local** free-text note about the member (not shared).
+    #[serde(default)]
+    pub note: Option<String>,
     pub virtual_ip: Option<String>,
     /// Peer's private/LAN IP (no port), if known.
     pub local_ip: Option<String>,
@@ -214,7 +217,9 @@ fn default_join_kind() -> InviteKind {
 #[derive(Serialize, Deserialize)]
 enum JoinResponse {
     Approved,
-    Denied,
+    /// Declined; carries an optional human-readable reason (e.g. a used/expired
+    /// invite) so the joiner can show something better than a generic failure.
+    Denied(Option<String>),
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +266,9 @@ struct Inner {
     /// NodeId hex. Never broadcast — purely local display. The OS hostname (read
     /// live) is the shared identifier.
     nicknames: StdRwLock<HashMap<String, String>>,
+    /// This client's **local** free-text notes about other members, keyed by
+    /// NodeId hex. Never broadcast — purely local, like nicknames.
+    notes: StdRwLock<HashMap<String, String>>,
     data_dir: PathBuf,
     state: Mutex<State>,
     events: broadcast::Sender<EngineEvent>,
@@ -327,6 +335,7 @@ impl Engine {
         let my_id = node.node_id_bytes();
         debug_assert_eq!(device_key.verifying_key().to_bytes(), my_id);
         let nicknames = load_nicknames(&data_dir);
+        let notes = load_notes(&data_dir);
         let prefs = load_device_prefs(&data_dir);
 
         let (events, _) = broadcast::channel(64);
@@ -335,6 +344,7 @@ impl Engine {
             device_key,
             my_id,
             nicknames: StdRwLock::new(nicknames),
+            notes: StdRwLock::new(notes),
             data_dir,
             state: Mutex::new(State {
                 config: None,
@@ -1092,11 +1102,34 @@ impl Engine {
         Ok(())
     }
 
+    /// Set (or clear, with `None`/blank) this client's **local** free-text note
+    /// for a member. Stored locally and never broadcast.
+    pub async fn set_note(&self, node_id_hex: &str, note: Option<String>) -> Result<()> {
+        let _ = parse_id(node_id_hex)?; // validate it's a real NodeId hex
+        // Keep the note verbatim (it may span lines); only a fully-blank note clears it.
+        let note = note.filter(|s| !s.trim().is_empty());
+        {
+            let mut map = self.inner.notes.write().unwrap();
+            match note {
+                Some(n) => {
+                    map.insert(node_id_hex.to_string(), n);
+                }
+                None => {
+                    map.remove(node_id_hex);
+                }
+            }
+            save_notes(&self.inner.data_dir, &map);
+        }
+        let _ = self.inner.events.send(EngineEvent::Changed);
+        Ok(())
+    }
+
     /// Snapshot of the network for display.
     pub async fn status(&self) -> Result<NetworkStatus> {
         let st = self.inner.state.lock().await;
         let cfg = st.config.as_ref().context("no network")?;
         let nicks = self.inner.nicknames.read().unwrap();
+        let notes = self.inner.notes.read().unwrap();
         let self_addr = self.inner.node.addr();
         let (self_local, self_public) = split_local_public(self_addr.ip_addrs().copied());
         let is_orig = cfg.originator_secret.is_some();
@@ -1144,6 +1177,8 @@ impl Engine {
                 },
                 // Local nickname this client set for the member (never shared).
                 label: nicks.get(&node_hex).cloned(),
+                // Local free-text note this client set for the member (never shared).
+                note: notes.get(&node_hex).cloned(),
                 virtual_ip: Some(m.virtual_ip.to_string()),
                 local_ip,
                 public_ip,
@@ -1161,6 +1196,7 @@ impl Engine {
             });
         }
         drop(nicks);
+        drop(notes);
         // Order: online (0) before access-disabled (1) before offline (2); hidden
         // members (only ever shown to the originator) sink to the bottom (3).
         let rank = |m: &MemberView| -> u8 {
@@ -1636,6 +1672,28 @@ async fn handle_join_incoming(inner: Arc<Inner>, conn: Connection) {
         }
     };
 
+    // Reject a used/stale invite up front — with a clear reason — so the joiner
+    // gets a real message instead of silently failing the roster fold, and nobody
+    // is prompted to approve a dead code.
+    let invite_reason = {
+        let st = inner.state.lock().await;
+        match st.roster.check_invite(req.invite_kind, req.invite_nonce) {
+            InviteCheck::Ok => None,
+            InviteCheck::Spent => {
+                Some("This invite code has already been used. Ask for a new one.".to_string())
+            }
+            InviteCheck::Stale => {
+                Some("This invite code is no longer valid. Ask for a new one.".to_string())
+            }
+        }
+    };
+    if let Some(reason) = invite_reason {
+        let _ = write_msg(&mut send, &JoinResponse::Denied(Some(reason))).await;
+        let _ = send.finish();
+        let _ = conn.closed().await;
+        return;
+    }
+
     // Register a pending decision and surface it to the UI.
     let (tx, rx) = oneshot::channel();
     {
@@ -1671,11 +1729,11 @@ async fn handle_join_incoming(inner: Arc<Inner>, conn: Connection) {
             }
             Err(e) => {
                 tracing::warn!("admit failed: {e:#}");
-                JoinResponse::Denied
+                JoinResponse::Denied(Some(format!("{e:#}")))
             }
         }
     } else {
-        JoinResponse::Denied
+        JoinResponse::Denied(None)
     };
     if let Err(e) = write_msg(&mut send, &resp).await {
         tracing::debug!("join write response failed: {e:#}");
@@ -1731,10 +1789,41 @@ async fn join_handshake(inner: &Arc<Inner>, cfg: &StoredConfig, ticket: &Ticket)
             if let Some(doc) = inner.state.lock().await.doc.clone() {
                 let _ = doc.start_sync(vec![ticket.bootstrap.clone()]).await;
             }
+            // Confirm we actually landed in the roster before declaring success.
+            // The admitting member's `Add` can still be rejected by the fold (e.g.
+            // a single-use code consumed by a concurrent join, or a stale snapshot),
+            // which would otherwise leave us "joined" but with no IP and no
+            // membership. Poll the synced doc briefly; if we never appear, tear the
+            // provisional network back down and report a clear error.
+            let roster_cfg = cfg.roster_cfg();
+            let mut joined = false;
+            for _ in 0..30 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let doc = inner.state.lock().await.doc.clone();
+                if let Some(doc) = doc {
+                    if let Ok(r) =
+                        membership::build_roster(&roster_cfg, &doc, inner.node.blobs.blobs()).await
+                    {
+                        if r.is_member(&inner.my_id) {
+                            joined = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !joined {
+                teardown(inner).await;
+                bail!(
+                    "the request was approved but this device wasn't added — the invite may have \
+                     just been used or expired. Ask for a new code."
+                );
+            }
             let _ = inner.events.send(EngineEvent::Changed);
             Ok(())
         }
-        JoinResponse::Denied => bail!("the member declined the join request"),
+        JoinResponse::Denied(reason) => {
+            bail!(reason.unwrap_or_else(|| "the member declined the join request".to_string()))
+        }
     }
 }
 
@@ -2168,6 +2257,22 @@ fn save_nicknames(data_dir: &Path, map: &HashMap<String, String>) {
     let mut buf = Vec::new();
     if ciborium::into_writer(map, &mut buf).is_ok() {
         let _ = std::fs::write(data_dir.join("nicknames.cbor"), buf);
+    }
+}
+
+/// This client's local free-text notes about members (NodeId hex → note).
+fn load_notes(data_dir: &Path) -> HashMap<String, String> {
+    std::fs::read(data_dir.join("notes.cbor"))
+        .ok()
+        .and_then(|b| ciborium::from_reader(b.as_slice()).ok())
+        .unwrap_or_default()
+}
+
+fn save_notes(data_dir: &Path, map: &HashMap<String, String>) {
+    let _ = std::fs::create_dir_all(data_dir);
+    let mut buf = Vec::new();
+    if ciborium::into_writer(map, &mut buf).is_ok() {
+        let _ = std::fs::write(data_dir.join("notes.cbor"), buf);
     }
 }
 

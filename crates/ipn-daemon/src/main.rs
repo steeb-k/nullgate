@@ -318,6 +318,10 @@ async fn handle_request(engine: &Engine, req: IpcRequest) -> IpcResponse {
                 Err(e) => to_err(e),
             }
         }
+        IpcRequest::SetNote { node_id, note } => match engine.set_note(&node_id, note).await {
+            Ok(()) => IpcResponse::Ok,
+            Err(e) => to_err(e),
+        },
         IpcRequest::ExportOriginatorKey => match engine.export_originator_key().await {
             Ok(code) => IpcResponse::Recovery(code),
             Err(e) => to_err(e),
