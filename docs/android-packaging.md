@@ -67,7 +67,7 @@ gitignored — regenerated every build.
 ## ABIs, versioning, signing
 
 - ABIs: `arm64-v8a` (primary), `armeabi-v7a` (older 32-bit), `x86_64` (emulator) — one universal APK.
-- `versionCode = MAJOR*10000 + MINOR*100 + PATCH` (0.1.8 → 108); `versionName` tracks the
+- `versionCode = MAJOR*10000 + MINOR*100 + PATCH` (0.2.0 → 200); `versionName` tracks the
   workspace version.
 - Release signing reads `android/keystore.properties` (gitignored — **never commit; a lost signing
   key permanently blocks in-place updates**). Without it, release builds are produced unsigned

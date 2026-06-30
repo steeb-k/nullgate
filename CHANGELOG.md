@@ -3,7 +3,7 @@
 All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepachangelog.com).
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
-## [Unreleased]
+## [0.2.0]
 ### Added
 - **Android app (initial).** Nullgate now builds and runs on Android: a Kotlin/Compose UI over a
   new `ipn-mobile` UniFFI facade that runs `ipn-core` in-process inside a foreground service — no

@@ -26,10 +26,10 @@ android {
         // permissions, so no API-30 floor (unlike SEED Sync).
         minSdk = 26
         targetSdk = 35
-        // versionCode scheme: MAJOR*10000 + MINOR*100 + PATCH (so 0.1.8 -> 108),
+        // versionCode scheme: MAJOR*10000 + MINOR*100 + PATCH (so 0.2.0 -> 200),
         // monotonic and decodable. versionName tracks the workspace version.
-        versionCode = 108
-        versionName = "0.1.8"
+        versionCode = 200
+        versionName = "0.2.0"
     }
 
     signingConfigs {

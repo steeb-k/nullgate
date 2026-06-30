@@ -13,11 +13,11 @@ client you already use.
 It's like Hamachi / ZeroTier / Tailscale, but with **no accounts and no central server** — your
 devices find and authenticate each other directly (built on [iroh](https://www.iroh.computer)).
 
-> **Status:** 0.1.0, under active testing. Works on **Windows, Linux, and macOS**, with an
-> **Android** app now in development (Kotlin/Compose; routes traffic through Android's built-in
-> VPN). Grab an installer from the
-> [Releases](https://github.com/steeb-k/iroh-private-network/releases) page; the Android app is
-> built from source for now (see `docs/android-packaging.md`).
+> **Status:** 0.2.0, under active testing. Works on **Windows, Linux, macOS, and Android**
+> (the Android app is Kotlin/Compose and routes traffic through Android's built-in VPN). Grab an
+> installer or the APK from the
+> [Releases](https://github.com/steeb-k/iroh-private-network/releases) page (Android build details:
+> `docs/android-packaging.md`).
 
 ## What it does
 - **A private mesh of your devices.** Each gets a stable address on a `10.99.0.x` network.
