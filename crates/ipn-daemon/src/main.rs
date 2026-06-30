@@ -216,6 +216,12 @@ async fn map_event(engine: &Engine, e: ipn_core::EngineEvent) -> IpcEvent {
             hostname,
             sas,
         },
+        // Android-only routing coordination (VpnService fd hand-off); never emitted
+        // by the desktop daemon, which opens its own TUN. Surface as a plain status
+        // refresh so the match stays exhaustive without a new IPC event.
+        E::TunSetupRequired { .. } | E::TunTeardownRequired => {
+            IpcEvent::Status(engine.status().await.ok())
+        }
     }
 }
 
