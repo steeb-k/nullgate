@@ -3,6 +3,14 @@
 All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepachangelog.com).
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
+## [0.1.8]
+### Fixed
+- **Per-member notes: styling and live updates.** The Notes editor is now a rounded card inset
+  from the panel edges (it had sharp corners and ran off the bottom). Typing a note and reopening
+  the flyout — or returning to the member page — now shows the text and refreshes the row's preview
+  **immediately**, instead of only after a full status refresh (the member flyout isn't rebuilt
+  while it's open, so the GUI now caches the edit locally and updates the open row directly).
+
 ## [0.1.7]
 ### Added
 - **Per-member notes.** Each member's detail page now has a **Notes** entry (below Status, for

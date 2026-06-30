@@ -17,6 +17,7 @@
 //! content (the window stays visible behind it), so it reads as a sub-menu.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -332,6 +333,11 @@ struct Ui {
     member_title: adw::WindowTitle,
     notes_view: gtk::TextView,
     notes_target: Rc<RefCell<Option<String>>>,
+    /// Note text edited this session (NodeId hex → text), for instant re-display.
+    notes_cache: Rc<RefCell<HashMap<String, String>>>,
+    /// The Notes row of the currently-open member flyout, so saving can refresh its
+    /// preview subtitle without rebuilding the flyout.
+    notes_row: Rc<RefCell<Option<adw::ActionRow>>>,
     /// Panels drilled through, so Back steps back one level instead of closing.
     nav_stack: Rc<RefCell<Vec<String>>>,
 }
@@ -503,20 +509,31 @@ fn build_ui(
     let (member_panel, member_title) = make_panel("Member", &member_box);
     let (audit_panel, _) = make_panel("Activity log", &audit_box);
 
-    // Notes panel: a plain editable text area that fills the flyout below the
-    // header and scrolls within itself (the text field scrolls, not the page).
+    // Notes panel: an editable text area presented as a rounded card that fills
+    // the flyout below the header (with margins so it doesn't bleed to the edges)
+    // and scrolls within itself (the text field scrolls, not the page).
     let notes_view = gtk::TextView::builder()
         .wrap_mode(gtk::WrapMode::WordChar)
-        .top_margin(12)
-        .bottom_margin(12)
-        .left_margin(12)
-        .right_margin(12)
+        .top_margin(8)
+        .bottom_margin(8)
+        .left_margin(8)
+        .right_margin(8)
         .build();
+    notes_view.add_css_class("notes-view");
     let notes_scroll = gtk::ScrolledWindow::builder()
         .child(&notes_view)
         .vexpand(true)
         .hexpand(true)
         .build();
+    // Rounded "card" look, clipped to its corners — matches the rest of the app.
+    notes_scroll.add_css_class("card");
+    notes_scroll.set_overflow(gtk::Overflow::Hidden);
+    let notes_outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    notes_outer.set_margin_top(12);
+    notes_outer.set_margin_bottom(12);
+    notes_outer.set_margin_start(12);
+    notes_outer.set_margin_end(12);
+    notes_outer.append(&notes_scroll);
     let notes_panel = adw::ToolbarView::new();
     {
         let hb = adw::HeaderBar::new();
@@ -534,15 +551,23 @@ fn build_ui(
         notes_panel.add_top_bar(&hb);
     }
     notes_panel.set_content(Some(
-        &adw::Clamp::builder().maximum_size(520).child(&notes_scroll).build(),
+        &adw::Clamp::builder().maximum_size(520).child(&notes_outer).build(),
     ));
 
     // Which member the open note belongs to (set when the flyout is opened).
     let notes_target: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    // Note text we've edited this session, keyed by NodeId hex. Written
+    // synchronously on save and read when (re)opening the flyout, so the note
+    // shows immediately — the status round-trip that rebuilds the member rows lags
+    // a save by a tick, and the member flyout isn't rebuilt while it's open.
+    let notes_cache: Rc<RefCell<HashMap<String, String>>> = Rc::new(RefCell::new(HashMap::new()));
+    let notes_row: Rc<RefCell<Option<adw::ActionRow>>> = Rc::new(RefCell::new(None));
     // Autosave when focus leaves the text area (covers Back, scrim-dismiss, etc.).
     {
         let net2 = net.clone();
         let notes_target = notes_target.clone();
+        let notes_cache = notes_cache.clone();
+        let notes_row = notes_row.clone();
         let buffer = notes_view.buffer();
         let focus = gtk::EventControllerFocus::new();
         focus.connect_leave(move |_| {
@@ -551,6 +576,13 @@ fn build_ui(
             };
             let (s, e) = buffer.bounds();
             let text = buffer.text(&s, &e, false).to_string();
+            // Record locally first (presence of the key means "edited this
+            // session", even when cleared to empty), then persist via the daemon.
+            notes_cache.borrow_mut().insert(node_id.clone(), text.clone());
+            // Refresh the open member flyout's Notes preview immediately.
+            if let Some(row) = notes_row.borrow().as_ref() {
+                row.set_subtitle(&note_preview(Some(&text)));
+            }
             let note = if text.trim().is_empty() { None } else { Some(text) };
             net2.request(IpcRequest::SetNote { node_id, note }, |_| None);
         });
@@ -581,6 +613,8 @@ fn build_ui(
         member_title,
         notes_view,
         notes_target,
+        notes_cache,
+        notes_row,
         nav_stack,
     };
 
@@ -1430,6 +1464,21 @@ fn request_card(req: &PendingJoin, net: &Net, pending: &Rc<RefCell<Vec<PendingJo
     card
 }
 
+/// One-line preview of a note for the member-row subtitle ("Add a note" if empty).
+fn note_preview(note: Option<&str>) -> String {
+    match note {
+        Some(n) if !n.trim().is_empty() => {
+            let first = n.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+            if first.chars().count() > 40 {
+                format!("{}…", first.chars().take(40).collect::<String>())
+            } else {
+                first.to_string()
+            }
+        }
+        _ => "Add a note".to_string(),
+    }
+}
+
 /// Fill + open the per-member detail flyout.
 fn fill_member(
     ui: &Ui,
@@ -1477,26 +1526,26 @@ fn fill_member(
 
     // Notes — a local, free-text note about this member (never shared).
     if !m.is_self {
-        let preview = match m.note.as_deref() {
-            Some(n) if !n.trim().is_empty() => {
-                let first = n.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
-                if first.chars().count() > 40 {
-                    format!("{}…", first.chars().take(40).collect::<String>())
-                } else {
-                    first.to_string()
-                }
-            }
-            _ => "Add a note".to_string(),
-        };
+        // Prefer the value we edited this session for the preview, too.
+        let cached = ui.notes_cache.borrow().get(&m.node_id).cloned();
+        let preview = note_preview(cached.as_deref().or(m.note.as_deref()));
         let notes_row = action_row("Notes", &preview);
         notes_row.add_prefix(&gtk::Image::from_icon_name("document-edit-symbolic"));
+        // Remember this row so saving can refresh its preview without a rebuild.
+        *ui.notes_row.borrow_mut() = Some(notes_row.clone());
         let ui2 = ui.clone();
         let m2 = m.clone();
         notes_row.connect_activated(move |_| {
             *ui2.notes_target.borrow_mut() = Some(m2.node_id.clone());
-            ui2.notes_view
-                .buffer()
-                .set_text(m2.note.as_deref().unwrap_or(""));
+            // Prefer what we edited this session (instant); else the value from
+            // the last status (loaded from disk).
+            let text = ui2
+                .notes_cache
+                .borrow()
+                .get(&m2.node_id)
+                .cloned()
+                .unwrap_or_else(|| m2.note.clone().unwrap_or_default());
+            ui2.notes_view.buffer().set_text(&text);
             ui2.open("notes");
         });
         g.add(&notes_row);

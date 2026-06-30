@@ -25,6 +25,12 @@ headerbar {
   color: #ffffff;
 }
 
+/* The per-member notes text area: let the TextView blend into its rounded .card
+ * container instead of painting its own (slightly different) view background. */
+.notes-view, .notes-view text {
+  background-color: transparent;
+}
+
 /* The editable network name shown at the top of the main screen. */
 .network-name {
   font-weight: bold;

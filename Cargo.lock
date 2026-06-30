@@ -2852,7 +2852,7 @@ dependencies = [
 
 [[package]]
 name = "ipn-cli"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -2862,7 +2862,7 @@ dependencies = [
 
 [[package]]
 name = "ipn-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2900,7 +2900,7 @@ dependencies = [
 
 [[package]]
 name = "ipn-daemon"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -2915,7 +2915,7 @@ dependencies = [
 
 [[package]]
 name = "ipn-gui"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2937,7 +2937,7 @@ dependencies = [
 
 [[package]]
 name = "ipn-ipc"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "ciborium",
  "interprocess",
