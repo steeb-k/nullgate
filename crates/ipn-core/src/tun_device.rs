@@ -17,7 +17,7 @@ impl RealTun {
     /// Open and configure the interface: assign `ip/prefix` and set the MTU.
     pub fn open(ip: Ipv4Addr, prefix: u8, mtu: u16) -> io::Result<Self> {
         let dev = DeviceBuilder::new()
-            .name("ipn")
+            .name("nullgate")
             .ipv4(ip, prefix, None)
             .mtu(mtu)
             .build_async()?;

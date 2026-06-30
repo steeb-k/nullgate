@@ -2097,7 +2097,7 @@ fn current_hostname() -> String {
     hostname::get()
         .ok()
         .and_then(|h| h.into_string().ok())
-        .unwrap_or_else(|| "ipn-device".into())
+        .unwrap_or_else(|| "nullgate-device".into())
 }
 
 /// The first usable host address (`.2`) in a /24 subnet.

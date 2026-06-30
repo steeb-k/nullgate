@@ -52,6 +52,11 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 - **Verification-code emoji render in color on Windows** (e.g. ✂️ showed as a tofu box). The SAS
   emojis now pin an emoji-capable font (Segoe UI Emoji / Noto Color Emoji / Apple Color Emoji)
   rather than inheriting the pinned `Segoe UI Variable Text` UI font, which lacks several glyphs.
+- **Rebrand leftovers that the OS/UI still showed as "ipn".** Task Manager listed the GUI process
+  as `ipn-gui` because the embedded Windows version-info strings (FileDescription/ProductName)
+  still defaulted from the crate name — they're now pinned to **Nullgate**. The TUN network
+  adapter is now named `nullgate` (was `ipn`) in Network Connections / `ip link`, and the
+  fallback device name shown to peers when the OS hostname is unreadable is now `nullgate-device`.
 
 ## [0.1.4]
 ### Changed
