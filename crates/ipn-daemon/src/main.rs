@@ -250,6 +250,12 @@ async fn handle_request(engine: &Engine, req: IpcRequest) -> IpcResponse {
             Ok(()) => IpcResponse::Ok,
             Err(e) => to_err(e),
         },
+        IpcRequest::SetMemberRole { node_id, controller } => {
+            match engine.set_member_role(&node_id, controller).await {
+                Ok(()) => IpcResponse::Ok,
+                Err(e) => to_err(e),
+            }
+        }
         IpcRequest::SetFrozen { frozen } => match engine.set_frozen(frozen).await {
             Ok(()) => IpcResponse::Ok,
             Err(e) => to_err(e),
@@ -276,6 +282,30 @@ async fn handle_request(engine: &Engine, req: IpcRequest) -> IpcResponse {
         },
         IpcRequest::GetTicket => match engine.ticket().await {
             Ok(t) => IpcResponse::Ticket(t),
+            Err(e) => to_err(e),
+        },
+        IpcRequest::GetControllerTicket => match engine.controller_ticket().await {
+            Ok(t) => IpcResponse::Ticket(t),
+            Err(e) => to_err(e),
+        },
+        IpcRequest::SetPeerTicketSingleUse { on } => {
+            match engine.set_peer_ticket_single_use(on).await {
+                Ok(()) => IpcResponse::Ok,
+                Err(e) => to_err(e),
+            }
+        }
+        IpcRequest::SetRemoteAccessDisabled { disabled } => {
+            match engine.set_remote_access_disabled(disabled).await {
+                Ok(()) => IpcResponse::Ok,
+                Err(e) => to_err(e),
+            }
+        }
+        IpcRequest::SetHidden { hidden } => match engine.set_hidden(hidden).await {
+            Ok(()) => IpcResponse::Ok,
+            Err(e) => to_err(e),
+        },
+        IpcRequest::GetAuditLog => match engine.audit_log().await {
+            Ok(log) => IpcResponse::AuditLog(log),
             Err(e) => to_err(e),
         },
         IpcRequest::SetNetworkName { name } => match engine.set_network_name(name).await {

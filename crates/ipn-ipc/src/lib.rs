@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 pub mod transport;
 
 /// Display DTOs are reused straight from the engine crate (plain serde structs).
-pub use ipn_core::{MemberView, NetworkStatus};
+pub use ipn_core::{AuditEntry, MemberView, NetworkStatus};
 
 /// IPC wire-protocol version between the GUI/CLI and the daemon. Bump on any
 /// incompatible change to these request/response/event types.
@@ -58,6 +58,8 @@ pub enum IpcRequest {
     ApproveJoin { node_id: String },
     DenyJoin { node_id: String },
     RemoveMember { node_id: String },
+    /// Originator-only: promote/demote a member (`controller=false` ⇒ Peer).
+    SetMemberRole { node_id: String, controller: bool },
     SetFrozen { frozen: bool },
     /// Originator-only: dissolve the network (boots all members), then leave.
     DeleteNetwork,
@@ -69,7 +71,19 @@ pub enum IpcRequest {
     Connect,
     /// Disconnect from the network but keep it saved (go offline). Idempotent.
     Disconnect,
+    /// The Peer-level join ticket (Controllers and the originator).
     GetTicket,
+    /// Originator-only: a fresh single-use Controller-level join ticket.
+    GetControllerTicket,
+    /// Originator/Controller: toggle whether Peer tickets are single-use. Mints a
+    /// new code, invalidating the previous one for new joins.
+    SetPeerTicketSingleUse { on: bool },
+    /// Toggle this device's one-way inbound block (outbound still works).
+    SetRemoteAccessDisabled { disabled: bool },
+    /// Toggle hiding this device from the member list (implies the inbound block).
+    SetHidden { hidden: bool },
+    /// Fetch the 30-day administration activity log (visible to all members).
+    GetAuditLog,
     /// Rename the network (shared across members via the signed roster).
     SetNetworkName { name: String },
     /// Set (or clear, with `None`) this client's **local** friendly nickname for
@@ -100,6 +114,8 @@ pub enum IpcResponse {
     Ticket(String),
     /// An originator recovery code (reply to `ExportOriginatorKey`).
     Recovery(String),
+    /// The administration activity log (reply to `GetAuditLog`).
+    AuditLog(Vec<AuditEntry>),
     Ok,
     Err(String),
 }

@@ -23,7 +23,9 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 use ipn_ipc::transport::{self, read_frame, write_frame};
-use ipn_ipc::{Frame, IpcEvent, IpcRequest, IpcResponse, MemberView, Message, NetworkStatus};
+use ipn_ipc::{
+    AuditEntry, Frame, IpcEvent, IpcRequest, IpcResponse, MemberView, Message, NetworkStatus,
+};
 use tokio::runtime::Handle;
 
 mod tray;
@@ -42,6 +44,8 @@ enum UiMsg {
         sas: Vec<String>,
     },
     Recovery(String),
+    /// The administration activity log to display in its flyout.
+    AuditLog(Vec<AuditEntry>),
     Toast(String),
     /// Re-render the current status (e.g. after a pending-join change).
     Refresh,
@@ -324,6 +328,7 @@ struct Ui {
     diag_box: gtk::Box,
     ticket_box: gtk::Box,
     member_box: gtk::Box,
+    audit_box: gtk::Box,
     member_title: adw::WindowTitle,
 }
 
@@ -419,6 +424,7 @@ fn build_ui(
     let diag_box = padded_box();
     let ticket_box = padded_box();
     let member_box = padded_box();
+    let audit_box = padded_box();
 
     // Build a flyout panel (back-button top bar + scrollable content). Returns the
     // panel widget and its title widget (so dynamic titles can be updated).
@@ -450,12 +456,14 @@ fn build_ui(
     let (diag_panel, _) = make_panel("Diagnostics", &diag_box);
     let (ticket_panel, _) = make_panel("Join ticket", &ticket_box);
     let (member_panel, member_title) = make_panel("Member", &member_box);
+    let (audit_panel, _) = make_panel("Activity log", &audit_box);
 
     let stack = gtk::Stack::new();
     stack.add_named(&admin_panel, Some("admin"));
     stack.add_named(&diag_panel, Some("diagnostics"));
     stack.add_named(&ticket_panel, Some("ticket"));
     stack.add_named(&member_panel, Some("member"));
+    stack.add_named(&audit_panel, Some("audit"));
     split.set_sidebar(Some(&stack));
 
     let toast_overlay = adw::ToastOverlay::new();
@@ -470,6 +478,7 @@ fn build_ui(
         diag_box,
         ticket_box,
         member_box,
+        audit_box,
         member_title,
     };
 
@@ -549,6 +558,7 @@ fn build_ui(
                     }
                     UiMsg::UpdateApplied => restart_self(&window),
                     UiMsg::Ticket(t) => fill_ticket(&ui, &t, &net, &window),
+                    UiMsg::AuditLog(entries) => fill_audit(&ui, &entries),
                     UiMsg::Recovery(code) => show_recovery(&window, &net, &code),
                     UiMsg::JoinSas(sas) => show_join_sas(&window, &sas),
                     UiMsg::JoinRequest {
@@ -819,12 +829,13 @@ fn render_signature(s: &NetworkStatus, pending: &[PendingJoin]) -> String {
     let mut out = String::new();
     let _ = write!(
         out,
-        "{}|{}|{}|{}|{}|{}|{}|",
+        "{}|{}|{}|{}|{}|{}|{}|{}|",
         s.name,
         s.online,
         s.routing,
         s.frozen,
         s.is_originator,
+        s.self_role,
         s.self_ip.as_deref().unwrap_or(""),
         s.home_relay.as_deref().unwrap_or(""),
     );
@@ -835,7 +846,7 @@ fn render_signature(s: &NetworkStatus, pending: &[PendingJoin]) -> String {
         let last = if m.online { String::new() } else { fmt_last_seen(m.last_seen) };
         let _ = write!(
             out,
-            "[{}|{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}]",
+            "[{}|{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}]",
             m.node_id,
             m.is_self,
             m.label.as_deref().unwrap_or(""),
@@ -848,6 +859,9 @@ fn render_signature(s: &NetworkStatus, pending: &[PendingJoin]) -> String {
             m.location.as_deref().unwrap_or(""),
             m.observed_addr.as_deref().unwrap_or(""),
             last,
+            m.role,
+            m.access_disabled,
+            m.hidden,
         );
     }
     out.push('#');
@@ -939,11 +953,15 @@ fn render_main(
         controls.add(&row);
     }
     {
-        let row = flyout_row("Show join ticket", "Invite another device", "send-to-symbolic");
+        let row = flyout_row(
+            "Activity log",
+            "Administration history (last 30 days)",
+            "document-open-recent-symbolic",
+        );
         let net2 = net.clone();
         row.connect_activated(move |_| {
-            net2.request(IpcRequest::GetTicket, |r| match r {
-                Ok(IpcResponse::Ticket(t)) => Some(UiMsg::Ticket(t)),
+            net2.request(IpcRequest::GetAuditLog, |r| match r {
+                Ok(IpcResponse::AuditLog(es)) => Some(UiMsg::AuditLog(es)),
                 Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
                 _ => None,
             });
@@ -970,16 +988,61 @@ fn render_main(
     }
     ui.main_box.append(&controls);
 
+    // Peer management — Controllers and the originator only; Peers don't see it.
+    if s.self_role != "peer" {
+        let pm = adw::PreferencesGroup::builder().title("Peer management").build();
+        {
+            let row = info_row(
+                "Show join ticket (Peer level)",
+                "Invite a device as a Peer",
+                "send-to-symbolic",
+                "Peers can use the network and view the activity log, but can't \
+                 approve devices or view join tickets.",
+            );
+            let net2 = net.clone();
+            row.connect_activated(move |_| {
+                net2.request(IpcRequest::GetTicket, |r| match r {
+                    Ok(IpcResponse::Ticket(t)) => Some(UiMsg::Ticket(t)),
+                    Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
+                    _ => None,
+                });
+            });
+            pm.add(&row);
+        }
+        if s.is_originator {
+            let row = info_row(
+                "Show join ticket (Controller level)",
+                "Invite a device as a Controller (single-use)",
+                "send-to-symbolic",
+                "Controllers can add and remove Peers, but can't view the originator \
+                 key, rotate the secret, or delete the network.",
+            );
+            let net2 = net.clone();
+            row.connect_activated(move |_| {
+                net2.request(IpcRequest::GetControllerTicket, |r| match r {
+                    Ok(IpcResponse::Ticket(t)) => Some(UiMsg::Ticket(t)),
+                    Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
+                    _ => None,
+                });
+            });
+            pm.add(&row);
+        }
+        ui.main_box.append(&pm);
+    }
+
     // Members (this device first), each row opens a detail flyout.
     let others = s.members.iter().filter(|m| !m.is_self).count();
     let members = adw::PreferencesGroup::builder()
         .title("Members")
         .description(format!("{} device(s) total", others + 1))
         .build();
+    // The engine already orders members (online → access-disabled → offline →
+    // hidden). Pin self to the top — but only when it's a normal online device;
+    // if self has disabled access or hidden itself, leave it in that ranked spot.
     let mut ordered: Vec<&MemberView> = s.members.iter().collect();
-    ordered.sort_by_key(|m| !m.is_self); // self first
+    ordered.sort_by_key(|m| !(m.is_self && !m.access_disabled && !m.hidden));
     for m in ordered {
-        members.add(&member_row(ui, m, s.is_originator, net, window));
+        members.add(&member_row(ui, m, &s.self_role, s.is_originator, net, window));
     }
     ui.main_box.append(&members);
 }
@@ -988,11 +1051,12 @@ fn render_main(
 fn member_row(
     ui: &Ui,
     m: &MemberView,
+    self_role: &str,
     is_originator: bool,
     net: &Net,
     window: &adw::ApplicationWindow,
 ) -> adw::ActionRow {
-    let dot = status_dot(m.online, m.last_seen);
+    let dot = status_dot(m.online, m.last_seen, m.access_disabled, m.hidden);
 
     let mut title = m
         .label
@@ -1011,9 +1075,15 @@ fn member_row(
         }
     }
     subtitle.push_str(&m.virtual_ip.clone().unwrap_or_else(|| "(no IP)".into()));
+    // The access/hidden note sits next to the IP.
+    if m.hidden {
+        subtitle.push_str(" · Hidden");
+    } else if m.access_disabled {
+        subtitle.push_str(" · Access disabled");
+    }
     // Online path hint only; "last seen" lives in the member detail flyout, and
     // the dot color already conveys offline/long-offline at a glance.
-    if !m.is_self && m.online {
+    if !m.is_self && m.online && !m.access_disabled {
         match m.direct {
             Some(true) => subtitle.push_str(" · direct"),
             Some(false) => subtitle.push_str(" · relay"),
@@ -1032,7 +1102,10 @@ fn member_row(
     let net2 = net.clone();
     let window2 = window.clone();
     let m2 = m.clone();
-    row.connect_activated(move |_| fill_member(&ui2, &m2, is_originator, &net2, &window2));
+    let self_role = self_role.to_string();
+    row.connect_activated(move |_| {
+        fill_member(&ui2, &m2, &self_role, is_originator, &net2, &window2)
+    });
     row
 }
 
@@ -1059,8 +1132,8 @@ fn render_admin(
 ) {
     clear_box(b);
 
-    // Pending join requests — first, on a light-red attention background.
-    {
+    // Pending join requests — Controllers and the originator only.
+    if s.self_role != "peer" {
         let plist = pending.borrow();
         if !plist.is_empty() {
             let area = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -1087,20 +1160,23 @@ fn render_admin(
         }
     }
 
-    // Network name (rename here, not on the main screen).
-    let name_group = adw::PreferencesGroup::new();
-    let name_row = adw::ActionRow::builder()
-        .title("Network name")
-        .subtitle(&s.name)
-        .build();
-    let edit = icon_button("document-edit-symbolic", "Rename the network");
-    let net2 = net.clone();
-    let window2 = window.clone();
-    let cur = s.name.clone();
-    edit.connect_clicked(move |_| rename_dialog(&window2, &net2, &cur));
-    name_row.add_suffix(&edit);
-    name_group.add(&name_row);
-    b.append(&name_group);
+    // Network name (rename here, not on the main screen) — Controllers and the
+    // originator only.
+    if s.self_role != "peer" {
+        let name_group = adw::PreferencesGroup::new();
+        let name_row = adw::ActionRow::builder()
+            .title("Network name")
+            .subtitle(&s.name)
+            .build();
+        let edit = icon_button("document-edit-symbolic", "Rename the network");
+        let net2 = net.clone();
+        let window2 = window.clone();
+        let cur = s.name.clone();
+        edit.connect_clicked(move |_| rename_dialog(&window2, &net2, &cur));
+        name_row.add_suffix(&edit);
+        name_group.add(&name_row);
+        b.append(&name_group);
+    }
 
     let g = adw::PreferencesGroup::new();
     if s.is_originator {
@@ -1139,6 +1215,34 @@ fn render_admin(
             });
         });
         g.add(&backup);
+
+        // Peer-ticket single-use: toggling mints a new code, invalidating the old.
+        let single = gtk::Switch::builder()
+            .active(s.peer_ticket_single_use)
+            .valign(gtk::Align::Center)
+            .build();
+        let net2 = net.clone();
+        single.connect_state_set(move |_, state| {
+            net2.request(IpcRequest::SetPeerTicketSingleUse { on: state }, move |r| match r {
+                Ok(IpcResponse::Ok) => Some(UiMsg::Toast(
+                    if state {
+                        "Peer tickets are now single-use (new code issued)"
+                    } else {
+                        "Peer tickets are now reusable (new code issued)"
+                    }
+                    .into(),
+                )),
+                Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
+                _ => None,
+            });
+            glib::Propagation::Proceed
+        });
+        let srow = adw::ActionRow::builder()
+            .title("Single-use Peer tickets")
+            .subtitle("Each Peer ticket admits one device; toggling issues a fresh code")
+            .build();
+        srow.add_suffix(&single);
+        g.add(&srow);
     } else {
         let restore = action_row("Restore originator access…", "Paste a recovery code to gain admin powers");
         let net2 = net.clone();
@@ -1216,6 +1320,7 @@ fn request_card(req: &PendingJoin, net: &Net, pending: &Rc<RefCell<Vec<PendingJo
 fn fill_member(
     ui: &Ui,
     m: &MemberView,
+    self_role: &str,
     is_originator: bool,
     net: &Net,
     window: &adw::ApplicationWindow,
@@ -1235,8 +1340,17 @@ fn fill_member(
     clear_box(&ui.member_box);
     let g = adw::PreferencesGroup::new();
 
-    // Status (top) with a colored dot (green / gray / red>1wk).
-    let status_text = if m.online {
+    // Status (top) with a colored dot (white hidden / yellow blocked / green /
+    // gray / red>1wk).
+    let status_text = if m.hidden {
+        "Hidden from the member list".to_string()
+    } else if m.access_disabled {
+        if m.is_self {
+            "Online · remote access disabled (this device)".to_string()
+        } else {
+            "Online · remote access disabled".to_string()
+        }
+    } else if m.online {
         if m.is_self { "Online (this device)".to_string() } else { "Online".to_string() }
     } else if m.last_seen == 0 {
         "Offline".to_string()
@@ -1244,7 +1358,7 @@ fn fill_member(
         format!("Offline · last seen {}", fmt_last_seen(m.last_seen))
     };
     let status_row = property_row("Status", &status_text);
-    status_row.add_prefix(&status_dot(m.online, m.last_seen));
+    status_row.add_prefix(&status_dot(m.online, m.last_seen, m.access_disabled, m.hidden));
     g.add(&status_row);
 
     // Friendly name — set by THIS client for another member (local; not shared).
@@ -1258,7 +1372,10 @@ fn fill_member(
         let net2 = net.clone();
         let ui2 = ui.clone();
         let m2 = m.clone();
-        edit.connect_clicked(move |_| set_nickname_dialog(&window2, &net2, &ui2, &m2, is_originator));
+        let self_role2 = self_role.to_string();
+        edit.connect_clicked(move |_| {
+            set_nickname_dialog(&window2, &net2, &ui2, &m2, &self_role2, is_originator)
+        });
         name_row.add_suffix(&edit);
         g.add(&name_row);
     }
@@ -1318,7 +1435,64 @@ fn fill_member(
     ));
     ui.member_box.append(&g);
 
-    if !m.is_self && is_originator {
+    // This device: Controllers and the originator get the two access switches.
+    if m.is_self && self_role != "peer" {
+        let dev = adw::PreferencesGroup::builder().title("This device").build();
+
+        let block_sw = gtk::Switch::builder()
+            .active(m.access_disabled)
+            .valign(gtk::Align::Center)
+            .build();
+        {
+            let net2 = net.clone();
+            block_sw.connect_state_set(move |_, state| {
+                net2.request(
+                    IpcRequest::SetRemoteAccessDisabled { disabled: state },
+                    |r| match r {
+                        Ok(IpcResponse::Ok) => Some(UiMsg::Refresh),
+                        Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
+                        _ => None,
+                    },
+                );
+                glib::Propagation::Proceed
+            });
+        }
+        let block_row = adw::ActionRow::builder()
+            .title("Disable remote access")
+            .subtitle("Block others from reaching this device — you can still reach them")
+            .build();
+        block_row.add_suffix(&block_sw);
+        dev.add(&block_row);
+
+        let hide_sw = gtk::Switch::builder()
+            .active(m.hidden)
+            .valign(gtk::Align::Center)
+            .build();
+        {
+            let net2 = net.clone();
+            hide_sw.connect_state_set(move |_, state| {
+                net2.request(IpcRequest::SetHidden { hidden: state }, |r| match r {
+                    Ok(IpcResponse::Ok) => Some(UiMsg::Refresh),
+                    Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
+                    _ => None,
+                });
+                glib::Propagation::Proceed
+            });
+        }
+        let hide_row = adw::ActionRow::builder()
+            .title("Hide this device from member list")
+            .subtitle("Also disables remote access; only originators still see it")
+            .build();
+        hide_row.add_suffix(&hide_sw);
+        dev.add(&hide_row);
+
+        ui.member_box.append(&dev);
+    }
+
+    // Remove: the originator can remove anyone; a Controller can remove a Peer.
+    let show_remove = !m.is_self
+        && (is_originator || (self_role == "controller" && m.role == "peer"));
+    if show_remove {
         let danger = adw::PreferencesGroup::new();
         let kick = action_row("Remove from network", "Kicks this device and drops its connection");
         kick.add_css_class("error");
@@ -1365,6 +1539,33 @@ fn fill_ticket(ui: &Ui, ticket: &str, net: &Net, window: &adw::ApplicationWindow
     ui.open("ticket");
 }
 
+/// Fill + open the activity-log flyout (administration history, newest first).
+fn fill_audit(ui: &Ui, entries: &[AuditEntry]) {
+    clear_box(&ui.audit_box);
+    let g = adw::PreferencesGroup::new();
+    if entries.is_empty() {
+        g.add(&property_row(
+            "No activity",
+            "Nothing has been recorded in the last 30 days.",
+        ));
+    } else {
+        for e in entries {
+            let who = e
+                .actor_name
+                .clone()
+                .unwrap_or_else(|| short_id(&e.actor_node_id));
+            let row = adw::ActionRow::builder()
+                .title(&e.action)
+                .subtitle(&format!("{} · {}", who, fmt_last_seen(e.ts)))
+                .build();
+            row.add_css_class("property");
+            g.add(&row);
+        }
+    }
+    ui.audit_box.append(&g);
+    ui.open("audit");
+}
+
 // ---------------------------------------------------------------------------
 // Small widget helpers
 // ---------------------------------------------------------------------------
@@ -1402,6 +1603,23 @@ fn action_row(title: &str, subtitle: &str) -> adw::ActionRow {
 fn flyout_row(title: &str, subtitle: &str, icon: &str) -> adw::ActionRow {
     let row = action_row(title, subtitle);
     row.add_prefix(&gtk::Image::from_icon_name(icon));
+    row
+}
+
+/// Like [`flyout_row`] but with a hover-over info icon (tooltip) before the
+/// chevron — used to explain join-ticket tiers.
+fn info_row(title: &str, subtitle: &str, icon: &str, tip: &str) -> adw::ActionRow {
+    let row = adw::ActionRow::builder()
+        .title(title)
+        .subtitle(subtitle)
+        .activatable(true)
+        .build();
+    row.add_prefix(&gtk::Image::from_icon_name(icon));
+    let help = gtk::Image::from_icon_name("help-about-symbolic");
+    help.set_tooltip_text(Some(tip));
+    help.set_valign(gtk::Align::Center);
+    row.add_suffix(&help);
+    row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
     row
 }
 
@@ -1597,8 +1815,10 @@ fn set_nickname_dialog(
     net: &Net,
     ui: &Ui,
     m: &MemberView,
+    self_role: &str,
     is_originator: bool,
 ) {
+    let self_role = self_role.to_string();
     let entry = gtk::Entry::builder()
         .text(m.label.clone().unwrap_or_default())
         .placeholder_text("Nickname (leave blank to clear)")
@@ -1641,7 +1861,7 @@ fn set_nickname_dialog(
         // local, so it effectively never fails), and refresh the main list.
         let mut updated = m.clone();
         updated.label = name;
-        fill_member(&ui, &updated, is_originator, &net, &window);
+        fill_member(&ui, &updated, &self_role, is_originator, &net, &window);
         net.refresh();
     });
     dialog.present();
@@ -1926,12 +2146,17 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// A colored status dot: green online, gray offline, red if offline > 1 week.
-fn status_dot(online: bool, last_seen: u64) -> gtk::Label {
+/// A colored status dot: white hidden, yellow access-disabled, green online, gray
+/// offline, red if offline > 1 week.
+fn status_dot(online: bool, last_seen: u64, access_disabled: bool, hidden: bool) -> gtk::Label {
     let dot = gtk::Label::new(Some("●"));
     dot.add_css_class("status-dot");
     dot.set_valign(gtk::Align::Center);
-    let (class, tip) = if online {
+    let (class, tip) = if hidden {
+        ("status-hidden", "Hidden")
+    } else if access_disabled {
+        ("warning", "Access disabled")
+    } else if online {
         ("success", "Online")
     } else if last_seen != 0 && now_ms().saturating_sub(last_seen) > WEEK_MS {
         ("error", "Offline (over a week)")

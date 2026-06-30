@@ -28,18 +28,20 @@ use iroh_docs::api::Doc;
 use iroh_docs::AuthorId;
 use iroh_gossip::api::{Event, GossipSender};
 use iroh_gossip::proto::TopicId;
+use rand::RngCore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
 use crate::admission;
 use crate::membership;
+use crate::conntrack::Conntrack;
 use crate::network::{
     decode_recovery_key, encode_recovery_key, generate_originator_key, NetworkSecret, Ticket,
 };
 use crate::node::IrohNode;
 use crate::presence::{GossipMsg, Locations, Presence, PresenceTracker};
-use crate::roster::{now_ms, sign, Config, Id, Op, Roster};
+use crate::roster::{now_ms, sign, Config, Id, InviteKind, Nonce, Op, Role, Roster};
 use crate::router::{clamp_tcp_mss, dst_ipv4, RouteTable};
 use crate::tun_device::RealTun;
 
@@ -124,6 +126,15 @@ pub struct MemberView {
     pub last_seen: u64,
     pub is_self: bool,
     pub is_originator_device: bool,
+    /// This member's tier: `"peer"`, `"controller"`, or `"originator"`.
+    #[serde(default)]
+    pub role: String,
+    /// Member has disabled inbound remote access (others can't reach it).
+    #[serde(default)]
+    pub access_disabled: bool,
+    /// Member asked to be hidden (only surfaced to originators).
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -134,6 +145,12 @@ pub struct NetworkStatus {
     pub self_node_id: String,
     pub self_ip: Option<String>,
     pub is_originator: bool,
+    /// This device's effective tier: `"peer"`, `"controller"`, or `"originator"`.
+    #[serde(default)]
+    pub self_role: String,
+    /// Whether the current Peer join ticket is single-use (drives the toggle).
+    #[serde(default)]
+    pub peer_ticket_single_use: bool,
     /// Whether the TUN is up so RDP/SSH traffic is actually routed (needs elevation).
     pub routing: bool,
     /// Whether the daemon is currently connected to the network (vs. disconnected
@@ -142,6 +159,21 @@ pub struct NetworkStatus {
     /// This device's home relay URL, if one is established (diagnostics).
     pub home_relay: Option<String>,
     pub members: Vec<MemberView>,
+}
+
+/// One entry in the administration activity log — a human-readable view over a
+/// signed roster operation (who did what, when). Derived, so it's tamper-evident
+/// and the same for every member.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuditEntry {
+    /// Milliseconds since the Unix epoch (member-chosen; see roster ordering note).
+    pub ts: u64,
+    /// The signer of the operation (hex), or `"originator"` for master-key actions.
+    pub actor_node_id: String,
+    /// A friendly name for the actor, if resolvable.
+    pub actor_name: Option<String>,
+    /// Human-readable description of the action.
+    pub action: String,
 }
 
 /// Events pushed to subscribers (the GUI) as things change.
@@ -167,6 +199,16 @@ pub enum EngineEvent {
 #[derive(Serialize, Deserialize)]
 struct JoinRequest {
     hostname: String,
+    /// Which tier the joiner's ticket authorizes (Peer or Controller).
+    #[serde(default = "default_join_kind")]
+    invite_kind: InviteKind,
+    /// The invite nonce from the joiner's ticket; the admitting `Add` cites it.
+    #[serde(default)]
+    invite_nonce: Nonce,
+}
+
+fn default_join_kind() -> InviteKind {
+    InviteKind::Peer
 }
 
 #[derive(Serialize, Deserialize)]
@@ -232,6 +274,16 @@ struct Inner {
     tun: StdRwLock<Option<Arc<RealTun>>>,
     /// Whether we've already attempted to bring up the TUN (open it once).
     tun_attempted: AtomicBool,
+    /// This device blocks inbound remote access (one-way; outbound still works).
+    /// Read lock-free on the per-packet inbound path, so it lives on `Inner`.
+    remote_access_disabled: AtomicBool,
+    /// This device asks to be hidden from the member list (implies the block).
+    hidden: AtomicBool,
+    /// Tracks flows we initiated, so the one-way block lets return traffic back in.
+    conntrack: Conntrack,
+    /// Coarse wall-clock (ms), refreshed each tick — read by the per-packet pump
+    /// to stamp/age conntrack flows without a syscall per packet.
+    coarse_now: AtomicU64,
     /// Abort handles for network-scoped background tasks (presence receiver, TUN
     /// read loop) so leaving/deleting a network stops them cleanly.
     net_tasks: StdMutex<Vec<tokio::task::AbortHandle>>,
@@ -272,6 +324,7 @@ impl Engine {
         let my_id = node.node_id_bytes();
         debug_assert_eq!(device_key.verifying_key().to_bytes(), my_id);
         let nicknames = load_nicknames(&data_dir);
+        let prefs = load_device_prefs(&data_dir);
 
         let (events, _) = broadcast::channel(64);
         let inner = Arc::new(Inner {
@@ -294,6 +347,10 @@ impl Engine {
             routes: StdRwLock::new(RouteTable::default()),
             tun: StdRwLock::new(None),
             tun_attempted: AtomicBool::new(false),
+            remote_access_disabled: AtomicBool::new(prefs.remote_access_disabled),
+            hidden: AtomicBool::new(prefs.hidden),
+            conntrack: Conntrack::default(),
+            coarse_now: AtomicU64::new(0),
             net_tasks: StdMutex::new(Vec::new()),
             was_member: AtomicBool::new(false),
             protocol_version: AtomicU32::new(admission::PROTOCOL_VERSION),
@@ -383,20 +440,45 @@ impl Engine {
         save_config(&self.inner.data_dir, &cfg)?;
         activate(&self.inner, cfg).await?;
 
-        // Genesis entry: originator master key vouches its own device in. The IP
-        // is assigned deterministically from the NodeId when the roster is folded.
+        // Genesis entry: the originator master key vouches its own device in as a
+        // Controller at the first host address.
         let genesis = sign(
             secret.network_id(),
             &originator,
             Op::Add {
                 node_id: self.inner.my_id,
                 hostname: current_hostname(),
+                role: Role::Controller,
+                virtual_ip: first_host(subnet),
+                invite_nonce: [0u8; 16],
                 ts: now_ms(),
             },
         );
         publish(&self.inner, &genesis).await?;
 
-        let ticket = Ticket::new(name, subnet, &secret, originator_id, self.inner.node.addr());
+        // Seed an initial (reusable) Peer invite so the first ticket is valid.
+        let peer_nonce = new_nonce();
+        let set_inv = sign(
+            secret.network_id(),
+            &originator,
+            Op::SetInvite {
+                kind: InviteKind::Peer,
+                nonce: peer_nonce,
+                single_use: false,
+                ts: now_ms(),
+            },
+        );
+        publish(&self.inner, &set_inv).await?;
+
+        let ticket = Ticket::new(
+            name,
+            subnet,
+            &secret,
+            originator_id,
+            self.inner.node.addr(),
+            InviteKind::Peer,
+            peer_nonce,
+        );
         let _ = self.inner.events.send(EngineEvent::Changed);
         Ok(ticket.encode())
     }
@@ -454,19 +536,39 @@ impl Engine {
         Ok(())
     }
 
-    /// Originator-only: remove a member.
+    /// Remove a member. The originator (master key) can remove anyone; a
+    /// Controller signs with its device key and the roster rules let it evict only
+    /// Peers. A Peer's attempt is signed but rejected by the fold.
     pub async fn remove_member(&self, node_id_hex: &str) -> Result<()> {
+        let id = parse_id(node_id_hex)?;
+        let (net_id, key) = self.admin_signer().await?;
+        let entry = sign(
+            net_id,
+            &key,
+            Op::Remove {
+                node_id: id,
+                ts: now_ms(),
+            },
+        );
+        publish(&self.inner, &entry).await?;
+        let _ = self.inner.events.send(EngineEvent::Changed);
+        Ok(())
+    }
+
+    /// Originator-only: promote/demote a member between Peer and Controller.
+    pub async fn set_member_role(&self, node_id_hex: &str, controller: bool) -> Result<()> {
         let id = parse_id(node_id_hex)?;
         let originator = self.originator_key().await?;
         let net_id = {
             let st = self.inner.state.lock().await;
-            st.config.as_ref().unwrap().secret().network_id()
+            st.config.as_ref().context("no network")?.secret().network_id()
         };
         let entry = sign(
             net_id,
             &originator,
-            Op::Remove {
+            Op::SetRole {
                 node_id: id,
+                role: if controller { Role::Controller } else { Role::Peer },
                 ts: now_ms(),
             },
         );
@@ -589,19 +691,44 @@ impl Engine {
         save_config(&self.inner.data_dir, &cfg)?;
         activate(&self.inner, cfg).await?;
 
-        // Genesis self-add in the NEW namespace (IP derived during the fold).
+        // Genesis self-add in the NEW namespace, as a Controller at the first host.
         let genesis = sign(
             secret.network_id(),
             &originator,
             Op::Add {
                 node_id: self.inner.my_id,
                 hostname: current_hostname(),
+                role: Role::Controller,
+                virtual_ip: first_host(subnet),
+                invite_nonce: [0u8; 16],
                 ts: now_ms(),
             },
         );
         publish(&self.inner, &genesis).await?;
 
-        let ticket = Ticket::new(name, subnet, &secret, originator_id, self.inner.node.addr());
+        // Seed a fresh Peer invite for the new network.
+        let peer_nonce = new_nonce();
+        let set_inv = sign(
+            secret.network_id(),
+            &originator,
+            Op::SetInvite {
+                kind: InviteKind::Peer,
+                nonce: peer_nonce,
+                single_use: false,
+                ts: now_ms(),
+            },
+        );
+        publish(&self.inner, &set_inv).await?;
+
+        let ticket = Ticket::new(
+            name,
+            subnet,
+            &secret,
+            originator_id,
+            self.inner.node.addr(),
+            InviteKind::Peer,
+            peer_nonce,
+        );
         let _ = self.inner.events.send(EngineEvent::Changed);
         Ok(ticket.encode())
     }
@@ -686,18 +813,227 @@ impl Engine {
         Ok(SigningKey::from_bytes(&secret))
     }
 
-    /// The join ticket for this network (to onboard another device).
-    pub async fn ticket(&self) -> Result<String> {
+    /// The key + network id to sign an administrative op with: the originator
+    /// master key if this device holds it (full authority), else this device's key
+    /// (a Controller, constrained by the fold rules). Errors if this device is a
+    /// Peer.
+    async fn admin_signer(&self) -> Result<(Id, SigningKey)> {
         let st = self.inner.state.lock().await;
         let cfg = st.config.as_ref().context("no network")?;
+        let net_id = cfg.secret().network_id();
+        if let Some(secret) = cfg.originator_secret {
+            return Ok((net_id, SigningKey::from_bytes(&secret)));
+        }
+        if st.roster.role(&self.inner.my_id) == Role::Controller {
+            return Ok((net_id, self.inner.device_key.clone()));
+        }
+        bail!("this device is a Peer and can't perform administrative actions");
+    }
+
+    /// Publish a fresh Peer invite (originator or Controller signed), superseding
+    /// the previous one so old Peer tickets stop admitting new devices.
+    async fn regenerate_peer_invite(&self, single_use: bool) -> Result<Nonce> {
+        let (net_id, key) = self.admin_signer().await?;
+        let nonce = new_nonce();
+        let entry = sign(
+            net_id,
+            &key,
+            Op::SetInvite {
+                kind: InviteKind::Peer,
+                nonce,
+                single_use,
+                ts: now_ms(),
+            },
+        );
+        publish(&self.inner, &entry).await?;
+        Ok(nonce)
+    }
+
+    /// The **Peer-level** join ticket (Controllers and the originator only). Uses
+    /// the network's current Peer invite, so showing it repeatedly is stable.
+    pub async fn ticket(&self) -> Result<String> {
+        let (name, subnet, secret, originator_id, existing) = {
+            let st = self.inner.state.lock().await;
+            let cfg = st.config.as_ref().context("no network")?;
+            let can = cfg.originator_secret.is_some()
+                || st.roster.role(&self.inner.my_id) == Role::Controller;
+            if !can {
+                bail!("only controllers and the originator can view the join ticket");
+            }
+            (
+                cfg.name.clone(),
+                cfg.subnet(),
+                cfg.secret(),
+                cfg.originator_id,
+                st.roster.current_invite(InviteKind::Peer),
+            )
+        };
+        let nonce = match existing {
+            Some((n, _)) => n,
+            None => self.regenerate_peer_invite(false).await?,
+        };
         Ok(Ticket::new(
-            cfg.name.clone(),
-            cfg.subnet(),
-            &cfg.secret(),
-            cfg.originator_id,
+            name,
+            subnet,
+            &secret,
+            originator_id,
             self.inner.node.addr(),
+            InviteKind::Peer,
+            nonce,
         )
         .encode())
+    }
+
+    /// A **Controller-level** join ticket (originator only). Always single-use:
+    /// each call mints a fresh nonce that the fold consumes after one admission.
+    pub async fn controller_ticket(&self) -> Result<String> {
+        let originator = self.originator_key().await?; // originator-only gate
+        let (name, subnet, secret, originator_id, net_id) = {
+            let st = self.inner.state.lock().await;
+            let cfg = st.config.as_ref().context("no network")?;
+            (
+                cfg.name.clone(),
+                cfg.subnet(),
+                cfg.secret(),
+                cfg.originator_id,
+                cfg.secret().network_id(),
+            )
+        };
+        let nonce = new_nonce();
+        let entry = sign(
+            net_id,
+            &originator,
+            Op::SetInvite {
+                kind: InviteKind::Controller,
+                nonce,
+                single_use: true,
+                ts: now_ms(),
+            },
+        );
+        publish(&self.inner, &entry).await?;
+        Ok(Ticket::new(
+            name,
+            subnet,
+            &secret,
+            originator_id,
+            self.inner.node.addr(),
+            InviteKind::Controller,
+            nonce,
+        )
+        .encode())
+    }
+
+    /// Toggle whether Peer join tickets are single-use. Either change mints a new
+    /// Peer invite, immediately invalidating any previously-shared Peer code (for
+    /// *new* joins — current members keep their access).
+    pub async fn set_peer_ticket_single_use(&self, on: bool) -> Result<()> {
+        self.regenerate_peer_invite(on).await?;
+        let _ = self.inner.events.send(EngineEvent::Changed);
+        Ok(())
+    }
+
+    /// Toggle this device's one-way inbound block. Outbound access still works.
+    pub async fn set_remote_access_disabled(&self, disabled: bool) -> Result<()> {
+        self.inner
+            .remote_access_disabled
+            .store(disabled, Ordering::Relaxed);
+        self.persist_prefs();
+        let _ = self.inner.events.send(EngineEvent::Changed);
+        Ok(())
+    }
+
+    /// Toggle whether this device hides itself from the member list. Hiding
+    /// implies the inbound block (the effective block is `disabled || hidden`).
+    pub async fn set_hidden(&self, hidden: bool) -> Result<()> {
+        self.inner.hidden.store(hidden, Ordering::Relaxed);
+        self.persist_prefs();
+        let _ = self.inner.events.send(EngineEvent::Changed);
+        Ok(())
+    }
+
+    fn persist_prefs(&self) {
+        save_device_prefs(
+            &self.inner.data_dir,
+            &DevicePrefs {
+                remote_access_disabled: self.inner.remote_access_disabled.load(Ordering::Relaxed),
+                hidden: self.inner.hidden.load(Ordering::Relaxed),
+            },
+        );
+    }
+
+    /// The administration activity log: a 30-day, human-readable view derived from
+    /// the signed roster history. Visible to every member.
+    pub async fn audit_log(&self) -> Result<Vec<AuditEntry>> {
+        let (doc, originator_id) = {
+            let st = self.inner.state.lock().await;
+            let cfg = st.config.as_ref().context("no network")?;
+            (st.doc.clone().context("network offline")?, cfg.originator_id)
+        };
+        let entries = membership::load_entries(&doc, self.inner.node.blobs.blobs()).await?;
+
+        // Resolve friendly names from Add hostnames + this client's local nicknames.
+        let mut hostnames: HashMap<Id, String> = HashMap::new();
+        for e in &entries {
+            if let Op::Add { node_id, hostname, .. } = &e.op {
+                hostnames.insert(*node_id, hostname.clone());
+            }
+        }
+        let nicks = self.inner.nicknames.read().unwrap();
+        let name_of = |id: &Id| -> Option<String> {
+            let hex = data_encoding::HEXLOWER.encode(id);
+            nicks.get(&hex).cloned().or_else(|| hostnames.get(id).cloned())
+        };
+        let label = |id: &Id| name_of(id).unwrap_or_else(|| short(id));
+
+        let cutoff = now_ms().saturating_sub(30 * 24 * 3600 * 1000);
+        let mut out: Vec<AuditEntry> = Vec::new();
+        for e in &entries {
+            let ts = e.op.ts();
+            if ts < cutoff {
+                continue;
+            }
+            let action = match &e.op {
+                Op::Add { node_id, role, .. } => {
+                    format!("Added {} as {}", label(node_id), role.as_str())
+                }
+                Op::Remove { node_id, .. } => format!("Removed {}", label(node_id)),
+                Op::SetRole { node_id, role, .. } => {
+                    format!("Set {} to {}", label(node_id), role.as_str())
+                }
+                Op::SetInvite { kind, single_use, .. } => match kind {
+                    InviteKind::Peer => format!(
+                        "Regenerated the Peer join code{}",
+                        if *single_use { " (single-use)" } else { "" }
+                    ),
+                    InviteKind::Controller => "Issued a Controller join code (single-use)".into(),
+                },
+                Op::Freeze { frozen, .. } => {
+                    if *frozen {
+                        "Froze membership".into()
+                    } else {
+                        "Unfroze membership".into()
+                    }
+                }
+                Op::SetName { name, .. } => format!("Renamed the network to \"{name}\""),
+            };
+            let (actor_node_id, actor_name) = if e.signer == originator_id {
+                (
+                    "originator".to_string(),
+                    Some("Originator (master key)".to_string()),
+                )
+            } else {
+                (data_encoding::HEXLOWER.encode(&e.signer), name_of(&e.signer))
+            };
+            out.push(AuditEntry {
+                ts,
+                actor_node_id,
+                actor_name,
+                action,
+            });
+        }
+        drop(nicks);
+        out.sort_by(|a, b| b.ts.cmp(&a.ts));
+        Ok(out)
     }
 
     /// Rename the network. The name is shared: it's published to the signed roster
@@ -751,11 +1087,34 @@ impl Engine {
         let nicks = self.inner.nicknames.read().unwrap();
         let self_addr = self.inner.node.addr();
         let (self_local, self_public) = split_local_public(self_addr.ip_addrs().copied());
+        let is_orig = cfg.originator_secret.is_some();
         let mut members = Vec::new();
         for (id, m) in st.roster.members() {
             let ps = st.presence.get(id);
             let is_self = *id == self.inner.my_id;
             let node_hex = data_encoding::HEXLOWER.encode(id);
+            // Per-device flags: self reads its own live toggles; others come from
+            // the signed presence heartbeat.
+            let access_disabled = if is_self {
+                self.inner.remote_access_disabled.load(Ordering::Relaxed)
+            } else {
+                ps.map(|p| p.access_disabled).unwrap_or(false)
+            };
+            let hidden = if is_self {
+                self.inner.hidden.load(Ordering::Relaxed)
+            } else {
+                ps.map(|p| p.hidden).unwrap_or(false)
+            };
+            // "Hide" is a courtesy: filter hidden members out for non-originator
+            // viewers. The member is still routed (enforcement is the inbound block).
+            if !is_self && hidden && !is_orig {
+                continue;
+            }
+            let role = if is_self && is_orig {
+                "originator".to_string()
+            } else {
+                st.roster.role(id).as_str().to_string()
+            };
             let (local_ip, public_ip) = if is_self {
                 (self_local.clone(), self_public.clone())
             } else {
@@ -783,11 +1142,37 @@ impl Engine {
                 last_seen: ps.map(|p| p.last_seen).unwrap_or(0),
                 is_self,
                 is_originator_device: m.added_by == cfg.originator_id && false, // device==originator-master only at genesis; informational
+                role,
+                access_disabled,
+                hidden,
                 node_id: node_hex,
             });
         }
         drop(nicks);
-        members.sort_by(|a, b| b.online.cmp(&a.online).then(a.node_id.cmp(&b.node_id)));
+        // Order: online (0) before access-disabled (1) before offline (2); hidden
+        // members (only ever shown to the originator) sink to the bottom (3).
+        let rank = |m: &MemberView| -> u8 {
+            if m.hidden {
+                3
+            } else if !m.online {
+                2
+            } else if m.access_disabled {
+                1
+            } else {
+                0
+            }
+        };
+        members.sort_by(|a, b| rank(a).cmp(&rank(b)).then(a.node_id.cmp(&b.node_id)));
+        let self_role = if is_orig {
+            "originator".to_string()
+        } else {
+            st.roster.role(&self.inner.my_id).as_str().to_string()
+        };
+        let peer_ticket_single_use = st
+            .roster
+            .current_invite(InviteKind::Peer)
+            .map(|(_, su)| su)
+            .unwrap_or(false);
         Ok(NetworkStatus {
             // Prefer the shared roster name; fall back to the local config name.
             name: st
@@ -803,6 +1188,8 @@ impl Engine {
                 .member(&self.inner.my_id)
                 .map(|m| m.virtual_ip.to_string()),
             is_originator: cfg.originator_secret.is_some(),
+            self_role,
+            peer_ticket_single_use,
             routing: self.inner.tun.read().unwrap().is_some(),
             online: st.doc.is_some(),
             home_relay: self
@@ -857,8 +1244,14 @@ async fn activate(inner: &Arc<Inner>, cfg: StoredConfig) -> Result<()> {
                     GossipMsg::Presence(p) => {
                         if p.verify(&net_id) && p.node_id != ti.my_id {
                             let mut st = ti.state.lock().await;
-                            st.presence
-                                .record_heartbeat(p.node_id, p.hostname, p.public_ip, p.ts);
+                            st.presence.record_heartbeat(
+                                p.node_id,
+                                p.hostname,
+                                p.public_ip,
+                                p.remote_access_disabled,
+                                p.hidden,
+                                p.ts,
+                            );
                             drop(st);
                             let _ = ti.events.send(EngineEvent::Changed);
                         }
@@ -898,6 +1291,7 @@ async fn soft_disconnect(inner: &Arc<Inner>) {
     *inner.tun.write().unwrap() = None;
     inner.tun_attempted.store(false, Ordering::SeqCst);
     inner.was_member.store(false, Ordering::SeqCst);
+    inner.conntrack.clear();
     *inner.routes.write().unwrap() = RouteTable::default();
     let conns: Vec<Connection> = {
         let mut map = inner.conns.write().unwrap();
@@ -929,6 +1323,12 @@ async fn teardown(inner: &Arc<Inner>) {
 /// One maintenance pass: rebuild the roster from the doc, refresh route/presence,
 /// dial any missing members, and broadcast our presence.
 async fn tick(inner: &Arc<Inner>) -> Result<()> {
+    // Refresh the coarse clock the per-packet pump reads, and trim stale conntrack
+    // flows (used by the one-way "disable remote access" block).
+    let now_coarse = now_ms();
+    inner.coarse_now.store(now_coarse, Ordering::Relaxed);
+    inner.conntrack.sweep(now_coarse);
+
     let (doc, cfg) = {
         let st = inner.state.lock().await;
         match (st.doc.clone(), st.config.clone()) {
@@ -1034,11 +1434,15 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
             let addr = inner.node.addr();
             split_local_public(addr.ip_addrs().copied()).1
         };
+        let rad = inner.remote_access_disabled.load(Ordering::Relaxed);
+        let hid = inner.hidden.load(Ordering::Relaxed);
         let p = Presence::signed(
             cfg.secret().network_id(),
             &inner.device_key,
             current_hostname(),
             my_public_ip.clone(),
+            rad || hid, // hide implies the inbound block
+            hid,
             now_ms(),
         );
         let mut buf = Vec::new();
@@ -1230,7 +1634,16 @@ async fn handle_join_incoming(inner: Arc<Inner>, conn: Connection) {
 
     let approved = rx.await.unwrap_or(false);
     let resp = if approved {
-        match admit_member(&inner, net_id, verified.peer_id, req.hostname).await {
+        match admit_member(
+            &inner,
+            net_id,
+            verified.peer_id,
+            req.hostname,
+            req.invite_kind,
+            req.invite_nonce,
+        )
+        .await
+        {
             Ok(()) => {
                 // Help the joiner sync the roster from us.
                 if let Some(doc) = inner.state.lock().await.doc.clone() {
@@ -1286,6 +1699,8 @@ async fn join_handshake(inner: &Arc<Inner>, cfg: &StoredConfig, ticket: &Ticket)
         &mut send,
         &JoinRequest {
             hostname: current_hostname(),
+            invite_kind: ticket.invite_kind,
+            invite_nonce: ticket.invite_nonce,
         },
     )
     .await?;
@@ -1307,22 +1722,46 @@ async fn join_handshake(inner: &Arc<Inner>, cfg: &StoredConfig, ticket: &Ticket)
     }
 }
 
-/// Write a signed `Add` vouching the joiner in (web-of-trust). The joiner's IP is
-/// derived from its NodeId when the roster is folded, so no IP is chosen here.
-async fn admit_member(inner: &Arc<Inner>, net_id: Id, peer: Id, hostname: String) -> Result<()> {
-    let frozen = {
+/// Write a signed `Add` vouching the joiner in. The role is set by the joiner's
+/// ticket kind; the admitter assigns the lowest free virtual IP (recorded in the
+/// entry, so it's static) and cites the ticket's invite nonce (the fold validates
+/// it against the current invite). Signed with the admitter's device key — the
+/// fold rules require the admitter to be a Controller (or originator).
+async fn admit_member(
+    inner: &Arc<Inner>,
+    net_id: Id,
+    peer: Id,
+    hostname: String,
+    invite_kind: InviteKind,
+    invite_nonce: Nonce,
+) -> Result<()> {
+    let (frozen, can_admit, virtual_ip) = {
         let st = inner.state.lock().await;
-        st.roster.frozen()
+        let cfg = st.config.as_ref().context("no network")?;
+        let can = cfg.originator_secret.is_some()
+            || st.roster.role(&inner.my_id) == Role::Controller;
+        let ip = st.roster.lowest_free_host(cfg.subnet());
+        (st.roster.frozen(), can, ip)
     };
     if frozen {
         bail!("roster is frozen");
     }
+    if !can_admit {
+        bail!("only controllers and the originator can approve joins");
+    }
+    let role = match invite_kind {
+        InviteKind::Peer => Role::Peer,
+        InviteKind::Controller => Role::Controller,
+    };
     let entry = sign(
         net_id,
         &inner.device_key,
         Op::Add {
             node_id: peer,
             hostname,
+            role,
+            virtual_ip: virtual_ip.octets(),
+            invite_nonce,
             ts: now_ms(),
         },
     );
@@ -1348,8 +1787,20 @@ async fn register_mesh(inner: &Arc<Inner>, peer: Id, conn: Connection) {
                     Ok(pkt) => {
                         let tun = inner.tun.read().unwrap().clone();
                         if let Some(tun) = tun {
-                            // Clamp inbound TCP SYNs too (bounds the other direction).
                             let mut pkt = pkt.to_vec();
+                            // One-way block: when this device disables remote access
+                            // (or is hidden), drop inbound that isn't return traffic
+                            // for a flow we initiated.
+                            let block = inner.remote_access_disabled.load(Ordering::Relaxed)
+                                || inner.hidden.load(Ordering::Relaxed);
+                            if block
+                                && !inner
+                                    .conntrack
+                                    .allows_inbound(&pkt, inner.coarse_now.load(Ordering::Relaxed))
+                            {
+                                continue;
+                            }
+                            // Clamp inbound TCP SYNs too (bounds the other direction).
                             clamp_tcp_mss(&mut pkt, TUN_MSS);
                             let _ = tun.send(&pkt).await;
                         }
@@ -1398,6 +1849,11 @@ async fn enable_tun(inner: &Arc<Inner>, ip: Ipv4Addr) {
                         Ok(n) => {
                             let pkt = &mut buf[..n];
                             let Some(dst) = dst_ipv4(pkt) else { continue };
+                            // Track this outbound flow so the one-way block lets its
+                            // return traffic back in (record before the MSS rewrite).
+                            inner2
+                                .conntrack
+                                .record_outbound(pkt, inner2.coarse_now.load(Ordering::Relaxed));
                             // Clamp TCP MSS so flows stay within the tunnel.
                             clamp_tcp_mss(pkt, TUN_MSS);
                             let peer = inner2.routes.read().unwrap().lookup(&dst);
@@ -1642,6 +2098,44 @@ fn current_hostname() -> String {
         .ok()
         .and_then(|h| h.into_string().ok())
         .unwrap_or_else(|| "ipn-device".into())
+}
+
+/// The first usable host address (`.2`) in a /24 subnet.
+fn first_host(subnet: Ipv4Addr) -> [u8; 4] {
+    let o = subnet.octets();
+    [o[0], o[1], o[2], 2]
+}
+
+/// A fresh random 16-byte invite nonce.
+fn new_nonce() -> Nonce {
+    let mut n = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut n);
+    n
+}
+
+/// Per-device, local-only switch state (never broadcast as config; the live
+/// values are also advertised in presence). Persisted next to the other state.
+#[derive(Default, Serialize, Deserialize)]
+struct DevicePrefs {
+    #[serde(default)]
+    remote_access_disabled: bool,
+    #[serde(default)]
+    hidden: bool,
+}
+
+fn load_device_prefs(data_dir: &Path) -> DevicePrefs {
+    std::fs::read(data_dir.join("device_prefs.cbor"))
+        .ok()
+        .and_then(|b| ciborium::from_reader(b.as_slice()).ok())
+        .unwrap_or_default()
+}
+
+fn save_device_prefs(data_dir: &Path, prefs: &DevicePrefs) {
+    let _ = std::fs::create_dir_all(data_dir);
+    let mut buf = Vec::new();
+    if ciborium::into_writer(prefs, &mut buf).is_ok() {
+        let _ = std::fs::write(data_dir.join("device_prefs.cbor"), buf);
+    }
 }
 
 /// This client's local nicknames for other members (NodeId hex → name).

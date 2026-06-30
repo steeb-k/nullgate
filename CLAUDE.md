@@ -25,9 +25,18 @@ Rust workspace; each crate has one job. A feature usually flows through these la
 | `ipn-gui` | **Nullgate** — the GTK4 + libadwaita app (binary `nullgate`), unprivileged IPC client. The product name in UI/docs is "Nullgate"; `ipn-gui` stays as the codebase codename. | surface the feature in the UI |
 
 Key module map in `ipn-core/src`: `engine.rs` (orchestration + public API), `roster.rs`
-(signed membership + role rules), `membership.rs` (roster over iroh-docs), `admission.rs`
-(PSK + SAS), `network.rs` (secret derivation + ticket), `node.rs` (iroh node), `router.rs` +
-`tun_device.rs` (data plane), `presence.rs` (gossip presence).
+(signed membership `ipn-roster-v2` — roles Peer/Controller, invites, static-IP assignment, role
+rules), `membership.rs` (roster over iroh-docs; `load_entries` also feeds the derived audit log),
+`admission.rs` (PSK + SAS), `network.rs` (secret derivation + ticket w/ invite nonce), `node.rs`
+(iroh node), `router.rs` + `tun_device.rs` (data plane), `conntrack.rs` (one-way "disable remote
+access" block), `presence.rs` (gossip presence + access/hidden flags).
+
+Roles: **Originator** = master-key possession (orthogonal to roster role); roster roles are
+**Peer** and **Controller**. Controllers add/remove Peers + issue Peer invites; only the
+originator issues Controller invites (always single-use), rotates, deletes, or views the key. The
+admin **activity log** is a 30-day view derived from the signed roster history (all tiers can
+view). Per-device **disable-remote-access** (one-way, conntrack-enforced) and **hide** (UI-only
+courtesy) toggles ride in presence.
 
 ## Build / run / test
 ```sh

@@ -12,6 +12,7 @@
 //! the router, roster, admission, and TUN layers land next.
 
 pub mod admission;
+pub mod conntrack;
 pub mod engine;
 pub mod geo;
 pub mod membership;
@@ -23,7 +24,7 @@ pub mod router;
 pub mod secrets;
 pub mod tun_device;
 
-pub use engine::{Engine, EngineEvent, MemberView, NetworkStatus};
+pub use engine::{AuditEntry, Engine, EngineEvent, MemberView, NetworkStatus};
 pub use network::{NetworkSecret, Ticket};
 pub use node::IrohNode;
-pub use roster::{Config, Entry, Member, Op, Roster};
+pub use roster::{Config, Entry, InviteKind, Member, Op, Role, Roster};

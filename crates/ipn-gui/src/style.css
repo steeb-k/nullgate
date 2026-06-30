@@ -16,6 +16,15 @@ headerbar {
   font-size: 1.2em;
 }
 
+/* Yellow dot for a member with remote access disabled; white dot for a hidden
+ * device (only the originator sees hidden devices). */
+.status-dot.warning {
+  color: @warning_color;
+}
+.status-dot.status-hidden {
+  color: #ffffff;
+}
+
 /* The editable network name shown at the top of the main screen. */
 .network-name {
   font-weight: bold;

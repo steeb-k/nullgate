@@ -35,17 +35,34 @@ removals/freeze/rotate. Only its public half travels in the ticket; you can back
 half and re-import it on a new device.
 
 ## Membership roster
-The roster is an append-only set of **signed entries** (`Add` / `Remove` / `Freeze`) stored in
-an [iroh-docs](https://github.com/n0-computer/iroh-docs) document — a replicated multi-writer
-store that every member syncs. Each node folds the entries into the current membership by
-applying role rules. See [security.md](security.md) for the full trust model.
+The roster is an append-only set of **signed entries** (`ipn-roster-v2`: `Add` / `Remove` /
+`SetRole` / `SetInvite` / `Freeze` / `SetName`) stored in an
+[iroh-docs](https://github.com/n0-computer/iroh-docs) document — a replicated multi-writer store
+that every member syncs. Each node folds the entries into the current membership by applying role
+rules. Each member carries a **role** (`Peer` / `Controller`); join **invites** are nonces set by
+`SetInvite` and cited by the admitting `Add` (so regenerating an invite invalidates the old code).
+See [security.md](security.md) for the full trust model.
 
-Presence (who's online, hostname, friendly label, last-seen) is broadcast separately over
-[iroh-gossip](https://github.com/n0-computer/iroh-gossip) on the private rendezvous topic, each
-heartbeat **signed** by the device. The **hostname** is the device's *actual current* OS hostname
-(re-read on every heartbeat — it tracks the real machine name and isn't user-editable); the
-**label** is an optional friendly name the member sets for itself. The public IP shown for a peer
-is the address your node actually observes for it (so a peer can't spoof its own).
+**Static virtual IPs.** A member's `10.99.0.x` address is chosen by the admitter (lowest free
+host) and **recorded in its `Add`**. The fold assigns IPs in admission order, honoring each
+member's recorded address and probing forward only on a genuine collision — so a device keeps its
+address for the life of its membership and another device joining or leaving never shifts it. (It
+only changes if the device leaves and rejoins.)
+
+**The activity log** is a 30-day, human-readable **view derived from the signed roster history**
+(each entry's signer, op, and timestamp) — no separate store, so it's tamper-evident and identical
+for every member. Visible to all tiers.
+
+Presence (who's online, hostname, last-seen, and the access-disabled / hidden flags) is broadcast
+separately over [iroh-gossip](https://github.com/n0-computer/iroh-gossip) on the private rendezvous
+topic, each heartbeat **signed** by the device. The **hostname** is the device's *actual current*
+OS hostname (re-read on every heartbeat); the public IP shown for a peer is the address your node
+actually observes for it (so a peer can't spoof its own).
+
+**One-way "disable remote access."** `conntrack.rs` tracks the flows this device initiates (on the
+outbound TUN→mesh path); when the block (or hide) is on, the inbound path admits only return
+traffic for a tracked flow. The toggle is an `AtomicBool` on the engine's `Inner` (read lock-free
+per packet, never behind the async state mutex), persisted in `device_prefs.cbor`.
 
 ## Components (crates)
 - `ipn-core` — the engine: iroh node, signed roster, admission + emoji verification, presence,

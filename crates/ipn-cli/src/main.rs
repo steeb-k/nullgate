@@ -24,14 +24,36 @@ enum Cmd {
     Create { name: String },
     /// Join a network from a ticket.
     Join { ticket: String },
-    /// Print the join ticket for the current network.
-    Ticket,
+    /// Print a join ticket. Peer-level by default; `--controller` for a single-use
+    /// Controller ticket (originator only); `--single-use` toggles Peer single-use.
+    Ticket {
+        #[arg(long)]
+        controller: bool,
+        #[arg(long)]
+        single_use: Option<bool>,
+    },
     /// Approve a pending join request (by node id).
     Approve { node_id: String },
     /// Deny a pending join request.
     Deny { node_id: String },
-    /// Remove a member (originator only).
+    /// Remove a member (originator, or a Controller removing a Peer).
     Remove { node_id: String },
+    /// Promote/demote a member (originator only).
+    Role {
+        node_id: String,
+        /// `controller` or `peer`.
+        tier: String,
+    },
+    /// Show the administration activity log.
+    Log,
+    /// Disable inbound remote access on this device (one-way block).
+    Block,
+    /// Re-enable inbound remote access on this device.
+    Unblock,
+    /// Hide this device from the member list (implies the inbound block).
+    Hide,
+    /// Stop hiding this device from the member list.
+    Unhide,
     /// Freeze or unfreeze membership (originator only).
     Freeze {
         #[arg(value_parser = clap::value_parser!(bool))]
@@ -66,10 +88,26 @@ async fn main() -> Result<()> {
         Cmd::Status => IpcRequest::GetStatus,
         Cmd::Create { name } => IpcRequest::CreateNetwork { name },
         Cmd::Join { ticket } => IpcRequest::Join { ticket },
-        Cmd::Ticket => IpcRequest::GetTicket,
+        Cmd::Ticket {
+            controller,
+            single_use,
+        } => match (single_use, controller) {
+            (Some(on), _) => IpcRequest::SetPeerTicketSingleUse { on },
+            (None, true) => IpcRequest::GetControllerTicket,
+            (None, false) => IpcRequest::GetTicket,
+        },
         Cmd::Approve { node_id } => IpcRequest::ApproveJoin { node_id },
         Cmd::Deny { node_id } => IpcRequest::DenyJoin { node_id },
         Cmd::Remove { node_id } => IpcRequest::RemoveMember { node_id },
+        Cmd::Role { node_id, tier } => IpcRequest::SetMemberRole {
+            node_id,
+            controller: matches!(tier.to_lowercase().as_str(), "controller" | "c"),
+        },
+        Cmd::Log => IpcRequest::GetAuditLog,
+        Cmd::Block => IpcRequest::SetRemoteAccessDisabled { disabled: true },
+        Cmd::Unblock => IpcRequest::SetRemoteAccessDisabled { disabled: false },
+        Cmd::Hide => IpcRequest::SetHidden { hidden: true },
+        Cmd::Unhide => IpcRequest::SetHidden { hidden: false },
         Cmd::Freeze { on } => IpcRequest::SetFrozen { frozen: on },
         Cmd::Delete => IpcRequest::DeleteNetwork,
         Cmd::Rotate => IpcRequest::RotateNetwork,
@@ -91,10 +129,10 @@ async fn main() -> Result<()> {
         IpcResponse::Status(Some(s)) => {
             println!("network: {}  subnet: {}  frozen: {}", s.name, s.subnet, s.frozen);
             println!(
-                "self: {}  ip: {}  originator: {}  routing: {}",
+                "self: {}  ip: {}  role: {}  routing: {}",
                 &s.self_node_id[..16.min(s.self_node_id.len())],
                 s.self_ip.unwrap_or_else(|| "-".into()),
-                s.is_originator,
+                s.self_role,
                 s.routing
             );
             for m in s.members {
@@ -109,11 +147,20 @@ async fn main() -> Result<()> {
                     Some(l) => format!("{l} ({host})"),
                     None => host,
                 };
+                let flag = if m.hidden {
+                    " [hidden]"
+                } else if m.access_disabled {
+                    " [access disabled]"
+                } else {
+                    ""
+                };
                 println!(
-                    "  [{}] {} {} {}{}",
+                    "  [{}] {} {} ({}){} {}{}",
                     if m.online { "online " } else { "offline" },
                     m.virtual_ip.unwrap_or_else(|| "-".into()),
                     name,
+                    m.role,
+                    flag,
                     m.observed_addr.unwrap_or_default(),
                     match m.direct {
                         Some(true) => " (direct)",
@@ -125,6 +172,15 @@ async fn main() -> Result<()> {
         }
         IpcResponse::Ticket(t) => println!("{t}"),
         IpcResponse::Recovery(code) => println!("{code}"),
+        IpcResponse::AuditLog(entries) => {
+            if entries.is_empty() {
+                println!("(no activity in the last 30 days)");
+            }
+            for e in entries {
+                let who = e.actor_name.unwrap_or(e.actor_node_id);
+                println!("  {}  {}  {}", e.ts, who, e.action);
+            }
+        }
         IpcResponse::Hello {
             version,
             app_version,

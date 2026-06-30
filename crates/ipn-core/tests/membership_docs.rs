@@ -25,9 +25,10 @@ use iroh_docs::{
 use iroh_gossip::net::Gossip;
 
 use ipn_core::membership::{build_roster, load_entries, publish_entry};
-use ipn_core::roster::{sign, Config, Op};
+use ipn_core::roster::{sign, Config, InviteKind, Op, Role};
 
 const NET: [u8; 32] = [9u8; 32];
+const INV: [u8; 16] = [7u8; 16];
 
 struct Node {
     router: Router,
@@ -94,7 +95,7 @@ async fn removed_member_cannot_forge_over_docs() -> Result<()> {
     let a_author = a_api.author_create().await?;
     let doc_a = a_api.create().await?;
 
-    // Genesis: originator master vouches its own device in.
+    // Genesis: originator master vouches its own device in as a Controller.
     publish_entry(
         &doc_a,
         a_author,
@@ -104,12 +105,31 @@ async fn removed_member_cannot_forge_over_docs() -> Result<()> {
             Op::Add {
                 node_id: id(&dev_a),
                 hostname: "originator-pc".into(),
+                role: Role::Controller,
+                virtual_ip: [10, 99, 0, 2],
+                invite_nonce: [0u8; 16],
                 ts: 1,
             },
         ),
     )
     .await?;
-    // Web-of-trust: A's device admits B's device.
+    // Seed the current Peer invite so a Controller can admit a Peer.
+    publish_entry(
+        &doc_a,
+        a_author,
+        &sign(
+            NET,
+            &om,
+            Op::SetInvite {
+                kind: InviteKind::Peer,
+                nonce: INV,
+                single_use: false,
+                ts: 1,
+            },
+        ),
+    )
+    .await?;
+    // A's device (a Controller) admits B's device as a Peer.
     publish_entry(
         &doc_a,
         a_author,
@@ -119,6 +139,9 @@ async fn removed_member_cannot_forge_over_docs() -> Result<()> {
             Op::Add {
                 node_id: id(&dev_b),
                 hostname: "b-laptop".into(),
+                role: Role::Peer,
+                virtual_ip: [10, 99, 0, 3],
+                invite_nonce: INV,
                 ts: 2,
             },
         ),
@@ -163,6 +186,9 @@ async fn removed_member_cannot_forge_over_docs() -> Result<()> {
         Op::Add {
             node_id: id(&backdoor),
             hostname: "backdoor".into(),
+            role: Role::Peer,
+            virtual_ip: [10, 99, 0, 4],
+            invite_nonce: INV,
             ts: 4,
         },
     );

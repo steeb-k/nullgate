@@ -61,6 +61,59 @@ pub fn src_ipv4(pkt: &[u8]) -> Option<Ipv4Addr> {
     Some(Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15]))
 }
 
+/// A connection 5-tuple, used by the conntrack one-way "disable remote access"
+/// block. Ports are 0 for non-TCP/UDP protocols (matched coarsely by address).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct FlowKey {
+    pub src: Ipv4Addr,
+    pub dst: Ipv4Addr,
+    pub proto: u8,
+    pub src_port: u16,
+    pub dst_port: u16,
+}
+
+impl FlowKey {
+    /// The key the matching reverse-direction flow would have (return traffic).
+    pub fn reversed(&self) -> FlowKey {
+        FlowKey {
+            src: self.dst,
+            dst: self.src,
+            proto: self.proto,
+            src_port: self.dst_port,
+            dst_port: self.src_port,
+        }
+    }
+}
+
+/// Parse an IPv4 packet's 5-tuple, or `None` if it isn't IPv4 / is too short.
+pub fn flow_key(pkt: &[u8]) -> Option<FlowKey> {
+    if pkt.len() < 20 || (pkt[0] >> 4) != 4 {
+        return None;
+    }
+    let ihl = ((pkt[0] & 0x0f) as usize) * 4;
+    if ihl < 20 || pkt.len() < ihl {
+        return None;
+    }
+    let proto = pkt[9];
+    let src = Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15]);
+    let dst = Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]);
+    // TCP (6) and UDP (17) carry ports in the first 4 bytes of their header.
+    let (src_port, dst_port) = match proto {
+        6 | 17 if pkt.len() >= ihl + 4 => (
+            u16::from_be_bytes([pkt[ihl], pkt[ihl + 1]]),
+            u16::from_be_bytes([pkt[ihl + 2], pkt[ihl + 3]]),
+        ),
+        _ => (0, 0),
+    };
+    Some(FlowKey {
+        src,
+        dst,
+        proto,
+        src_port,
+        dst_port,
+    })
+}
+
 /// TCP **MSS clamping**: if `pkt` is an IPv4 TCP SYN whose MSS option exceeds
 /// `max_mss`, lower it to `max_mss` and fix the TCP checksum. Returns whether it
 /// changed anything.
@@ -204,6 +257,9 @@ mod tests {
             Op::Add {
                 node_id: devo_id,
                 hostname: "o".into(),
+                role: crate::roster::Role::Controller,
+                virtual_ip: [10, 99, 0, 2],
+                invite_nonce: [0u8; 16],
                 ts: 1,
             },
         )];

@@ -24,6 +24,17 @@ devices find and authenticate each other directly (built on [iroh](https://www.i
 - **Use the tools you already have.** Point RDP, SSH, SMB, a browser, etc. at a peer's address.
 - **Simple, verified joining.** Create a network and share a ticket (text or QR). The two
   devices show a short **emoji code** you compare to confirm it's really them, then approve.
+- **Three levels of access.** Devices are **Peers** (use the network, view the activity log),
+  **Controllers** (also add/remove Peers and hand out Peer invites), or run by the **Originator**
+  (full control). Share a Peer or Controller ticket depending on how much you want to delegate;
+  Controller tickets are single-use.
+- **A built-in activity log.** Every administrative change — who added or removed whom, role
+  changes, renames — is recorded with the time and the person who did it, kept for 30 days, and
+  visible to everyone on the network.
+- **Per-device privacy switches.** On your own device you can **disable remote access** (you can
+  still reach others, but no one can reach you) or **hide from the member list**.
+- **Stable addresses.** Each device keeps the same `10.99.0.x` address for as long as it's a
+  member — it only changes if it leaves and rejoins.
 - **You stay in control.** Remove a device, freeze the network so no one new can join, or
   rotate its secret to reset access entirely. Removed devices drop off automatically.
 - **Stays up to date.** A small background updater keeps every device on the latest release.

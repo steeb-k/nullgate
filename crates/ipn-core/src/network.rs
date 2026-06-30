@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::net::Ipv4Addr;
 
-use crate::roster::Id;
+use crate::roster::{Id, InviteKind, Nonce};
 
 const HKDF_SALT: &[u8] = b"ipn-v1";
 const TICKET_PREFIX: &str = "ng1";
@@ -96,6 +96,17 @@ pub struct Ticket {
     /// it works before DNS discovery propagates). Other members are then reached
     /// by NodeId via iroh discovery.
     pub bootstrap: EndpointAddr,
+    /// Which tier this ticket admits the joiner at (`Peer` or `Controller`).
+    #[serde(default = "default_invite_kind")]
+    pub invite_kind: InviteKind,
+    /// The current invite nonce the admitting `Add` must cite — ties the join to
+    /// the live invite so regenerating a ticket invalidates the prior one.
+    #[serde(default)]
+    pub invite_nonce: Nonce,
+}
+
+fn default_invite_kind() -> InviteKind {
+    InviteKind::Peer
 }
 
 impl Ticket {
@@ -105,6 +116,8 @@ impl Ticket {
         secret: &NetworkSecret,
         originator_id: Id,
         bootstrap: EndpointAddr,
+        invite_kind: InviteKind,
+        invite_nonce: Nonce,
     ) -> Self {
         Self {
             name,
@@ -112,6 +125,8 @@ impl Ticket {
             secret: secret.to_bytes(),
             originator_id,
             bootstrap,
+            invite_kind,
+            invite_nonce,
         }
     }
 
@@ -220,6 +235,8 @@ mod tests {
             &secret,
             [3u8; 32],
             boot.clone(),
+            InviteKind::Peer,
+            [5u8; 16],
         );
         let encoded = t.encode();
         assert!(encoded.starts_with("ng1"));
@@ -229,6 +246,7 @@ mod tests {
         assert_eq!(back.secret().to_bytes(), secret.to_bytes());
         assert_eq!(back.originator_id, [3u8; 32]);
         assert_eq!(back.bootstrap, boot);
+        assert_eq!(back.invite_nonce, [5u8; 16]);
     }
 
     #[test]

@@ -24,16 +24,34 @@ networking background in [architecture.md](architecture.md).
    originator's device is the genesis member, bootstrapped by the master key.
 
 ## The roster and "role rules"
-Membership is a set of **signed entries** in a replicated document:
-- `Add` counts only if signed by a **current member** (or the originator).
-- `Remove` / `Freeze` count only if signed by the **originator master key**.
+Membership is a set of **signed entries** (`ipn-roster-v2`) in a replicated document. Every member
+has a **role** — `Peer` or `Controller` — baked into its `Add`. The **originator** (master-key
+holder) is a separate, higher authority and isn't a roster role. The fold rules:
+- `Add` counts only if signed by the **originator** (any role, no invite needed) **or** by a
+  current **Controller** citing the *current* invite nonce for the role being granted (and, if the
+  invite is single-use, an unconsumed nonce). Peers can't admit anyone.
+- `Remove` counts if signed by the **originator** (any target) **or** by a current **Controller**
+  whose target is a **Peer** (Controllers can't evict Controllers or the originator).
+- `SetRole` (promote/demote in place) and `Freeze` are **originator-only**.
+- `SetInvite` sets the current join nonce for a tier. A **Peer** invite may be set by the
+  originator or any Controller; a **Controller** invite is **originator-only and always
+  single-use**. Latest-by-(ts, id) wins, so regenerating an invite (or toggling Peer single-use)
+  mints a new code that invalidates the prior one **for new joins** — without rotating the secret,
+  so no current member loses access. A Peer ticket reads the current nonce (stable to re-show); a
+  Controller ticket mints a fresh single-use nonce each time.
 
 Why it's done this way: the document's write capability is the network secret, which **every
 member holds and which can't be un-shared** — you can't claw a secret back. So security doesn't
 come from gatekeeping *who can write*; it comes from gatekeeping *which writes count*. A removed
-device can still scribble entries into the shared document, but its signature is no longer that
-of a current member, so every node — including its own — ignores them. (The
-`removed_member_cannot_forge` test proves this even over real replication.)
+device (or a Peer) can still scribble entries into the shared document, but the fold rejects them,
+so every node — including its own — ignores them. (The `removed_member_cannot_forge` test proves
+this even over real replication.)
+
+Residual to note: a single-use **Controller** invite nonce rides in the ticket, so a *malicious
+current Controller* who sees it could race to consume it for a colluding device before the
+intended joiner's `Add` folds. The blast radius is one Controller per originator-issued invite
+(single-use), and it requires an already-trusted-Controller attacker. Binding the invite to a
+pre-shared joiner NodeId would close it and is deferred.
 
 ## Secrets at rest
 The device key, the network secret, and the originator master key are stored in the OS keystore
@@ -70,8 +88,24 @@ closing that needs causal ordering (a hash-linked DAG / version vectors) and is 
 backstop is that the attacker is already a trusted member and the originator can remove the
 device or rotate the secret.
 
+## Per-device access controls (one-way block, hide)
+A Controller/Originator device can refuse inbound access while still reaching others, and can hide
+itself from the member list. Both are advertised in the signed presence heartbeat (so other
+clients render them) and persisted locally in `device_prefs.cbor`.
+- **Disable remote access** is a *real, enforced* one-way block, done in this device's data plane:
+  a small connection tracker records the flows this device initiates (on the outbound TUN→mesh
+  path), and inbound packets are admitted only if they're return traffic for one of those flows.
+  So outbound (you → others) keeps working; unsolicited inbound (others → you) is dropped. Hiding
+  implies the block.
+- **Hide from member list** is a **presentation courtesy, not a security boundary.** The roster is
+  a shared signed log, so a hidden device's entry is still present; standard clients filter it out
+  for Peers and Controllers (originators still see it, with a white dot), but a modified client
+  could read it. The *access* block is what actually prevents reaching a hidden device — even by an
+  originator (who can see it but not connect).
+
 ## Taking access away
-- **Remove a member** — the originator signs a `Remove`. It propagates to connected peers; each
+- **Remove a member** — the originator (or a Controller, for a Peer) signs a `Remove`. It
+  propagates to connected peers; each
   node rebuilds the roster, drops the device from routing, and tears down any live connection to
   it (so no "ghost" connection survives). A device that finds itself removed **self-evicts**:
   it drops its connections and clears the now-dead network.

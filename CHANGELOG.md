@@ -4,6 +4,43 @@ All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepa
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+### Added
+- **Privilege tiers — Originator, Controller, Peer.** Membership now carries a role. **Peers**
+  use the network and view the activity log, but can't approve devices or view join tickets.
+  **Controllers** behave like the old members: they add/remove Peers and issue Peer-level
+  tickets, but can't view the originator key, rotate the secret, or delete the network.
+  **Originators** (master-key holders) keep full authority and additionally issue Controller
+  tickets and promote/demote members. Any tier can still import the originator key to *become* an
+  originator. New roster ops `SetRole`/`SetInvite`; CLI `nullgate-cli role <node-id> <peer|controller>`.
+- **Tiered, invalidatable join tickets.** "Peer management" (formerly "Show join ticket") shows
+  "Show join ticket (Peer level)" to Controllers and additionally "Show join ticket (Controller
+  level)" to Originators, each with a hover tooltip explaining the tier. **Controller tickets are
+  always single-use** (consumed once in the shared roster). **Peer tickets** have an Administration
+  toggle for single-use (default off); flipping it — or issuing a Controller ticket — mints a fresh
+  code that **invalidates the previous one for new joins, without disconnecting anyone**.
+- **Built-in administration activity log.** A new "Activity log" view (visible to every member)
+  lists the last 30 days of administrative actions — adds, removals, role changes, invite
+  regenerations, freezes, renames — each with the time, the actor, and what they did. It's derived
+  from the signed roster history, so it's tamper-evident and identical for everyone. CLI
+  `nullgate-cli log`.
+- **Per-device access switches (Controllers/Originators).** On your own device page:
+  **"Disable remote access"** — a one-way block (stateful connection tracking) so you can still
+  reach other members but no one can initiate to you; your row turns its dot yellow, shows "Access
+  disabled", and drops below other online devices. **"Hide this device from member list"** —
+  implies the block and removes you from the list for Peers and Controllers (Originators still see
+  you, with a white dot and "Hidden", and still can't reach you). Hiding is a presentation courtesy
+  (the roster is a shared signed log), not a security boundary — the access block is the real
+  enforcement.
+- **Static virtual IPs.** A device keeps its `10.99.0.x` address for the life of its membership;
+  it only changes if the device leaves and rejoins. The admitter records the address in the signed
+  `Add` and the fold honors it, so another device joining or leaving never shifts yours.
+
+### Changed
+- **Roster format bumped to v2 (`ipn-roster-v2`).** Roles, invites, and static IPs are baked into
+  the signed entries, so this is a clean break: **existing networks must be recreated** (re-create
+  on the originator and re-invite devices). Presence heartbeats also carry the new access/hidden
+  flags — upgrade all devices together.
+
 ### Fixed
 - **Windows desktop notifications work again.** They were silently dropped (a workaround for a
   stray second tray icon). Nullgate now shows **native Action Center toasts** on Windows — the

@@ -5,19 +5,30 @@
 //! (iroh-docs) where the write capability *cannot be un-shared* — so a removed
 //! member physically retains the ability to append entries. Security therefore
 //! does **not** come from controlling who can write; it comes from these
-//! application-layer role rules, enforced every time the roster is rebuilt:
+//! application-layer role rules, enforced every time the roster is rebuilt.
 //!
-//!   * **`Add`** — a member may vouch for a joiner (web-of-trust). Valid iff the
-//!     signer is a *current member* (or the originator) **and** the roster is not
-//!     frozen at that point in time.
-//!   * **`Remove`** — valid iff signed by the **originator master key**.
-//!   * **`Freeze`** — valid iff signed by the **originator master key**.
+//! ## Roles (v2)
+//! Every member has a [`Role`] — **Peer** (no admin powers) or **Controller**
+//! (may admit/evict Peers). The **originator** is orthogonal: it's whoever holds
+//! the exportable master key, and it has full authority regardless of roster
+//! role. The fold rules below:
 //!
-//! Consequences that the tests below pin down:
-//!   * A non-member cannot inject members.
-//!   * A *removed* member's later `Add`s are rejected (they're no longer a
-//!     current member), and they can never sign `Remove`/`Freeze`.
-//!   * Freezing the roster blocks all further adds until it is unfrozen.
+//!   * **`Add`** — admits a member at a stated `role`. Valid iff the signer is the
+//!     originator (any role, no invite needed) **or** a current **Controller**
+//!     citing the *current* invite nonce for that role's kind (and, if the invite
+//!     is single-use, an unconsumed nonce). Blocked while frozen.
+//!   * **`Remove`** — valid iff signed by the originator (any target) **or** by a
+//!     current Controller whose target is a **Peer**.
+//!   * **`SetRole`** — promote/demote in place. **Originator-only.**
+//!   * **`SetInvite`** — sets the current join nonce for a kind. A **Peer** invite
+//!     may be set by the originator or any Controller; a **Controller** invite is
+//!     **originator-only** and always single-use. Latest by `(ts, id)` wins, so
+//!     regenerating an invite invalidates the prior code for *new* joins.
+//!   * **`Freeze`** — originator-only.
+//!
+//! Consequences the tests pin down: a non-member (or a Peer) cannot inject
+//! members; a removed member's later ops are rejected; a single-use invite admits
+//! exactly once; regenerating an invite invalidates the old one.
 //!
 //! The hard mass-cutoff ("block everyone who ever had access") is **rotate** —
 //! minting a fresh network secret + originator key + docs namespace — handled a
@@ -28,7 +39,7 @@
 //! for that member's signatures. The originator master key is a *separate*,
 //! exportable ed25519 keypair (so super-admin authority survives device loss).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -38,46 +49,86 @@ use serde::{Deserialize, Serialize};
 /// An ed25519 public key: a device's NodeId, or the originator master key.
 pub type Id = [u8; 32];
 
-const DOMAIN: &str = "ipn-roster-v1";
+/// A join-invite nonce (carried in the ticket, cited by the admitting `Add`).
+pub type Nonce = [u8; 16];
+
+const DOMAIN: &str = "ipn-roster-v2";
 
 /// Entries timestamped more than this far in the future are dropped. Timestamps
 /// are member-chosen, so they're only a *hint* for ordering, not a trust anchor.
-///
-/// Residual (documented, not fully fixed here): a current member could still
-/// backdate an `Add` into a past *unfrozen* window to slip a device past a freeze.
-/// Fully preventing that needs causal ordering (a hash-linked DAG / version
-/// vectors) — deferred. The backstop is that such an attacker is already a trusted
-/// member, and the originator can remove the device or rotate the secret.
 const MAX_FUTURE_SKEW_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// A member's privilege tier within the roster. The **originator** (master-key
+/// holder) is a separate, higher authority and is not represented here.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Role {
+    /// No administrative powers (beyond viewing the activity log). The default.
+    #[default]
+    Peer,
+    /// May admit and evict Peers, and generate Peer-level invites.
+    Controller,
+}
+
+impl Role {
+    /// Lower-case wire/display name (`"peer"` / `"controller"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Peer => "peer",
+            Role::Controller => "controller",
+        }
+    }
+}
+
+/// Which kind of join a [`Op::SetInvite`] / ticket authorizes.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InviteKind {
+    Peer,
+    Controller,
+}
 
 /// A membership operation. Every variant carries a logical timestamp (`ts`,
 /// milliseconds since the Unix epoch) used only to order a concurrent set of
 /// entries deterministically; exact wall-clock accuracy is not required.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub enum Op {
-    /// Admit `node_id` as a member (after out-of-band SAS verification). The
-    /// member's virtual IP is NOT chosen here — it's derived deterministically
-    /// from the NodeId during [`Roster::build`], so concurrent approvals by
-    /// different members can never assign the same address (see `assign_ips`).
+    /// Admit `node_id` as a member at `role`. `virtual_ip` is the IP the admitter
+    /// picked (lowest free at approval time) — honored during the fold so a
+    /// device's address is **static** for the life of its membership. `invite_nonce`
+    /// ties the admission to a current invite (ignored for originator-signed adds).
     Add {
         node_id: Id,
         hostname: String,
+        role: Role,
+        virtual_ip: [u8; 4],
+        invite_nonce: Nonce,
         ts: u64,
     },
-    /// Revoke a single member. Originator-only.
+    /// Revoke a single member. Originator (any target) or a Controller (Peer target).
     Remove { node_id: Id, ts: u64 },
+    /// Promote/demote a current member in place. Originator-only.
+    SetRole { node_id: Id, role: Role, ts: u64 },
+    /// Set the current join invite for `kind`. Latest by `(ts, id)` is authoritative.
+    SetInvite {
+        kind: InviteKind,
+        nonce: Nonce,
+        single_use: bool,
+        ts: u64,
+    },
     /// Freeze (or unfreeze) the membership roll. Originator-only.
     Freeze { frozen: bool, ts: u64 },
-    /// Set the network's display name. Any current member may set it;
+    /// Set the network's display name. Originator or any current Controller;
     /// last-writer-wins (it's a cosmetic, shared label).
     SetName { name: String, ts: u64 },
 }
 
 impl Op {
-    fn ts(&self) -> u64 {
+    /// The logical timestamp carried by this op.
+    pub fn ts(&self) -> u64 {
         match self {
             Op::Add { ts, .. }
             | Op::Remove { ts, .. }
+            | Op::SetRole { ts, .. }
+            | Op::SetInvite { ts, .. }
             | Op::Freeze { ts, .. }
             | Op::SetName { ts, .. } => *ts,
         }
@@ -141,8 +192,8 @@ fn signing_bytes(network_id: &Id, signer: &Id, op: &Op) -> Vec<u8> {
 }
 
 /// Sign an op, producing a transmittable [`Entry`]. `signing_key` is the
-/// member's device key (for `Add`) or the originator master key (for
-/// `Remove`/`Freeze`).
+/// member's device key (for `Add`/`SetInvite`) or the originator master key (for
+/// `Remove`/`Freeze`/`SetRole`/originator-direct ops).
 pub fn sign(network_id: Id, signing_key: &SigningKey, op: Op) -> Entry {
     let signer = signing_key.verifying_key().to_bytes();
     let sig = signing_key.sign(&signing_bytes(&network_id, &signer, &op));
@@ -159,11 +210,10 @@ pub fn sign(network_id: Id, signing_key: &SigningKey, op: Op) -> Entry {
 pub struct Config {
     /// Stable identifier for this network (domain separation across networks).
     pub network_id: Id,
-    /// The originator master public key — the sole authority for removals/freeze
-    /// and the bootstrap signer of the first member.
+    /// The originator master public key — the top authority and the bootstrap
+    /// signer of the first member.
     pub originator_id: Id,
-    /// The virtual subnet (a /24, e.g. `10.99.0.0`). Member IPs are assigned
-    /// deterministically within it during [`Roster::build`].
+    /// The virtual subnet (a /24, e.g. `10.99.0.0`). Member IPs live within it.
     pub subnet: Ipv4Addr,
 }
 
@@ -171,6 +221,7 @@ pub struct Config {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Member {
     pub hostname: String,
+    pub role: Role,
     pub virtual_ip: Ipv4Addr,
     /// Which key vouched this member in (a current member, or the originator).
     pub added_by: Id,
@@ -183,6 +234,10 @@ pub struct Roster {
     frozen: bool,
     /// Shared display name (latest authorized `SetName`), if any.
     name: Option<String>,
+    /// Current Peer / Controller invite (latest authorized `SetInvite` per kind):
+    /// `(nonce, single_use)`.
+    peer_invite: Option<(Nonce, bool)>,
+    controller_invite: Option<(Nonce, bool)>,
 }
 
 impl Roster {
@@ -192,8 +247,7 @@ impl Roster {
     /// outcome, only waste space.
     pub fn build(cfg: &Config, entries: &[Entry]) -> Roster {
         // 1. Keep only authentic entries for this network. Dedup by content id.
-        //    Drop entries timestamped implausibly far in the future (anti
-        //    forward-dating; bounds the ordering games a member can play).
+        //    Drop entries timestamped implausibly far in the future.
         let ceiling = now_ms().saturating_add(MAX_FUTURE_SKEW_MS);
         let mut valid: BTreeMap<[u8; 32], &Entry> = BTreeMap::new();
         for e in entries {
@@ -207,65 +261,126 @@ impl Roster {
         ordered.sort_by(|a, b| a.op.ts().cmp(&b.op.ts()).then_with(|| a.id().cmp(&b.id())));
 
         // 3. Fold, applying authorization at each step against the state so far.
-        //    `admitted_ts` records when each member was admitted, so a member can't
-        //    sign an Add backdated to *before it joined* (a cheap ordering defense;
-        //    see the note on `MAX_FUTURE_SKEW_MS` for the residual).
         let mut roster = Roster::default();
         let mut admitted_ts: BTreeMap<Id, u64> = BTreeMap::new();
+        // Invite nonces already spent by an accepted single-use admission.
+        let mut consumed: BTreeSet<Nonce> = BTreeSet::new();
+        let orig = cfg.originator_id;
+
         for e in ordered {
             let ts = e.op.ts();
+            let is_orig = e.signer == orig;
+            // A signer's current tier (None if not a current member).
+            let signer_role = roster.members.get(&e.signer).map(|m| m.role);
+            let is_controller = signer_role == Some(Role::Controller);
+
             match &e.op {
                 Op::Freeze { frozen, .. } => {
-                    if e.signer == cfg.originator_id {
+                    if is_orig {
                         roster.frozen = *frozen;
                     }
                 }
                 Op::Remove { node_id, .. } => {
-                    if e.signer == cfg.originator_id {
+                    let target_role = roster.members.get(node_id).map(|m| m.role);
+                    let authorized = is_orig
+                        || (is_controller && target_role == Some(Role::Peer));
+                    if authorized {
                         roster.members.remove(node_id);
                         admitted_ts.remove(node_id);
                     }
                 }
+                Op::SetRole { node_id, role, .. } => {
+                    // In-place promote/demote: originator-only, member must exist.
+                    if is_orig {
+                        if let Some(m) = roster.members.get_mut(node_id) {
+                            m.role = *role;
+                        }
+                    }
+                }
+                Op::SetInvite {
+                    kind,
+                    nonce,
+                    single_use,
+                    ..
+                } => match kind {
+                    InviteKind::Peer => {
+                        if is_orig || is_controller {
+                            roster.peer_invite = Some((*nonce, *single_use));
+                        }
+                    }
+                    InviteKind::Controller => {
+                        // Controller invites are originator-only and single-use.
+                        if is_orig {
+                            roster.controller_invite = Some((*nonce, true));
+                        }
+                    }
+                },
                 Op::SetName { name, .. } => {
-                    // Any current member (or the originator) may rename; entries are
-                    // processed in (ts, id) order, so the last authorized one wins.
-                    if e.signer == cfg.originator_id || roster.members.contains_key(&e.signer) {
+                    if is_orig || is_controller {
                         roster.name = Some(name.clone());
                     }
                 }
                 Op::Add {
-                    node_id, hostname, ..
+                    node_id,
+                    hostname,
+                    role,
+                    virtual_ip,
+                    invite_nonce,
+                    ..
                 } => {
-                    // No adds while frozen — including by the originator; the
-                    // switch must be flipped back first.
                     if roster.frozen {
+                        continue; // no adds while frozen, even by the originator
+                    }
+                    // (a) Approver authorization.
+                    let approver_ok = is_orig
+                        || (is_controller
+                            && admitted_ts.get(&e.signer).is_some_and(|t| ts >= *t));
+                    if !approver_ok {
                         continue;
                     }
-                    // The originator may always vouch; a member may vouch only while
-                    // it's a current member and not with a timestamp earlier than its
-                    // own admission.
-                    let authorized = e.signer == cfg.originator_id
-                        || (roster.members.contains_key(&e.signer)
-                            && admitted_ts.get(&e.signer).is_some_and(|t| ts >= *t));
-                    if authorized {
-                        roster.members.insert(
-                            *node_id,
-                            Member {
-                                hostname: hostname.clone(),
-                                virtual_ip: Ipv4Addr::UNSPECIFIED, // assigned below
-                                added_by: e.signer,
-                            },
-                        );
-                        admitted_ts.insert(*node_id, ts);
+                    // (b) Invite gate. The originator may add directly (no nonce);
+                    //     a Controller must cite the *current*, matching-kind,
+                    //     not-yet-consumed invite for the role being granted.
+                    let mut consume: Option<Nonce> = None;
+                    if !is_orig {
+                        let current = match role {
+                            Role::Peer => roster.peer_invite,
+                            Role::Controller => roster.controller_invite,
+                        };
+                        let Some((cur_nonce, single_use)) = current else {
+                            continue; // no current invite for this kind
+                        };
+                        if *invite_nonce != cur_nonce {
+                            continue; // stale / wrong code → rejected
+                        }
+                        if single_use {
+                            if consumed.contains(&cur_nonce) {
+                                continue; // already spent
+                            }
+                            consume = Some(cur_nonce);
+                        }
                     }
+                    if let Some(n) = consume {
+                        consumed.insert(n);
+                    }
+                    roster.members.insert(
+                        *node_id,
+                        Member {
+                            hostname: hostname.clone(),
+                            role: *role,
+                            virtual_ip: Ipv4Addr::from(*virtual_ip), // resolved below
+                            added_by: e.signer,
+                        },
+                    );
+                    admitted_ts.insert(*node_id, ts);
                 }
             }
         }
-        // Assign each member a stable, collision-free virtual IP derived from its
-        // NodeId. This is a pure function of the member SET, so every node computes
-        // the identical mapping and no two members ever share an address — which is
-        // what eliminates the concurrent-approval IP race.
-        assign_ips(&mut roster.members, cfg.subnet);
+
+        // Resolve final virtual IPs: honor each member's recorded address, probing
+        // forward only on a genuine collision. Processed in admission order so a
+        // later join never displaces an earlier member's IP.
+        assign_ips(&mut roster.members, &admitted_ts, cfg.subnet);
         roster
     }
 
@@ -280,6 +395,11 @@ impl Roster {
 
     pub fn member(&self, id: &Id) -> Option<&Member> {
         self.members.get(id)
+    }
+
+    /// A member's role, or `Peer` if not a member.
+    pub fn role(&self, id: &Id) -> Role {
+        self.members.get(id).map(|m| m.role).unwrap_or(Role::Peer)
     }
 
     pub fn members(&self) -> impl Iterator<Item = (&Id, &Member)> {
@@ -297,30 +417,61 @@ impl Roster {
     pub fn frozen(&self) -> bool {
         self.frozen
     }
+
+    /// The current invite `(nonce, single_use)` for `kind`, if one is set.
+    pub fn current_invite(&self, kind: InviteKind) -> Option<(Nonce, bool)> {
+        match kind {
+            InviteKind::Peer => self.peer_invite,
+            InviteKind::Controller => self.controller_invite,
+        }
+    }
+
+    /// The lowest free host address in `subnet` (2..=254), or `.254` if the /24 is
+    /// somehow full. Used by an admitter to pick a static IP for a new member.
+    pub fn lowest_free_host(&self, subnet: Ipv4Addr) -> Ipv4Addr {
+        let base = subnet.octets();
+        let taken: BTreeSet<u8> = self
+            .members
+            .values()
+            .map(|m| m.virtual_ip.octets()[3])
+            .collect();
+        let host = (2u8..=254).find(|h| !taken.contains(h)).unwrap_or(254);
+        Ipv4Addr::new(base[0], base[1], base[2], host)
+    }
 }
 
-/// Deterministically assign each member a virtual IP in `subnet` (a /24), keyed
-/// by NodeId so the result is identical on every node and independent of who
-/// approved whom — there is no IP to race over.
-///
-/// Each member's preferred host is `2 + blake3(node_id) mod 253` (hosts 2..=254,
-/// reserving .0/.1/.255). Members are processed in NodeId order; on the rare hash
-/// collision the later (larger) NodeId probes forward to the next free host. So a
-/// device's IP is effectively permanent and only ever moves on an actual collision.
-fn assign_ips(members: &mut BTreeMap<Id, Member>, subnet: Ipv4Addr) {
+/// Resolve each member's final virtual IP, honoring the address recorded in its
+/// `Add` (so IPs are stable). Members are processed in admission order
+/// (`admitted_ts`, then NodeId); each takes its recorded host if it's a valid,
+/// free host, otherwise it probes forward to the next free one. Because every
+/// surviving member is assigned from its *own* record, removing another member
+/// never shifts it.
+fn assign_ips(members: &mut BTreeMap<Id, Member>, admitted_ts: &BTreeMap<Id, u64>, subnet: Ipv4Addr) {
     let base = subnet.octets();
-    let mut taken: std::collections::BTreeSet<u8> = std::collections::BTreeSet::new();
-    // BTreeMap iterates in NodeId order → deterministic probe outcomes.
-    for (id, member) in members.iter_mut() {
-        let h = u32::from_be_bytes([id[0], id[1], id[2], id[3]]);
-        let mut host = (2 + (h % 253)) as u8; // 2..=254
+    let mut order: Vec<(u64, Id, u8)> = members
+        .iter()
+        .map(|(id, m)| {
+            (
+                admitted_ts.get(id).copied().unwrap_or(0),
+                *id,
+                m.virtual_ip.octets()[3],
+            )
+        })
+        .collect();
+    order.sort_by_key(|(ts, id, _)| (*ts, *id));
+
+    let mut taken: BTreeSet<u8> = BTreeSet::new();
+    for (_, id, recorded) in order {
+        let mut host = if (2..=254).contains(&recorded) { recorded } else { 2 };
         let mut tries = 0;
         while taken.contains(&host) && tries < 253 {
             host = if host >= 254 { 2 } else { host + 1 };
             tries += 1;
         }
         taken.insert(host);
-        member.virtual_ip = Ipv4Addr::new(base[0], base[1], base[2], host);
+        if let Some(m) = members.get_mut(&id) {
+            m.virtual_ip = Ipv4Addr::new(base[0], base[1], base[2], host);
+        }
     }
 }
 
@@ -342,164 +493,247 @@ mod tests {
     fn id(k: &SigningKey) -> Id {
         k.verifying_key().to_bytes()
     }
+    const SUBNET: Ipv4Addr = Ipv4Addr::new(10, 99, 0, 0);
+    const NET: Id = [9u8; 32];
+
+    /// A Peer-kind invite nonce derived from a byte (for tests).
+    fn nonce(b: u8) -> Nonce {
+        [b; 16]
+    }
+
+    fn add(
+        net: Id,
+        signer: &SigningKey,
+        node: &SigningKey,
+        host: u8,
+        role: Role,
+        inv: Nonce,
+        ts: u64,
+    ) -> Entry {
+        sign(
+            net,
+            signer,
+            Op::Add {
+                node_id: id(node),
+                hostname: "host".into(),
+                role,
+                virtual_ip: [10, 99, 0, host],
+                invite_nonce: inv,
+                ts,
+            },
+        )
+    }
 
     /// Standard setup: originator master key `om`, originator device `devo`
-    /// (bootstrapped by the master key as the genesis member).
+    /// (bootstrapped by the master key as the genesis Controller member), plus a
+    /// current Peer invite so Controllers can admit Peers.
     fn setup() -> (Config, SigningKey, SigningKey, Vec<Entry>) {
         let om = key(1); // originator master (exportable authority)
-        let devo = key(2); // originator's device (a normal member)
-        let net = [9u8; 32];
+        let devo = key(2); // originator's device (a Controller member)
         let cfg = Config {
-            network_id: net,
+            network_id: NET,
             originator_id: id(&om),
-            subnet: Ipv4Addr::new(10, 99, 0, 0),
+            subnet: SUBNET,
         };
-        let genesis = sign(
-            net,
+        let genesis = add(NET, &om, &devo, 2, Role::Controller, nonce(0), 1);
+        let peer_inv = sign(
+            NET,
             &om,
-            Op::Add {
-                node_id: id(&devo),
-                hostname: "originator-pc".into(),                ts: 1,
+            Op::SetInvite {
+                kind: InviteKind::Peer,
+                nonce: nonce(7),
+                single_use: false,
+                ts: 1,
             },
         );
-        (cfg, om, devo, vec![genesis])
+        (cfg, om, devo, vec![genesis, peer_inv])
     }
 
     #[test]
-    fn genesis_member_is_admitted() {
+    fn genesis_member_is_controller() {
         let (cfg, _om, devo, entries) = setup();
         let r = Roster::build(&cfg, &entries);
         assert!(r.is_member(&id(&devo)));
-        assert_eq!(r.len(), 1);
-        assert_eq!(r.member(&id(&devo)).unwrap().hostname, "originator-pc");
+        assert_eq!(r.role(&id(&devo)), Role::Controller);
+        assert_eq!(r.member(&id(&devo)).unwrap().virtual_ip, Ipv4Addr::new(10, 99, 0, 2));
     }
 
     #[test]
-    fn web_of_trust_member_can_admit_member() {
+    fn controller_admits_peer_with_current_invite() {
         let (cfg, _om, devo, mut entries) = setup();
         let laptop = key(3);
-        // The originator's device (a member) vouches for the laptop.
-        entries.push(sign(
-            cfg.network_id,
-            &devo,
-            Op::Add {
-                node_id: id(&laptop),
-                hostname: "laptop".into(),                ts: 2,
-            },
-        ));
+        entries.push(add(NET, &devo, &laptop, 3, Role::Peer, nonce(7), 2));
         let r = Roster::build(&cfg, &entries);
         assert!(r.is_member(&id(&laptop)));
-        assert_eq!(r.member(&id(&laptop)).unwrap().added_by, id(&devo));
+        assert_eq!(r.role(&id(&laptop)), Role::Peer);
+    }
+
+    #[test]
+    fn add_with_stale_invite_is_rejected() {
+        let (cfg, _om, devo, mut entries) = setup();
+        let laptop = key(3);
+        // Cite a nonce that isn't the current Peer invite (7).
+        entries.push(add(NET, &devo, &laptop, 3, Role::Peer, nonce(99), 2));
+        let r = Roster::build(&cfg, &entries);
+        assert!(!r.is_member(&id(&laptop)), "stale invite must not admit");
+    }
+
+    #[test]
+    fn regenerating_peer_invite_invalidates_old() {
+        let (cfg, om, devo, mut entries) = setup();
+        // Originator regenerates the Peer invite (new nonce supersedes #7).
+        entries.push(sign(
+            NET,
+            &om,
+            Op::SetInvite {
+                kind: InviteKind::Peer,
+                nonce: nonce(8),
+                single_use: false,
+                ts: 5,
+            },
+        ));
+        let stale = key(3);
+        let fresh = key(4);
+        // A join citing the OLD nonce after the regeneration is rejected...
+        entries.push(add(NET, &devo, &stale, 3, Role::Peer, nonce(7), 6));
+        // ...one citing the new nonce is accepted.
+        entries.push(add(NET, &devo, &fresh, 4, Role::Peer, nonce(8), 7));
+        let r = Roster::build(&cfg, &entries);
+        assert!(!r.is_member(&id(&stale)), "old code invalidated");
+        assert!(r.is_member(&id(&fresh)), "new code works");
+    }
+
+    #[test]
+    fn peer_cannot_admit() {
+        let (cfg, _om, devo, mut entries) = setup();
+        // devo (Controller) admits a Peer `p`.
+        let p = key(3);
+        entries.push(add(NET, &devo, &p, 3, Role::Peer, nonce(7), 2));
+        // The Peer `p` then tries to admit `victim` citing the current invite.
+        let victim = key(4);
+        entries.push(add(NET, &p, &victim, 4, Role::Peer, nonce(7), 3));
+        let r = Roster::build(&cfg, &entries);
+        assert!(r.is_member(&id(&p)));
+        assert!(!r.is_member(&id(&victim)), "a Peer must not be able to admit");
     }
 
     #[test]
     fn non_member_cannot_admit() {
         let (cfg, _om, _devo, mut entries) = setup();
-        let stranger = key(50); // not a member, not the originator
+        let stranger = key(50);
         let victim = key(51);
-        entries.push(sign(
-            cfg.network_id,
-            &stranger,
-            Op::Add {
-                node_id: id(&victim),
-                hostname: "evil".into(),                ts: 2,
-            },
-        ));
+        entries.push(add(NET, &stranger, &victim, 5, Role::Peer, nonce(7), 2));
         let r = Roster::build(&cfg, &entries);
         assert!(!r.is_member(&id(&victim)));
         assert!(!r.is_member(&id(&stranger)));
     }
 
     #[test]
-    fn only_originator_removes() {
+    fn controller_removes_peer_but_not_controller() {
         let (cfg, om, devo, mut entries) = setup();
-        let laptop = key(3);
-        entries.push(sign(
-            cfg.network_id,
-            &devo,
-            Op::Add {
-                node_id: id(&laptop),
-                hostname: "laptop".into(),                ts: 2,
-            },
-        ));
-        // A non-originator member tries to remove the laptop -> ignored.
-        entries.push(sign(
-            cfg.network_id,
-            &devo,
-            Op::Remove {
-                node_id: id(&laptop),
-                ts: 3,
-            },
-        ));
-        assert!(Roster::build(&cfg, &entries).is_member(&id(&laptop)));
+        // Promote a second device `c2` to Controller (originator SetRole), and add
+        // a Peer `p`.
+        let c2 = key(3);
+        let p = key(4);
+        entries.push(add(NET, &devo, &c2, 3, Role::Peer, nonce(7), 2));
+        entries.push(sign(NET, &om, Op::SetRole { node_id: id(&c2), role: Role::Controller, ts: 3 }));
+        entries.push(add(NET, &devo, &p, 4, Role::Peer, nonce(7), 4));
 
-        // The originator master key removes it -> gone.
+        // c2 (Controller) removes the Peer -> gone.
+        let mut e1 = entries.clone();
+        e1.push(sign(NET, &c2, Op::Remove { node_id: id(&p), ts: 5 }));
+        assert!(!Roster::build(&cfg, &e1).is_member(&id(&p)), "Controller evicts Peer");
+
+        // c2 (Controller) tries to remove devo (a Controller) -> ignored.
+        let mut e2 = entries.clone();
+        e2.push(sign(NET, &c2, Op::Remove { node_id: id(&devo), ts: 5 }));
+        assert!(Roster::build(&cfg, &e2).is_member(&id(&devo)), "Controller can't evict Controller");
+    }
+
+    #[test]
+    fn only_originator_removes_controller() {
+        let (cfg, om, devo, mut entries) = setup();
+        let c2 = key(3);
+        entries.push(add(NET, &devo, &c2, 3, Role::Peer, nonce(7), 2));
+        entries.push(sign(NET, &om, Op::SetRole { node_id: id(&c2), role: Role::Controller, ts: 3 }));
+        // Originator removes the Controller -> gone.
+        entries.push(sign(NET, &om, Op::Remove { node_id: id(&c2), ts: 4 }));
+        assert!(!Roster::build(&cfg, &entries).is_member(&id(&c2)));
+    }
+
+    #[test]
+    fn controller_invite_is_originator_only_and_single_use() {
+        let (cfg, om, devo, mut entries) = setup();
+        // A Controller (devo) trying to set a Controller invite is ignored.
         entries.push(sign(
-            cfg.network_id,
-            &om,
-            Op::Remove {
-                node_id: id(&laptop),
-                ts: 4,
-            },
+            NET,
+            &devo,
+            Op::SetInvite { kind: InviteKind::Controller, nonce: nonce(20), single_use: false, ts: 2 },
         ));
-        assert!(!Roster::build(&cfg, &entries).is_member(&id(&laptop)));
+        let a = key(3);
+        entries.push(add(NET, &devo, &a, 3, Role::Controller, nonce(20), 3));
+        assert!(
+            !Roster::build(&cfg, &entries).is_member(&id(&a)),
+            "Controller-set Controller invite must not work"
+        );
+
+        // Originator issues a Controller invite; it admits exactly one Controller.
+        entries.push(sign(
+            NET,
+            &om,
+            Op::SetInvite { kind: InviteKind::Controller, nonce: nonce(21), single_use: false, ts: 4 },
+        ));
+        let first = key(5);
+        let second = key(6);
+        entries.push(add(NET, &devo, &first, 5, Role::Controller, nonce(21), 5));
+        entries.push(add(NET, &devo, &second, 6, Role::Controller, nonce(21), 6));
+        let r = Roster::build(&cfg, &entries);
+        assert_eq!(r.role(&id(&first)), Role::Controller, "first Controller admitted");
+        assert!(!r.is_member(&id(&second)), "Controller invite is single-use");
+    }
+
+    #[test]
+    fn single_use_peer_invite_consumed_once() {
+        let (cfg, om, devo, mut entries) = setup();
+        entries.push(sign(
+            NET,
+            &om,
+            Op::SetInvite { kind: InviteKind::Peer, nonce: nonce(30), single_use: true, ts: 4 },
+        ));
+        let a = key(3);
+        let b = key(4);
+        entries.push(add(NET, &devo, &a, 3, Role::Peer, nonce(30), 5));
+        entries.push(add(NET, &devo, &b, 4, Role::Peer, nonce(30), 6));
+        let r = Roster::build(&cfg, &entries);
+        assert!(r.is_member(&id(&a)), "first single-use join admitted");
+        assert!(!r.is_member(&id(&b)), "second single-use join rejected");
+    }
+
+    #[test]
+    fn role_cannot_be_upgraded_via_peer_nonce() {
+        let (cfg, _om, devo, mut entries) = setup();
+        // Claim role=Controller while citing the *Peer* invite nonce -> rejected
+        // (kind mismatch; there is no current Controller invite).
+        let x = key(3);
+        entries.push(add(NET, &devo, &x, 3, Role::Controller, nonce(7), 2));
+        assert!(!Roster::build(&cfg, &entries).is_member(&id(&x)));
     }
 
     #[test]
     fn removed_member_cannot_forge() {
-        // The crux: even though a removed member still holds the docs write-cap,
-        // their later Adds are rejected and they can't sign Remove/Freeze.
         let (cfg, om, devo, mut entries) = setup();
         let laptop = key(3);
-        let attacker_target = key(60);
-        entries.push(sign(
-            cfg.network_id,
-            &devo,
-            Op::Add {
-                node_id: id(&laptop),
-                hostname: "laptop".into(),                ts: 2,
-            },
-        ));
+        entries.push(add(NET, &devo, &laptop, 3, Role::Peer, nonce(7), 2));
         // Originator removes the laptop at ts=3.
-        entries.push(sign(
-            cfg.network_id,
-            &om,
-            Op::Remove {
-                node_id: id(&laptop),
-                ts: 3,
-            },
-        ));
-        // Removed laptop tries to (a) admit a new member and (b) freeze + remove
-        // the originator's device, all at later timestamps.
-        entries.push(sign(
-            cfg.network_id,
-            &laptop,
-            Op::Add {
-                node_id: id(&attacker_target),
-                hostname: "backdoor".into(),                ts: 4,
-            },
-        ));
-        entries.push(sign(
-            cfg.network_id,
-            &laptop,
-            Op::Remove {
-                node_id: id(&devo),
-                ts: 5,
-            },
-        ));
-        entries.push(sign(
-            cfg.network_id,
-            &laptop,
-            Op::Freeze {
-                frozen: true,
-                ts: 6,
-            },
-        ));
+        entries.push(sign(NET, &om, Op::Remove { node_id: id(&laptop), ts: 3 }));
+        // The removed laptop (now a non-member Peer) tries to admit + remove.
+        let backdoor = key(60);
+        entries.push(add(NET, &laptop, &backdoor, 4, Role::Peer, nonce(7), 4));
+        entries.push(sign(NET, &laptop, Op::Remove { node_id: id(&devo), ts: 5 }));
         let r = Roster::build(&cfg, &entries);
         assert!(!r.is_member(&id(&laptop)), "removed member stays out");
-        assert!(!r.is_member(&id(&attacker_target)), "forged add rejected");
+        assert!(!r.is_member(&id(&backdoor)), "forged add rejected");
         assert!(r.is_member(&id(&devo)), "forged remove ignored");
-        assert!(!r.frozen(), "forged freeze ignored");
     }
 
     #[test]
@@ -507,46 +741,16 @@ mod tests {
         let (cfg, om, devo, base) = setup();
         let q = key(4);
 
-        // Frozen at ts=3, then an add at ts=4 -> rejected.
         let mut frozen = base.clone();
-        frozen.push(sign(
-            cfg.network_id,
-            &om,
-            Op::Freeze {
-                frozen: true,
-                ts: 3,
-            },
-        ));
-        frozen.push(sign(
-            cfg.network_id,
-            &devo,
-            Op::Add {
-                node_id: id(&q),
-                hostname: "q".into(),                ts: 4,
-            },
-        ));
+        frozen.push(sign(NET, &om, Op::Freeze { frozen: true, ts: 3 }));
+        frozen.push(add(NET, &devo, &q, 3, Role::Peer, nonce(7), 4));
         let r = Roster::build(&cfg, &frozen);
         assert!(r.frozen());
         assert!(!r.is_member(&id(&q)), "add blocked while frozen");
 
-        // Unfreeze at ts=5, re-add at ts=6 -> accepted.
         let mut thawed = frozen.clone();
-        thawed.push(sign(
-            cfg.network_id,
-            &om,
-            Op::Freeze {
-                frozen: false,
-                ts: 5,
-            },
-        ));
-        thawed.push(sign(
-            cfg.network_id,
-            &devo,
-            Op::Add {
-                node_id: id(&q),
-                hostname: "q".into(),                ts: 6,
-            },
-        ));
+        thawed.push(sign(NET, &om, Op::Freeze { frozen: false, ts: 5 }));
+        thawed.push(add(NET, &devo, &q, 3, Role::Peer, nonce(7), 6));
         let r = Roster::build(&cfg, &thawed);
         assert!(!r.frozen());
         assert!(r.is_member(&id(&q)), "add allowed after unfreeze");
@@ -554,164 +758,66 @@ mod tests {
 
     #[test]
     fn tampered_signature_is_dropped() {
-        let (cfg, _om, devo, _entries) = setup();
-        let mut bad = sign(
-            cfg.network_id,
-            &devo,
-            Op::Add {
-                node_id: id(&key(3)),
-                hostname: "x".into(),                ts: 2,
-            },
-        );
-        bad.signature[0] ^= 0xff; // corrupt
+        let (cfg, _om, devo, _e) = setup();
+        let mut bad = add(NET, &devo, &key(3), 3, Role::Peer, nonce(7), 2);
+        bad.signature[0] ^= 0xff;
         assert!(!bad.verify_signature());
-        let r = Roster::build(&cfg, std::slice::from_ref(&bad));
-        assert!(r.is_empty());
+        assert!(Roster::build(&cfg, std::slice::from_ref(&bad)).is_empty());
     }
 
     #[test]
     fn wrong_network_id_is_dropped() {
         let (cfg, om, devo, _e) = setup();
-        // Genesis signed for a DIFFERENT network must not count here.
-        let foreign = sign(
-            [7u8; 32],
-            &om,
-            Op::Add {
-                node_id: id(&devo),
-                hostname: "x".into(),                ts: 1,
-            },
-        );
-        let r = Roster::build(&cfg, std::slice::from_ref(&foreign));
-        assert!(r.is_empty());
+        let foreign = add([7u8; 32], &om, &devo, 2, Role::Controller, nonce(0), 1);
+        assert!(Roster::build(&cfg, std::slice::from_ref(&foreign)).is_empty());
     }
 
     #[test]
-    fn ips_are_unique_in_subnet_and_deterministic() {
-        let (cfg, _om, devo, base) = setup();
-        let mut entries = base.clone();
-        let members: Vec<SigningKey> = (10u8..20).map(key).collect();
-        for (i, k) in members.iter().enumerate() {
-            entries.push(sign(
-                cfg.network_id,
-                &devo,
-                Op::Add { node_id: id(k), hostname: "m".into(), ts: 2 + i as u64 },
-            ));
-        }
-        let r = Roster::build(&cfg, &entries);
+    fn ips_are_static_across_other_joins_and_leaves() {
+        let (cfg, om, devo, mut entries) = setup();
+        let a = key(10);
+        let b = key(11);
+        // a joins (claims .3), b joins (claims .4).
+        entries.push(add(NET, &devo, &a, 3, Role::Peer, nonce(7), 2));
+        entries.push(add(NET, &devo, &b, 4, Role::Peer, nonce(7), 3));
+        let r1 = Roster::build(&cfg, &entries);
+        let a_ip = r1.member(&id(&a)).unwrap().virtual_ip;
+        assert_eq!(a_ip, Ipv4Addr::new(10, 99, 0, 3));
 
-        // Every member gets a distinct host in the /24 (2..=254).
-        let ips: Vec<Ipv4Addr> = r.members().map(|(_, m)| m.virtual_ip).collect();
-        let uniq: std::collections::BTreeSet<_> = ips.iter().collect();
-        assert_eq!(ips.len(), uniq.len(), "all member IPs must be distinct");
-        for a in &ips {
-            assert_eq!(&a.octets()[..3], &[10, 99, 0], "in subnet");
-            assert!((2..=254).contains(&a.octets()[3]), "valid host");
-        }
-
-        // Entry order must not affect the assignment (every node agrees).
-        let mut shuffled = base;
-        for (i, k) in members.iter().enumerate().rev() {
-            shuffled.push(sign(
-                cfg.network_id,
-                &devo,
-                Op::Add { node_id: id(k), hostname: "m".into(), ts: 2 + i as u64 },
-            ));
-        }
-        let r2 = Roster::build(&cfg, &shuffled);
-        for (idk, m) in r.members() {
-            assert_eq!(m.virtual_ip, r2.member(idk).unwrap().virtual_ip, "deterministic");
-        }
+        // Remove b. a's IP must not move.
+        entries.push(sign(NET, &om, Op::Remove { node_id: id(&b), ts: 4 }));
+        let r2 = Roster::build(&cfg, &entries);
+        assert_eq!(r2.member(&id(&a)).unwrap().virtual_ip, a_ip, "IP stays static");
     }
 
     #[test]
-    fn concurrent_adds_get_distinct_ips() {
-        // The race fix: two members approving two different joiners at the SAME
-        // timestamp still yield distinct IPs (the approver no longer picks the IP
-        // — it's derived from the NodeId during the fold).
-        let (cfg, _om, devo, mut entries) = setup();
-        let laptop = key(3);
-        entries.push(sign(
-            cfg.network_id,
-            &devo,
-            Op::Add { node_id: id(&laptop), hostname: "laptop".into(), ts: 2 },
-        ));
+    fn concurrent_same_ip_claims_resolve_to_distinct() {
+        // Two admitters concurrently pick the same host for two joiners; the fold
+        // resolves the collision deterministically so they still get distinct IPs.
+        let (cfg, om, devo, mut entries) = setup();
+        let c2 = key(3);
+        entries.push(add(NET, &devo, &c2, 3, Role::Peer, nonce(7), 2));
+        entries.push(sign(NET, &om, Op::SetRole { node_id: id(&c2), role: Role::Controller, ts: 3 }));
         let a = key(40);
         let b = key(41);
-        entries.push(sign(
-            cfg.network_id,
-            &devo,
-            Op::Add { node_id: id(&a), hostname: "a".into(), ts: 5 },
-        ));
-        entries.push(sign(
-            cfg.network_id,
-            &laptop,
-            Op::Add { node_id: id(&b), hostname: "b".into(), ts: 5 },
-        ));
+        // Both admitted at ts=5 claiming .9.
+        entries.push(add(NET, &devo, &a, 9, Role::Peer, nonce(7), 5));
+        entries.push(add(NET, &c2, &b, 9, Role::Peer, nonce(7), 5));
         let r = Roster::build(&cfg, &entries);
         assert_ne!(
             r.member(&id(&a)).unwrap().virtual_ip,
             r.member(&id(&b)).unwrap().virtual_ip,
-            "concurrently-approved members must not share an IP"
+            "collision resolved to distinct IPs"
         );
     }
 
     #[test]
-    fn far_future_timestamps_are_dropped() {
-        let (cfg, om, devo, _base) = setup();
-        // An otherwise-valid genesis add, but dated far beyond the skew ceiling.
-        let future = sign(
-            cfg.network_id,
-            &om,
-            Op::Add {
-                node_id: id(&devo),
-                hostname: "x".into(),
-                ts: now_ms() + 48 * 60 * 60 * 1000, // +48h
-            },
-        );
-        let r = Roster::build(&cfg, std::slice::from_ref(&future));
-        assert!(r.is_empty(), "far-future entry must be dropped");
-    }
-
-    #[test]
-    fn member_cannot_vouch_before_it_joined() {
-        let (cfg, _om, devo, mut entries) = setup(); // devo admitted at ts=1
-        let laptop = key(3);
-        entries.push(sign(
-            cfg.network_id,
-            &devo,
-            Op::Add { node_id: id(&laptop), hostname: "l".into(), ts: 5 }, // laptop joins at 5
-        ));
-        let early = key(8);
-        let late = key(9);
-        // laptop vouches `early` with a ts BEFORE its own admission -> rejected.
-        entries.push(sign(
-            cfg.network_id,
-            &laptop,
-            Op::Add { node_id: id(&early), hostname: "e".into(), ts: 3 },
-        ));
-        // ...and `late` with a ts after its admission -> accepted.
-        entries.push(sign(
-            cfg.network_id,
-            &laptop,
-            Op::Add { node_id: id(&late), hostname: "L".into(), ts: 6 },
-        ));
-        let r = Roster::build(&cfg, &entries);
-        assert!(!r.is_member(&id(&early)), "backdated vouch (before voucher joined) rejected");
-        assert!(r.is_member(&id(&late)), "valid vouch accepted");
-    }
-
-    #[test]
-    fn set_name_last_writer_wins_and_requires_membership() {
-        let (cfg, _om, devo, mut entries) = setup(); // devo is a genesis member
+    fn set_name_last_writer_wins_and_requires_controller() {
+        let (cfg, _om, devo, mut entries) = setup();
         let outsider = key(50);
-        entries.push(sign(cfg.network_id, &devo, Op::SetName { name: "Home".into(), ts: 10 }));
-        entries.push(sign(cfg.network_id, &devo, Op::SetName { name: "Lab".into(), ts: 20 }));
-        // A non-member's rename (even though it's the latest) is ignored.
-        entries.push(sign(
-            cfg.network_id,
-            &outsider,
-            Op::SetName { name: "Hacked".into(), ts: 30 },
-        ));
+        entries.push(sign(NET, &devo, Op::SetName { name: "Home".into(), ts: 10 }));
+        entries.push(sign(NET, &devo, Op::SetName { name: "Lab".into(), ts: 20 }));
+        entries.push(sign(NET, &outsider, Op::SetName { name: "Hacked".into(), ts: 30 }));
         let r = Roster::build(&cfg, &entries);
         assert_eq!(r.name(), Some("Lab"));
     }
