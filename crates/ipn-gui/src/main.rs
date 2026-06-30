@@ -353,7 +353,10 @@ impl Ui {
     }
     /// Step back one panel, or close the flyout if we're at the first one.
     fn back(&self) {
-        match self.nav_stack.borrow_mut().pop() {
+        // Release the nav_stack borrow before `set_show_sidebar`, which fires the
+        // show-sidebar handler (it borrows nav_stack too).
+        let prev = self.nav_stack.borrow_mut().pop();
+        match prev {
             Some(prev) => self.stack.set_visible_child_name(&prev),
             None => self.split.set_show_sidebar(false),
         }
@@ -456,9 +459,15 @@ fn build_ui(
         let split = split.clone();
         let stack = stack.clone();
         let nav_stack = nav_stack.clone();
-        move || match nav_stack.borrow_mut().pop() {
-            Some(prev) => stack.set_visible_child_name(&prev),
-            None => split.set_show_sidebar(false),
+        move || {
+            // Pop into a local first: `set_show_sidebar(false)` synchronously fires
+            // the show-sidebar handler (which borrows nav_stack), so the borrow must
+            // be released before we touch the split — otherwise it double-borrows.
+            let prev = nav_stack.borrow_mut().pop();
+            match prev {
+                Some(prev) => stack.set_visible_child_name(&prev),
+                None => split.set_show_sidebar(false),
+            }
         }
     };
 
