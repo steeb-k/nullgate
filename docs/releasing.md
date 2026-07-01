@@ -26,8 +26,11 @@ Per-platform detail: [windows-packaging.md](windows-packaging.md),
    - **Windows** (signed): stop the service, `az login`, then
      `pwsh -File scripts\build-msi.ps1` → `target\wix\nullgate-<ver>-windows-x86_64.msi`.
    - **Linux** (WSL/Linux): `scripts/package-linux.sh` → `dist/nullgate-<ver>-linux-x86_64.tar.gz`.
-   - **macOS** (on a Mac): `scripts/package-macos.sh` →
-     `dist/nullgate-<ver>-macos-{universal|arm64}.tar.gz`.
+   - **macOS** (on a Mac): once, create the conda-forge GTK env(s) with
+     `scripts/setup-conda-macos.sh --universal` (needs `micromamba`/`mamba`/`conda` on PATH);
+     then `scripts/package-macos.sh` → `dist/nullgate-<ver>-macos-{universal|arm64}.tar.gz`.
+     Verify the floor: `otool -l …/Contents/lib/libgtk-4.*.dylib | grep -A3 LC_BUILD_VERSION`
+     shows `minos 11.0`. See `macos-packaging.md` (conda-forge GTK, not Homebrew).
 4. **Publish** to the public repo (authenticated `gh`). Create the release with whatever's ready,
    then upload the rest as each OS finishes:
    ```sh

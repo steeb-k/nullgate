@@ -1,7 +1,7 @@
 # macOS packaging (self-contained .app + LaunchDaemon + auto-updater)
 
 How the macOS release is built and installed. Must be built **on a Mac** (the GTK dylib closure
-is bundled from Homebrew; it can't be cross-built from Windows/Linux).
+is bundled from a local prefix; it can't be cross-built from Windows/Linux).
 
 ## What ships
 `nullgate-<version>-macos-<arch>.tar.gz` (`arch` = `universal` or `arm64`) containing a self-contained,
@@ -9,32 +9,61 @@ ad-hoc-signed **"Nullgate.app"** (bundled GTK), the `nullgatectl` manager, and t
 templates. Because Nullgate's daemon needs root to create the `utun` interface, install sets it up as
 a **root LaunchDaemon** (not a per-user agent); the tray GUI runs per-user.
 
+## Why conda-forge GTK, not Homebrew
+The GTK dylibs we bundle set the app's minimum-macOS floor (their `minos` load command). Homebrew
+stamps the **build host's** OS, so an arm64 gtk4 built on a modern dev box carries a very high
+`minos` — e.g. on macOS 26 it's `minos 26.0`, which refuses to launch on any older Mac. conda-forge
+instead builds `osx-arm64` against the **macOS 11** SDK (the floor for all Apple Silicon) and
+`osx-64` against ~10.13, so the bundled dylibs carry `minos 11.0` no matter what this machine runs.
+
+| GTK source | arm64 `minos` | x86_64 `minos` | resulting floor |
+|---|---|---|---|
+| conda-forge (**what we ship**) | 11.0 | ~10.13 | **macOS 11** |
+| Homebrew on a macOS 26 box | 26.0 | 14.x | macOS 26 (broken for testers) |
+
 ## Prerequisites
 - **Xcode Command Line Tools**: `xcode-select --install` (`install_name_tool`, `codesign`,
   `otool`, `lipo`, `iconutil`, `sips`).
-- **Rust**: `rustup default stable`. For universal2 also `rustup target add x86_64-apple-darwin`.
-- **Homebrew GTK** (arm64): `brew install gtk4 libadwaita pkg-config` (at `/opt/homebrew`).
-- For **universal2** only: a second **x86_64 Homebrew** at `/usr/local` (under Rosetta) with
-  `gtk4 libadwaita pkg-config` installed:
+- **Rust**: `rustup default stable`. For universal also `rustup target add x86_64-apple-darwin`.
+- **A conda front-end on PATH** — `mamba`, `micromamba`, or `conda`. The lightweight option is a
+  standalone [`micromamba`](https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html)
+  binary; put its directory on `PATH` and export `MAMBA_ROOT_PREFIX` to a scratch dir. (miniforge
+  also works.) No Homebrew GTK is needed.
+- **conda-forge GTK env(s)** — created once by `scripts/setup-conda-macos.sh`:
   ```sh
-  softwareupdate --install-rosetta --agree-to-license
-  arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  arch -x86_64 /usr/local/bin/brew install gtk4 libadwaita pkg-config
+  scripts/setup-conda-macos.sh              # osx-arm64 env only (arm64 build)
+  scripts/setup-conda-macos.sh --universal  # + osx-64 env (universal arm64 + Intel)
   ```
+  This writes `.conda-gtk/{arm64,x86}` (git-ignored) with `gtk4 libadwaita librsvg pkg-config` and
+  the `.pc`-only helpers the Rust `-sys` builds need. Override the paths via
+  `NULLGATE_CONDA_ARM` / `NULLGATE_CONDA_X86`.
 
 ## Build
 ```sh
+scripts/setup-conda-macos.sh --universal # once: create the conda-forge GTK env(s)
 scripts/package-macos.sh                 # cargo build --release, bundle, package
 scripts/package-macos.sh --skip-build    # repackage existing per-arch release bins
 # -> dist/nullgate-<version>-macos-{universal|arm64}.tar.gz
 ```
-It builds the arm64 `.app`, bundles the GTK closure (`scripts/bundle-gtk-macos.sh`: walks the
+`package-macos.sh` builds each slice with `pkg-config` pointed at the conda env
+(`PKG_CONFIG_LIBDIR=.conda-gtk/<arch>/lib/pkgconfig`), `MACOSX_DEPLOYMENT_TARGET=11.0`, and
+`-headerpad_max_install_names` (conda's short `@rpath` install names grow when relocated, so the
+Mach-O header needs slack). It bundles the GTK closure (`scripts/bundle-gtk-macos.sh`: walks the
 `otool` closure of `nullgate`, copies non-system dylibs into `Contents/lib`, rewrites install names to
 `@executable_path/../lib/<name>`, ad-hoc re-signs inside-out, regenerates the pixbuf
-`loaders.cache`, compiles GSettings schemas, bundles fontconfig). With both Homebrew arches
-present it also builds an x86_64 `.app` and `lipo`s every Mach-O into a universal one. Then it
-writes `Info.plist`, renders `AppIcon.icns`, and seals the bundle. **Build on the oldest macOS
-you want to support** (the bundled GTK's `minos` sets the floor).
+`loaders.cache`, compiles GSettings schemas, bundles fontconfig). When the `osx-64` env **and** the
+`x86_64-apple-darwin` Rust target are present it also builds an x86_64 `.app` and `lipo`s every
+Mach-O into a universal one (re-signing after, since `lipo` invalidates the ad-hoc signature).
+Then it writes `Info.plist`, renders `AppIcon.icns`, and seals the bundle. At runtime the GUI's
+`setup_runtime_env()` points GTK at the bundled `share/`+`lib/`+`etc/` relative to the executable.
+
+## Verify the OS floor
+Confirm the bundled GTK carries the macOS-11 floor (not the build host's OS):
+```sh
+otool -l "dist/nullgate-<ver>-macos-universal/Nullgate.app/Contents/lib/libgtk-4."*.dylib \
+  | grep -A3 LC_BUILD_VERSION      # expect: minos 11.0 (arm64 slice)
+lipo -archs "dist/nullgate-<ver>-macos-universal/Nullgate.app/Contents/MacOS/nullgate"  # -> arm64 x86_64
+```
 
 ## Install / manage (on the target)
 ```sh

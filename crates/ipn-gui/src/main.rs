@@ -280,12 +280,77 @@ fn save_window_size(window: &adw::ApplicationWindow) {
     }
 }
 
+/// On macOS, point GLib/GTK at the bundled runtime resources relative to this
+/// executable, so the self-contained tarball install (GTK dylibs relocated to
+/// `../lib`) finds its GSettings schemas, gdk-pixbuf loaders, and Adwaita icon
+/// theme without a system/Homebrew/conda GTK. Every set is guarded by `exists()`,
+/// so a dev build run against a system GTK (no bundled `share/`+`lib/` next to the
+/// exe) is a no-op and keeps the system paths. Must run before any GLib/GTK call.
+#[cfg(target_os = "macos")]
+fn setup_runtime_env() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    // Installed binaries are reached through /usr/local/bin symlinks into the real
+    // prefix, and current_exe() can hand back the symlink path — canonicalize so
+    // the prefix resolves to the install root, not the symlink's parent. Without
+    // this, the bundled share/lib/etc aren't found and GTK falls back to a system
+    // prefix (absent on a user's machine → file-chooser / pixbuf crash).
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    // <prefix>/MacOS/nullgate -> prefix is Nullgate.app/Contents (holds lib/, share/, etc/).
+    let Some(prefix) = exe.parent().and_then(|bin| bin.parent()) else {
+        return;
+    };
+    let set_if = |var: &str, p: PathBuf| {
+        if p.exists() && std::env::var_os(var).is_none() {
+            std::env::set_var(var, &p);
+        }
+    };
+    set_if("GSETTINGS_SCHEMA_DIR", prefix.join("share/glib-2.0/schemas"));
+    set_if(
+        "GDK_PIXBUF_MODULE_FILE",
+        prefix.join("lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"),
+    );
+    set_if(
+        "GDK_PIXBUF_MODULEDIR",
+        prefix.join("lib/gdk-pixbuf-2.0/2.10.0/loaders"),
+    );
+    // fontconfig (pulled in by pango): the bundled libfontconfig has a compiled-in
+    // config path under the build prefix, absent on a user's machine. Point it at
+    // our bundled fonts.conf, which references the system macOS font dirs.
+    set_if("FONTCONFIG_PATH", prefix.join("etc/fonts"));
+    // Prepend our share/ so the bundled Adwaita icon theme is found by GTK.
+    let share = prefix.join("share");
+    if share.exists() {
+        let val = match std::env::var_os("XDG_DATA_DIRS") {
+            Some(cur) if !cur.is_empty() => {
+                let mut s = std::ffi::OsString::from(&share);
+                s.push(":");
+                s.push(cur);
+                s
+            }
+            _ => {
+                let mut s = std::ffi::OsString::from(&share);
+                s.push(":/usr/local/share:/usr/share");
+                s
+            }
+        };
+        std::env::set_var("XDG_DATA_DIRS", val);
+    }
+}
+
+/// Non-macOS: system/MSI-installed GTK finds its own resources; nothing to set.
+#[cfg(not(target_os = "macos"))]
+fn setup_runtime_env() {}
+
 fn main() -> glib::ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("nullgate {}", env!("CARGO_PKG_VERSION"));
         return glib::ExitCode::SUCCESS;
     }
+    // Before any GLib/GTK call: on macOS, redirect GTK to the bundled resources.
+    setup_runtime_env();
     #[cfg(windows)]
     init_windows_app_id();
     let start_minimized =

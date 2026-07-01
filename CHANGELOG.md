@@ -3,6 +3,19 @@
 All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepachangelog.com).
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
+## [Unreleased]
+### Added
+- **macOS build (first published artifact).** Nullgate now builds a self-contained, universal
+  (arm64 + x86_64) `Nullgate.app` tarball for macOS. GTK is bundled from **conda-forge** rather
+  than Homebrew so the dylibs carry `minos 11.0` and the app runs on macOS 11+, regardless of the
+  build host's OS (a Homebrew build on a modern Mac would stamp an unusably high floor). New
+  `scripts/setup-conda-macos.sh` creates the conda-forge GTK env(s); `scripts/package-macos.sh`
+  and `scripts/bundle-gtk-macos.sh` were reworked to source GTK from those envs
+  (`MACOSX_DEPLOYMENT_TARGET=11.0`, `-headerpad_max_install_names`, `@loader_path` handling,
+  `BUNDLE_SKIP_AUX` for the universal lipo pass). The GUI gained a macOS `setup_runtime_env()`
+  that points bundled GTK at the `.app`'s relative schema/pixbuf-loader/fontconfig dirs. The
+  one-liner `install.sh` already handles macOS. See `docs/macos-packaging.md`.
+
 ## [0.2.0]
 ### Added
 - **Android app (initial).** Nullgate now builds and runs on Android: a Kotlin/Compose UI over a

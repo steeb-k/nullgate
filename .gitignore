@@ -6,6 +6,10 @@
 # Bundled at package time, not committed
 /vendor/wintun/
 
+# conda-forge GTK envs for the macOS build (large + machine-specific; created by
+# scripts/setup-conda-macos.sh). Never tracked.
+/.conda-gtk/
+
 # Code-signing metadata (names the Azure signing account/cert profile). Local
 # only — create from docs/windows-packaging.md; never tracked. Auth is via
 # `az login`, so no keys live on disk.

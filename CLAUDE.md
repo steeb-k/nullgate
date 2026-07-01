@@ -70,7 +70,8 @@ Packaging + releases: see `docs/releasing.md` (+ `windows-/linux-/macos-/android
 0.1.0 we ship real installers with auto-update: a **code-signed Windows MSI** (`scripts/
 build-msi.ps1`, Azure Trusted Signing), a **Linux** system-service tarball (`scripts/
 package-linux.sh` + `packaging/linux/nullgatectl`), and a **macOS** universal `.app` tarball
-(`scripts/package-macos.sh`, built on a Mac). Releases are `gh release` uploads to the **public**
+(`scripts/setup-conda-macos.sh` once to build the conda-forge GTK env, then
+`scripts/package-macos.sh`, built on a Mac). Releases are `gh release` uploads to the **public**
 `steeb-k/iroh-private-network` repo; the in-product updaters + `install.sh` read its
 `releases/latest`. The signing metadata (`artifact-signing-metadata.json`) is **git-ignored** —
 never commit it. Builds are **local** (Windows native; Linux/Android via WSL; macOS on a Mac).
@@ -125,6 +126,11 @@ added.
   it and skips creating a real interface. Always set it in automated tests.
 - **GTK on Windows** comes from gvsbuild at `C:\gtk`; `pkg-config` must resolve `gtk4` and
   `libadwaita-1`. On Linux, install the `-dev` packages.
+- **GTK on macOS** comes from **conda-forge**, not Homebrew (`scripts/setup-conda-macos.sh` builds
+  `.conda-gtk/{arm64,x86}`) — conda-forge's dylibs carry `minos 11.0` so the shipped `.app` runs on
+  macOS 11+, whereas Homebrew stamps the build host's OS (e.g. `minos 26` on a macOS 26 box). Needs a
+  `micromamba`/`mamba`/`conda` on PATH. The bundled `.app` finds its resources via `ipn-gui`'s
+  `setup_runtime_env()` (sets `GSETTINGS_SCHEMA_DIR`/`GDK_PIXBUF_MODULE_FILE`/`FONTCONFIG_PATH`).
 - **Windows service install needs UAC** and can't be exercised headlessly — verify the IPC path
   with the foreground daemon + `ipn-cli` instead.
 - `.gitattributes` forces LF on `*.sh` so the WSL/Linux scripts survive a Windows checkout.
