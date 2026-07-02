@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="img/nullgate-header.png" alt="Nullgate" />
+</p>
+
 # iroh-private-network (Nullgate)
 
 Connect your own computers into a private network, wherever they are, so you can reach one
