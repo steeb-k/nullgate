@@ -6,8 +6,10 @@ WSL Ubuntu or on a Linux box).
 ## What ships
 `nullgate-<version>-linux-x86_64.tar.gz` — the binaries (`nullgate`, `ipn-daemon`, `ipn-cli`), the
 `nullgatectl` install manager, the systemd **system** units, an app-menu `.desktop`, and pre-rendered
-hicolor icons. It relies on **system GTK** on the target (not bundled):
-`sudo apt install libgtk-4-1 libadwaita-1-0`.
+hicolor icons. The desktop GUI relies on **system GTK** on the target (not bundled):
+`sudo apt install libgtk-4-1 libadwaita-1-0`. This is **GUI-only** — the daemon and
+`nullgate-cli` don't link GTK, so a headless install needs none of it (`nullgatectl --install`
+prints a note about the missing libs but completes anyway).
 
 Unlike a pure user app, Nullgate's daemon needs `CAP_NET_ADMIN`/`CAP_NET_RAW` to create the TUN, so
 `nullgatectl --install` sets it up as a **root systemd service** (it gets the caps for free), with a

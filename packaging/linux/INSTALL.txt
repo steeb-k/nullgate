@@ -7,7 +7,10 @@ Or from this unpacked tarball:
     ./nullgatectl --install        # uses sudo; installs the daemon as a system service
 
 Requirements on the target machine:
-    GTK 4.10+ and libadwaita 1.4+   (Debian/Ubuntu: sudo apt install libgtk-4-1 libadwaita-1-0)
+    Nothing extra for headless use — the daemon and CLI (nullgate-cli) run on their own.
+    The desktop GUI additionally needs GTK 4.10+ and libadwaita 1.4+
+        (Debian/Ubuntu: sudo apt install libgtk-4-1 libadwaita-1-0)
+    Skip this on a headless box; verify + approve joins with nullgate-cli instead.
 
 What it installs:
     /usr/local/bin/{nullgate, nullgate-daemon, nullgate-cli, nullgatectl}

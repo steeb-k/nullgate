@@ -156,6 +156,37 @@ pub const SAS_EMOJI: [&str; 64] = [
     "🔨", "☎️", "🏁", "🚂", "🚲", "✈️", "🚀", "🏆", "⚽", "🎸", "🎺", "🔔", "⚓", "🎧", "📁", "📌",
 ];
 
+/// Human-readable names for [`SAS_EMOJI`], index-aligned (the canonical Matrix SAS
+/// emoji names). Text-only clients — the CLI, a piped/headless terminal — render
+/// these words instead of the emojis, which a terminal can't reliably display and
+/// two people can't reliably compare glyph-for-glyph. Keep this in lock-step with
+/// `SAS_EMOJI`: same order, same length.
+pub const SAS_WORD: [&str; 64] = [
+    "Dog", "Cat", "Lion", "Horse", "Unicorn", "Pig", "Elephant", "Rabbit",
+    "Panda", "Rooster", "Penguin", "Turtle", "Fish", "Octopus", "Butterfly", "Flower",
+    "Tree", "Cactus", "Mushroom", "Globe", "Moon", "Cloud", "Fire", "Banana",
+    "Apple", "Strawberry", "Corn", "Pizza", "Cake", "Heart", "Smiley", "Robot",
+    "Hat", "Glasses", "Wrench", "Santa", "Thumbs Up", "Umbrella", "Hourglass", "Clock",
+    "Gift", "Light Bulb", "Book", "Pencil", "Paperclip", "Scissors", "Lock", "Key",
+    "Hammer", "Telephone", "Flag", "Train", "Bicycle", "Airplane", "Rocket", "Trophy",
+    "Ball", "Guitar", "Trumpet", "Bell", "Anchor", "Headphones", "Folder", "Pin",
+];
+
+/// The word name for one SAS emoji, or `None` if it isn't in the table (shouldn't
+/// happen for a value this crate produced).
+pub fn word_for_emoji(emoji: &str) -> Option<&'static str> {
+    SAS_EMOJI.iter().position(|e| *e == emoji).map(|i| SAS_WORD[i])
+}
+
+/// Render a received SAS (the emoji strings as they travel over IPC) as words,
+/// for a text-only client. Unknown entries fall back to `"?"` rather than being
+/// dropped, so the word count still matches the emoji count.
+pub fn sas_words(sas: &[String]) -> Vec<&'static str> {
+    sas.iter()
+        .map(|e| word_for_emoji(e).unwrap_or("?"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +218,21 @@ mod tests {
     fn wrong_psk_yields_different_tag() {
         let t = transcript(&[1u8; 32], &[2u8; 32], &[3u8; 32], &[4u8; 32]);
         assert_ne!(tag(&[0u8; 32], &t), tag(&[1u8; 32], &t));
+    }
+
+    #[test]
+    fn every_emoji_has_a_word_and_they_round_trip() {
+        assert_eq!(SAS_EMOJI.len(), SAS_WORD.len());
+        // Words are the display form of exactly the emojis we emit.
+        for (i, e) in SAS_EMOJI.iter().enumerate() {
+            assert_eq!(word_for_emoji(e), Some(SAS_WORD[i]));
+        }
+        // A real SAS (emoji Strings, as they arrive over IPC) maps to its words.
+        let t = transcript(&[1u8; 32], &[2u8; 32], &[3u8; 32], &[4u8; 32]);
+        let sas: Vec<String> = sas_emojis(&[7u8; 32], &t).iter().map(|s| s.to_string()).collect();
+        let words = sas_words(&sas);
+        assert_eq!(words.len(), sas.len());
+        assert!(words.iter().all(|w| *w != "?"), "no emoji should be unmapped");
     }
 
     #[test]

@@ -42,6 +42,12 @@ esac
 have curl || die "curl is required"
 have tar  || die "tar is required"
 
+cat <<'BANNER'
+▖ ▖  ▜ ▜     ▗
+▛▖▌▌▌▐ ▐ ▛▌▀▌▜▘█▌
+▌▝▌▙▌▐▖▐▖▙▌█▌▐▖▙▖
+         ▄▌
+BANNER
 say "Nullgate installer"
 
 INSTALLED=""

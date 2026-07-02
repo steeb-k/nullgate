@@ -1,11 +1,11 @@
 //! Headless IPC client for `ipn-daemon` — scripting + testing without the GUI.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use ipn_ipc::transport::oneshot_request;
-use ipn_ipc::{IpcRequest, IpcResponse};
+use ipn_ipc::transport::{self, oneshot_request, read_frame, write_frame};
+use ipn_ipc::{Frame, IpcEvent, IpcRequest, IpcResponse, Message};
 
 #[derive(Parser)]
 #[command(name = "nullgate-cli", about = "Control the Nullgate daemon", version)]
@@ -22,8 +22,12 @@ enum Cmd {
     Status,
     /// Create a new network (this device becomes originator); prints the ticket.
     Create { name: String },
-    /// Join a network from a ticket.
+    /// Join a network from a ticket. Prints the verification words to read aloud
+    /// to the approving member, then blocks until they approve or deny.
     Join { ticket: String },
+    /// Stream events: print incoming join requests (with verification words to
+    /// compare) and status changes. Run this to approve joins headlessly.
+    Watch,
     /// Print a join ticket. Peer-level by default; `--controller` for a single-use
     /// Controller ticket (originator only); `--single-use` toggles Peer single-use.
     Ticket {
@@ -87,9 +91,12 @@ async fn main() -> Result<()> {
     let socket = cli.socket.unwrap_or_else(ipn_ipc::default_socket);
 
     let req = match cli.cmd {
+        // These drive server-pushed events (the emoji SAS shown as words), so they
+        // can't use the one-shot request/response path.
+        Cmd::Join { ticket } => return cmd_join(&socket, ticket).await,
+        Cmd::Watch => return cmd_watch(&socket).await,
         Cmd::Status => IpcRequest::GetStatus,
         Cmd::Create { name } => IpcRequest::CreateNetwork { name },
-        Cmd::Join { ticket } => IpcRequest::Join { ticket },
         Cmd::Ticket {
             controller,
             single_use,
@@ -190,6 +197,103 @@ async fn main() -> Result<()> {
         } => println!("daemon ipc protocol v{version} (app v{app_version})"),
         IpcResponse::Ok => println!("ok"),
         IpcResponse::Err(e) => bail!("daemon error: {e}"),
+    }
+    Ok(())
+}
+
+/// Print a SAS as a numbered word list. The emojis are meaningless over a terminal,
+/// so both sides compare these words instead (they're derived from the same code).
+fn print_sas(prompt: &str, sas: &[String]) {
+    println!("\n{prompt}:");
+    for (i, word) in ipn_ipc::sas_words(sas).iter().enumerate() {
+        println!("  {}. {word}", i + 1);
+    }
+    println!();
+}
+
+/// Open an event subscription on its own connection. The daemon takes the
+/// connection over for pushed events, so it can't also serve requests.
+async fn subscribe(socket: &Path) -> Result<transport::Stream> {
+    let stream = transport::connect(socket)
+        .await
+        .map_err(|e| anyhow::anyhow!("can't reach daemon at {}: {e}", socket.display()))?;
+    Ok(stream)
+}
+
+/// Join, showing our verification words while we wait. We subscribe first (so we
+/// don't miss the SAS the daemon computes mid-handshake) and fire the blocking
+/// `Join` on a second connection.
+async fn cmd_join(socket: &Path, ticket: String) -> Result<()> {
+    let stream = subscribe(socket).await?;
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    write_frame(
+        &mut writer,
+        &Frame {
+            id: 1,
+            body: Message::Request(IpcRequest::Subscribe),
+        },
+    )
+    .await?;
+
+    println!("Requesting to join. Waiting for a member to approve…");
+
+    let join_fut = oneshot_request(socket, IpcRequest::Join { ticket });
+    tokio::pin!(join_fut);
+    let mut sub_open = true;
+
+    loop {
+        tokio::select! {
+            resp = &mut join_fut => {
+                return match resp.map_err(|e| anyhow::anyhow!("can't reach daemon: {e}"))? {
+                    IpcResponse::Ok => { println!("Approved — this device is now in the network."); Ok(()) }
+                    IpcResponse::Err(e) => bail!("join failed: {e}"),
+                    other => bail!("unexpected daemon response: {other:?}"),
+                };
+            }
+            frame = read_frame(&mut reader), if sub_open => {
+                match frame? {
+                    Some(f) => {
+                        if let Message::Event(IpcEvent::JoinSas { sas }) = f.body {
+                            print_sas("Read these words to the person approving you — they must match on their screen", &sas);
+                        }
+                    }
+                    None => sub_open = false,
+                }
+            }
+        }
+    }
+}
+
+/// Stream events: incoming join requests (with words to compare) and status
+/// changes. Used to approve joins on a headless box.
+async fn cmd_watch(socket: &Path) -> Result<()> {
+    let stream = subscribe(socket).await?;
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    write_frame(
+        &mut writer,
+        &Frame {
+            id: 1,
+            body: Message::Request(IpcRequest::Subscribe),
+        },
+    )
+    .await?;
+
+    println!("Watching for join requests. Press Ctrl-C to stop.");
+    while let Some(frame) = read_frame(&mut reader).await? {
+        let Message::Event(ev) = frame.body else { continue };
+        match ev {
+            IpcEvent::JoinRequest { node_id, hostname, sas } => {
+                let short = &node_id[..16.min(node_id.len())];
+                println!("\nJoin request from \"{hostname}\" ({short}…)");
+                print_sas("Approve only if these words match the joining device's screen", &sas);
+                println!("  approve:  nullgate-cli approve {node_id}");
+                println!("  deny:     nullgate-cli deny {node_id}");
+            }
+            IpcEvent::JoinSas { sas } => {
+                print_sas("This device is joining — read these words to the approver", &sas);
+            }
+            IpcEvent::Status(_) => {}
+        }
     }
     Ok(())
 }

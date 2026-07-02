@@ -4,7 +4,17 @@ All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepa
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+
+## [0.2.1] - 2026-07-01
 ### Added
+- **Headless verification over the CLI.** `nullgate-cli` can now drive a full join without a GUI.
+  `join <ticket>` prints the join **verification code as words** (e.g. `Rocket`, `Anchor`, …)
+  instead of emojis — a terminal can't reliably show or compare the glyphs — and blocks until a
+  member approves. A new `watch` command streams incoming join requests with the same words plus
+  the exact `approve`/`deny` commands to run. The words are derived from the identical SAS the GUI
+  turns into emojis, so a GUI ↔ CLI join still compares correctly. New `ipn_ipc::sas_words` /
+  `ipn_core::admission::{SAS_WORD, word_for_emoji, sas_words}`. See the README "Headless / CLI"
+  section and `docs/security.md`.
 - **Daemon crash logging + service auto-recovery (all platforms).** The privileged daemon now
   writes its own on-disk log and installs a panic hook that records the panic message, source
   `file:line`, and a backtrace **synchronously** to a crash log before the process exits — so a
@@ -29,6 +39,15 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   `BUNDLE_SKIP_AUX` for the universal lipo pass). The GUI gained a macOS `setup_runtime_env()`
   that points bundled GTK at the `.app`'s relative schema/pixbuf-loader/fontconfig dirs. The
   one-liner `install.sh` already handles macOS. See `docs/macos-packaging.md`.
+
+### Changed
+- **Linux installer no longer implies GTK is mandatory.** `nullgatectl --install` treated missing
+  GTK libraries as a blocking "install … then re-run" warning, but GTK is needed only by the
+  desktop GUI — the daemon and `nullgate-cli` are headless and don't link it. The message is now a
+  note that the install completes and works headlessly, and `INSTALL.txt` / the README / the Linux
+  packaging doc say the same.
+- **Install-script wordmark banner.** The `install.sh` one-liner and both `nullgatectl` managers
+  (Linux + macOS) now print the Nullgate wordmark at the top of their output.
 
 ## [0.2.0]
 ### Added

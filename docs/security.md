@@ -19,7 +19,9 @@ networking background in [architecture.md](architecture.md).
    challenge bound to both NodeIds and fresh nonces — knowing the rendezvous alone isn't enough).
 2. Both sides derive an identical **emoji short-authentication-string (SAS)** from the session.
    The two humans compare it. This catches a wrong/MITM'd identity and is a friendly stand-in
-   for eyeballing a 64-character key.
+   for eyeballing a 64-character key. The GUI shows the emojis; text-only clients (`nullgate-cli`,
+   over SSH) render the same code as the equivalent **words** — a terminal can't reliably display
+   or compare the glyphs — so the comparison holds across a GUI ↔ CLI join.
 3. An existing member approves, which writes a signed `Add` for the joiner (web of trust). The
    originator's device is the genesis member, bootstrapped by the master key.
 

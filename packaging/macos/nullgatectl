@@ -40,6 +40,17 @@ log()  { printf '%s\n' "nullgatectl: $*"; }
 die()  { printf '%s\n' "nullgatectl: error: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# The Nullgate wordmark. Called after any sudo re-exec so it prints exactly once.
+# Quoted heredoc so the block glyphs pass through untouched.
+banner() {
+  cat <<'BANNER'
+▖ ▖  ▜ ▜     ▗
+▛▖▌▌▌▐ ▐ ▛▌▀▌▜▘█▌
+▌▝▌▙▌▐▖▐▖▙▌█▌▐▖▙▖
+         ▄▌
+BANNER
+}
+
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
     have sudo || die "must run as root (sudo not found)"
@@ -107,6 +118,7 @@ apply_tree() {
 
 cmd_install() {
   need_root "--install" "$@"
+  banner
   local auto=1 gui=1 a
   for a in "$@"; do case "$a" in
     --no-auto-update) auto=0 ;;
@@ -149,6 +161,7 @@ cmd_update() {
   log "update available: $inst -> $latest"
   [ "$check" = 1 ] && return 0
   need_root "--update"
+  banner
   local tree; tree="$(fetch_latest_tree)"
   apply_tree "$tree"
   launchctl bootstrap system "$DAEMONS/$APP_ID.daemon.plist" >/dev/null 2>&1 || true
@@ -157,6 +170,7 @@ cmd_update() {
 
 cmd_uninstall() {
   need_root "--uninstall" "$@"
+  banner
   local purge=0 a
   for a in "$@"; do case "$a" in --purge) purge=1 ;; *) die "unknown flag for --uninstall: $a" ;; esac; done
 
@@ -183,6 +197,7 @@ cmd_status() {
 }
 
 usage() {
+  banner
   cat <<'EOF'
 Nullgate installer/updater - macOS
 

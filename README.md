@@ -56,9 +56,11 @@ curl -fsSL https://raw.githubusercontent.com/steeb-k/iroh-private-network/main/i
 
 It downloads the right build, sets up the background service (you'll be asked for your password
 once, because the service needs permission to create the virtual network interface), and enables
-daily auto-updates. On **Linux** you also need the system GTK runtime for the GUI application:
-`sudo apt install libgtk-4-1 libadwaita-1-0`. Afterwards, manage it with `nullgatectl`
-(`nullgatectl --status`, `--update`, `--uninstall`). On **macOS** the app lands in `/Applications`.
+daily auto-updates. On **Linux**, the desktop app needs the system GTK runtime
+(`sudo apt install libgtk-4-1 libadwaita-1-0`) — but that's only for the GUI; on a headless
+box you can skip it and drive everything with `nullgate-cli` (see "Headless / CLI" below).
+Afterwards, manage it with `nullgatectl` (`nullgatectl --status`, `--update`, `--uninstall`).
+On **macOS** the app lands in `/Applications`.
 
 ## Using it
 1. On one device: **+ → Create a network**, then share the ticket (copy it, or show the QR).
@@ -71,6 +73,22 @@ The background service keeps running and starts with your device. If it ever sto
 it restarts itself automatically, and it keeps a log (including the reason for any crash) under
 `%ProgramData%\Nullgate\logs` on Windows, `/var/log/nullgate` on Linux, and `/Library/Logs/Nullgate`
 on macOS — handy if you ever need to report a problem.
+
+### Headless / CLI
+No GUI (a server, a box you only SSH into)? Drive the same daemon with `nullgate-cli` — GTK isn't
+needed. The verification code is shown as **words** instead of emojis, so you can read it aloud or
+paste it over chat and compare it exactly.
+
+```sh
+nullgate-cli status                 # network + members
+nullgate-cli create "my network"    # become the originator; prints a ticket
+nullgate-cli join <ticket>          # prints your verification words, waits for approval
+nullgate-cli watch                  # in another shell: shows join requests + their words
+nullgate-cli approve <node-id>      # approve once the words match; deny with `deny`
+```
+
+To add a device to a network: run `nullgate-cli watch` on an existing member, `nullgate-cli join
+<ticket>` on the new one, check the word lists match on both, then `nullgate-cli approve <node-id>`.
 
 ## Learn more
 - [How it works](docs/architecture.md) — the design, components, and networking details.

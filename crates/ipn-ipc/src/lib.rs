@@ -14,6 +14,10 @@ pub mod transport;
 /// Display DTOs are reused straight from the engine crate (plain serde structs).
 pub use ipn_core::{AuditEntry, MemberView, NetworkStatus};
 
+/// Render a SAS (the emoji strings carried on [`IpcEvent::JoinSas`] /
+/// [`IpcEvent::JoinRequest`]) as words, for text-only clients like the CLI.
+pub use ipn_core::admission::sas_words;
+
 /// IPC wire-protocol version between the GUI/CLI and the daemon. Bump on any
 /// incompatible change to these request/response/event types.
 ///
