@@ -26,8 +26,11 @@ android {
         // permissions, so no API-30 floor (unlike SEED Sync).
         minSdk = 26
         targetSdk = 35
-        // versionCode scheme: MAJOR*10000 + MINOR*100 + PATCH (so 0.2.0 -> 200),
-        // monotonic and decodable. versionName tracks the workspace version.
+        // BUMP BY HAND EVERY RELEASE — these are literals, NOT derived from the
+        // workspace Cargo.toml. Keep versionName == the workspace version; versionCode
+        // scheme is MAJOR*10000 + MINOR*100 + PATCH (0.2.0 -> 200, 0.2.1 -> 201), so it
+        // stays monotonic and decodable. A stale versionCode blocks in-place updates.
+        // See docs/releasing.md + docs/android-packaging.md.
         versionCode = 201
         versionName = "0.2.1"
     }

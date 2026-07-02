@@ -67,8 +67,11 @@ gitignored — regenerated every build.
 ## ABIs, versioning, signing
 
 - ABIs: `arm64-v8a` (primary), `armeabi-v7a` (older 32-bit), `x86_64` (emulator) — one universal APK.
-- `versionCode = MAJOR*10000 + MINOR*100 + PATCH` (0.2.0 → 200); `versionName` tracks the
-  workspace version.
+- `versionCode = MAJOR*10000 + MINOR*100 + PATCH` (0.2.0 → 200, 0.2.1 → 201); `versionName` should
+  match the workspace version. **Both are hardcoded literals in `android/app/build.gradle.kts`** —
+  they are *not* read from `Cargo.toml`, so **bump them by hand every release** (see the release
+  checklist in `releasing.md`). A stale `versionCode` blocks in-place updates on already-installed
+  devices; a stale `versionName` just mislabels the build.
 - Release signing reads `android/keystore.properties` (gitignored — **never commit; a lost signing
   key permanently blocks in-place updates**). Without it, release builds are produced unsigned
   (won't install); debug builds are unaffected.

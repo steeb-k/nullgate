@@ -21,7 +21,11 @@ Per-platform detail: [windows-packaging.md](windows-packaging.md),
 1. **Tests:** `cargo test -p ipn-core` and the relevant ignored e2e tests pass; `cargo build
    --workspace` is clean on Windows and Linux.
 2. **Bump** the version in root `Cargo.toml`, run `cargo update --workspace`, and move
-   `CHANGELOG.md`'s `## [Unreleased]` items under a `## [<version>]` heading. Commit.
+   `CHANGELOG.md`'s `## [Unreleased]` items under a `## [<version>]` heading. **Also bump the
+   Android version by hand** in `android/app/build.gradle.kts` — `versionName` (to match the
+   workspace version) and `versionCode` (`MAJOR*10000 + MINOR*100 + PATCH`); these are hardcoded
+   literals, **not** derived from `Cargo.toml`, so they're easy to forget and a stale `versionCode`
+   silently blocks in-place Android updates. Commit.
 3. **Build each artifact on its own OS:**
    - **Windows** (signed): stop the service, `az login`, then
      `pwsh -File scripts\build-msi.ps1` → `target\wix\nullgate-<ver>-windows-x86_64.msi`.
