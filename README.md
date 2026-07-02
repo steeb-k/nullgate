@@ -2,17 +2,11 @@
   <img src="img/nullgate-header.png" alt="Nullgate" />
 </p>
 
-# iroh-private-network (Nullgate)
+## An iroh-based peer-to-peer virtual LAN
 
 Connect your own computers into a private network, wherever they are, so you can reach one
-machine directly — Remote Desktop, SSH, file shares, a home server — **without routing all your
-internet through a home VPN**.
-
-A normal VPN sends everything through one chokepoint: you log in and your whole connection is
-tunneled home, double-counting bandwidth and slowing the home network for everyone else. Nullgate
-links your devices peer-to-peer instead, so only the traffic *between your devices* uses the
-link. You reach a machine by a stable private address (e.g. `10.99.0.7`) with the RDP/SSH/etc.
-client you already use.
+machine directly — take your homelab anywhere without exposing it to the internet with an 
+end-to-end encrypted virtual network.
 
 It's like Hamachi / ZeroTier / Tailscale, but with **no accounts and no central server** — your
 devices find and authenticate each other directly (built on [iroh](https://www.iroh.computer)).
@@ -24,23 +18,23 @@ devices find and authenticate each other directly (built on [iroh](https://www.i
 > `docs/android-packaging.md`).
 
 ## What it does
-- **A private mesh of your devices.** Each gets a stable address on a `10.99.0.x` network.
+- **A private mesh of your devices.** Members get a static IP on an overlay network that routes
+  through the best available connection -- including local networks.
 - **Direct, encrypted connections.** Peer-to-peer with hole-punching; it only falls back to a
   relay if a direct path can't be made. All traffic is end-to-end encrypted.
-- **Use the tools you already have.** Point RDP, SSH, SMB, a browser, etc. at a peer's address.
+- **Use the tools you already have.** Point RDP, SSH, file shares, media servers, as if every
+  device is in the same room.
 - **Simple, verified joining.** Create a network and share a ticket (text or QR). The two
   devices show a short **emoji code** you compare to confirm it's really them, then approve.
 - **Three levels of access.** Devices are **Peers** (use the network, view the activity log),
   **Controllers** (also add/remove Peers and hand out Peer invites), or run by the **Originator**
-  (full control). Share a Peer or Controller ticket depending on how much you want to delegate;
-  Controller tickets are single-use.
+  (full control, including kicking members). Share a Peer or Controller ticket depending on how
+  much you want to delegate; optionally, tickets can be single-use to negate any attempts at abuse.
 - **A built-in activity log.** Every administrative change — who added or removed whom, role
   changes, renames — is recorded with the time and the person who did it, kept for 30 days, and
   visible to everyone on the network.
 - **Per-device privacy switches.** On your own device you can **disable remote access** (you can
   still reach others, but no one can reach you) or **hide from the member list**.
-- **Stable addresses.** Each device keeps the same `10.99.0.x` address for as long as it's a
-  member — it only changes if it leaves and rejoins.
 - **You stay in control.** Remove a device, freeze the network so no one new can join, or
   rotate its secret to reset access entirely. Removed devices drop off automatically.
 - **Stays up to date.** A small background updater keeps every device on the latest release.
@@ -62,7 +56,7 @@ curl -fsSL https://raw.githubusercontent.com/steeb-k/iroh-private-network/main/i
 
 It downloads the right build, sets up the background service (you'll be asked for your password
 once, because the service needs permission to create the virtual network interface), and enables
-daily auto-updates. On **Linux** you also need the system GTK runtime:
+daily auto-updates. On **Linux** you also need the system GTK runtime for the GUI application:
 `sudo apt install libgtk-4-1 libadwaita-1-0`. Afterwards, manage it with `nullgatectl`
 (`nullgatectl --status`, `--update`, `--uninstall`). On **macOS** the app lands in `/Applications`.
 
