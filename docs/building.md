@@ -40,6 +40,35 @@ cargo test -p ipn-core --test delete_e2e   -- --ignored   # delete boots everyon
 cargo test -p ipn-core --test rotate_e2e   -- --ignored   # rotate locks out old-ticket devices
 ```
 
+## Daemon logs & service recovery
+The privileged daemon writes its own rotating log plus a crash log, independent of the console
+(which a service manager discards). A panic hook records the panic message, source `file:line`,
+and a backtrace **synchronously** to `nullgate-daemon-crash.log` before the process can abort, so
+a crash's cause survives even a `0xc0000409` fastfail (a Rust panic reaching an abort boundary).
+
+Log directory (override with `NULLGATE_LOG_DIR`; falls back to `<data-dir>/logs` when the
+privileged path isn't writable, e.g. an unprivileged foreground run):
+
+| Platform | Directory | Rotating log | Crash log |
+|----------|-----------|--------------|-----------|
+| Windows  | `%ProgramData%\Nullgate\logs` | `nullgate-daemon.log.<date>` | `nullgate-daemon-crash.log` |
+| Linux    | `/var/log/nullgate`           | ″ (also in `journalctl -u nullgate-daemon`) | ″ |
+| macOS    | `/Library/Logs/Nullgate`      | ″ (launchd also writes `nullgate-daemon.log`) | ″ |
+
+**Auto-restart.** Each platform restarts the daemon if it exits unexpectedly:
+- **Windows** — SCM failure actions (restart after 5s, 15s, then 60s; failure counter resets after
+  a day) set at install time by both `nullgate-daemon install` and the MSI (`util:ServiceConfig`).
+  To repair an older install that predates this, run **elevated**: `nullgate-daemon recover`
+  (or `sc.exe failure NullgateDaemon reset= 86400 actions= restart/5000/restart/15000/restart/60000`
+  then `sc.exe failureflag NullgateDaemon 1`).
+- **Linux** — `Restart=on-failure` with the systemd start-rate limit disabled so a crash-loop keeps
+  recovering.
+- **macOS** — launchd `KeepAlive`.
+
+To verify the whole crash → crash-log → restart pipeline on a real install, set
+`NULLGATE_PANIC_SELFTEST=1` for the daemon: it panics right after startup, writes the crash log,
+and the service manager restarts it. Unset it afterwards.
+
 ## Android
 The Android app (`android/`, Kotlin/Compose over the `ipn-mobile` UniFFI facade) builds with the
 Android SDK + NDK. One-time setup: JDK 17, Android SDK 35, NDK r27c, `cargo install cargo-ndk`, and

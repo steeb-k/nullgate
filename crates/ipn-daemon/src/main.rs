@@ -19,6 +19,7 @@ use ipn_ipc::transport::{self, read_frame, write_frame};
 use ipn_ipc::{Frame, IpcEvent, IpcRequest, IpcResponse, Message};
 use tokio::io::AsyncWriteExt;
 
+mod logging;
 #[cfg(windows)]
 mod service;
 
@@ -51,6 +52,9 @@ enum Cmd {
     /// Stop the installed Windows service.
     #[cfg(windows)]
     Stop,
+    /// (Re)configure auto-restart recovery on the installed Windows service.
+    #[cfg(windows)]
+    Recover,
     /// Internal: SCM entry point (used by the service manager).
     #[cfg(windows)]
     #[command(hide = true)]
@@ -70,18 +74,28 @@ fn data_dir(cli: &Cli) -> PathBuf {
     cli.data_dir.clone().unwrap_or_else(default_data_dir)
 }
 
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,iroh=warn".into()),
-        )
-        .try_init();
-}
-
 fn main() -> Result<()> {
-    init_tracing();
     let cli = Cli::parse();
+
+    // Set up file logging + the crash hook before doing anything that can panic
+    // at runtime. `_log_guard` flushes the async file writer on a clean exit and
+    // must live for the whole process (including while the Windows service
+    // dispatcher blocks), so keep it bound in `main`.
+    let dd = data_dir(&cli);
+    let (_log_guard, log_dir) = logging::init(&dd);
+    tracing::info!(
+        "nullgate-daemon {} starting (pid {}); logs -> {}",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id(),
+        log_dir.display()
+    );
+
+    // Opt-in self-test for the crash → crash-log → auto-restart pipeline: set
+    // NULLGATE_PANIC_SELFTEST=1 to force a panic right after startup. Off by
+    // default; handy for confirming service recovery on a real install.
+    if std::env::var_os("NULLGATE_PANIC_SELFTEST").is_some() {
+        panic!("NULLGATE_PANIC_SELFTEST: forced panic to exercise crash logging + recovery");
+    }
 
     #[cfg(windows)]
     match cli.cmd {
@@ -98,14 +112,16 @@ fn main() -> Result<()> {
         }
         Some(Cmd::Start) => return service::manage("start").map_err(|e| anyhow::anyhow!("{e}")),
         Some(Cmd::Stop) => return service::manage("stop").map_err(|e| anyhow::anyhow!("{e}")),
+        Some(Cmd::Recover) => {
+            return service::manage("recover").map_err(|e| anyhow::anyhow!("{e}"))
+        }
         _ => {}
     }
 
     // Foreground run.
-    let data_dir = data_dir(&cli);
     let socket = cli.socket.clone().unwrap_or_else(ipn_ipc::default_socket);
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(serve(data_dir, socket, async {
+    rt.block_on(serve(dd, socket, async {
         let _ = tokio::signal::ctrl_c().await;
         tracing::info!("ctrl-c received");
     }))

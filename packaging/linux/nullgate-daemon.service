@@ -3,6 +3,11 @@ Description=Nullgate daemon
 Documentation=https://github.com/steeb-k/iroh-private-network
 After=network-online.target
 Wants=network-online.target
+# Never stop trying to recover: disabling the start-rate limit means a repeated
+# crash keeps getting restarted (RestartSec throttles the loop) instead of
+# systemd giving up after the default 5-in-10s burst. Each restart is recorded
+# in the journal (journalctl -u nullgate-daemon).
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -10,8 +15,10 @@ Type=simple
 # belt-and-suspenders (and lets you switch to a non-root User= later).
 ExecStart=/usr/local/bin/nullgate-daemon run
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+# Restart on any unclean exit — a Rust panic/abort exits non-zero, so this
+# covers the crash the Windows build hit. RestartSec paces the retry.
 Restart=on-failure
-RestartSec=2
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

@@ -69,6 +69,11 @@ daily auto-updates. On **Linux** you also need the system GTK runtime:
    member list with its private address.
 4. Connect your normal client (RDP, SSH, …) to that address, e.g. `10.99.0.7`.
 
+The background service keeps running and starts with your device. If it ever stops unexpectedly
+it restarts itself automatically, and it keeps a log (including the reason for any crash) under
+`%ProgramData%\Nullgate\logs` on Windows, `/var/log/nullgate` on Linux, and `/Library/Logs/Nullgate`
+on macOS — handy if you ever need to report a problem.
+
 ## Learn more
 - [How it works](docs/architecture.md) — the design, components, and networking details.
 - [Building from source](docs/building.md) — developer setup and packaging.

@@ -5,6 +5,20 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 ### Added
+- **Daemon crash logging + service auto-recovery (all platforms).** The privileged daemon now
+  writes its own on-disk log and installs a panic hook that records the panic message, source
+  `file:line`, and a backtrace **synchronously** to a crash log before the process exits — so a
+  crash's cause is captured even under a service manager (previously `tracing` went to a discarded
+  stdout, leaving Windows service crashes — a Rust panic surfacing as a `0xc0000409` fastfail —
+  invisible). Logs live in `%ProgramData%\Nullgate\logs` (Windows), `/var/log/nullgate` (Linux),
+  and `/Library/Logs/Nullgate` (macOS); override with `NULLGATE_LOG_DIR`. Windows service install
+  (both `nullgate-daemon install` and the MSI, via `util:ServiceConfig`) now configures SCM
+  failure actions (restart after 5s/15s/60s, reset the counter after a day) to match Linux
+  (`Restart=on-failure`) and macOS (`KeepAlive`); the Linux unit also disables the systemd
+  start-rate limit so a crash-loop keeps recovering. New hidden `nullgate-daemon recover` command
+  applies recovery to an already-installed Windows service without a reinstall, and
+  `NULLGATE_PANIC_SELFTEST=1` forces a panic to validate the crash-log + restart pipeline. See
+  `docs/building.md`.
 - **macOS build (first published artifact).** Nullgate now builds a self-contained, universal
   (arm64 + x86_64) `Nullgate.app` tarball for macOS. GTK is bundled from **conda-forge** rather
   than Homebrew so the dylibs carry `minos 11.0` and the app runs on macOS 11+, regardless of the

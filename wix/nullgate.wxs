@@ -116,7 +116,19 @@
                       Start="auto"
                       ErrorControl="normal"
                       Account="LocalSystem"
-                      Arguments="service" />
+                      Arguments="service">
+        <!-- Auto-recovery: Windows configures no failure actions by default, so
+             a daemon crash (a Rust panic → 0xc0000409 fastfail) would otherwise
+             stay down until reboot. Restart on each of the first three failures
+             (5s delay) and reset the failure counter after a day of health.
+             Mirrors set_recovery() in crates\ipn-daemon\src\service.rs. -->
+        <util:ServiceConfig
+            FirstFailureActionType="restart"
+            SecondFailureActionType="restart"
+            ThirdFailureActionType="restart"
+            RestartServiceDelayInSeconds="5"
+            ResetPeriodInDays="1" />
+      </ServiceInstall>
       <ServiceControl Id="IpnSvcControl"
                       Name="NullgateDaemon"
                       Start="install"

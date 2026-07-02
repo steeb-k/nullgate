@@ -12,8 +12,10 @@ use tokio::sync::Notify;
 use windows_service::{
     define_windows_service,
     service::{
-        ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
-        ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+        Service, ServiceAccess, ServiceAction, ServiceActionType, ServiceControl,
+        ServiceControlAccept, ServiceErrorControl, ServiceExitCode, ServiceFailureActions,
+        ServiceFailureResetPeriod, ServiceInfo, ServiceStartType, ServiceState, ServiceStatus,
+        ServiceType,
     },
     service_control_handler::{self, ServiceControlHandlerResult},
     service_dispatcher,
@@ -89,7 +91,39 @@ fn run_service() -> WsResult<()> {
     Ok(())
 }
 
-/// install / uninstall / start / stop via the service control manager.
+/// Configure SCM auto-recovery so a daemon crash restarts itself. Windows sets
+/// no failure actions by default, so without this a panic (the observed
+/// `0xc0000409` fastfail) leaves the service dead until the next boot. Restart
+/// with an escalating back-off and reset the failure counter after a day of
+/// health. Requires the handle to carry `CHANGE_CONFIG`.
+fn set_recovery(service: &Service) -> WsResult<()> {
+    let actions = ServiceFailureActions {
+        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(24 * 60 * 60)),
+        reboot_msg: None,
+        command: None,
+        actions: Some(vec![
+            ServiceAction {
+                action_type: ServiceActionType::Restart,
+                delay: Duration::from_secs(5),
+            },
+            ServiceAction {
+                action_type: ServiceActionType::Restart,
+                delay: Duration::from_secs(15),
+            },
+            ServiceAction {
+                action_type: ServiceActionType::Restart,
+                delay: Duration::from_secs(60),
+            },
+        ]),
+    };
+    service.update_failure_actions(actions)?;
+    // Also restart on a non-zero clean exit. Our graceful stop reports
+    // Stopped/0, so an intentional `stop` still won't bounce.
+    let _ = service.set_failure_actions_on_non_crash_failures(true);
+    Ok(())
+}
+
+/// install / uninstall / start / stop / recover via the service control manager.
 pub fn manage(cmd: &str) -> WsResult<()> {
     let access = ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE;
     let manager = ServiceManager::local_computer(None::<&str>, access)?;
@@ -112,6 +146,9 @@ pub fn manage(cmd: &str) -> WsResult<()> {
             let service = manager
                 .create_service(&info, ServiceAccess::CHANGE_CONFIG | ServiceAccess::START)?;
             service.set_description("Nullgate P2P virtual LAN daemon")?;
+            if let Err(e) = set_recovery(&service) {
+                tracing::warn!("could not set service recovery actions: {e}");
+            }
             let _ = service.start::<&OsStr>(&[]);
             println!("installed and started service '{SERVICE_NAME}'");
         }
@@ -133,6 +170,13 @@ pub fn manage(cmd: &str) -> WsResult<()> {
             let service = manager.open_service(SERVICE_NAME, ServiceAccess::STOP)?;
             service.stop()?;
             println!("stopped service '{SERVICE_NAME}'");
+        }
+        "recover" => {
+            // Apply/repair recovery actions on an already-installed service (e.g.
+            // one installed by an older MSI that predates this). Needs elevation.
+            let service = manager.open_service(SERVICE_NAME, ServiceAccess::CHANGE_CONFIG)?;
+            set_recovery(&service)?;
+            println!("configured auto-restart recovery for service '{SERVICE_NAME}'");
         }
         other => tracing::warn!("unknown service command: {other}"),
     }
