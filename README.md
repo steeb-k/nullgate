@@ -2,7 +2,7 @@
   <img src="img/nullgate-header.png" alt="Nullgate" />
 </p>
 
-## An iroh-based peer-to-peer virtual LAN
+## Serverless Peer-to-Peer Mesh Network
 
 Connect your own computers into a private network, wherever they are, so you can reach one
 machine directly — take your homelab anywhere without exposing it to the internet with an 
