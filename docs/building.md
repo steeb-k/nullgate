@@ -43,8 +43,30 @@ cargo test -p ipn-core --test rotate_e2e   -- --ignored   # rotate locks out old
 ## Daemon logs & service recovery
 The privileged daemon writes its own rotating log plus a crash log, independent of the console
 (which a service manager discards). A panic hook records the panic message, source `file:line`,
-and a backtrace **synchronously** to `nullgate-daemon-crash.log` before the process can abort, so
-a crash's cause survives even a `0xc0000409` fastfail (a Rust panic reaching an abort boundary).
+and a backtrace **synchronously** to `nullgate-daemon-crash.log` before the process can abort.
+
+Not every crash is a Rust `panic!`, though. A `0xc0000409` fastfail comes from `abort()` — a
+**stack overflow**, an **allocation failure**, or a native `abort()` — and deliberately bypasses
+the panic hook (and SEH, vectored handlers, and the unhandled-exception filter). Three additional
+nets cover those on Windows (see `crates\ipn-daemon\src\logging.rs`, active only under a service,
+i.e. no console):
+- **Reclaimed stderr** — `STD_ERROR_HANDLE` is pointed at the crash log so the Rust runtime's own
+  fatal messages (`thread '…' has overflowed its stack`, `memory allocation of N bytes failed`,
+  `fatal runtime error: …`) are captured instead of discarded.
+- **Vectored exception handler** — logs the code + faulting address of first-chance hardware faults
+  (access violation `0xc0000005`, stack overflow `0xc00000fd`) before they convert to an abort.
+- **WER LocalDumps** — the MSI registers a per-process minidump under
+  `HKLM\…\Windows Error Reporting\LocalDumps\nullgate-daemon.exe`, so even a bare fastfail (which
+  the in-process nets can't see) leaves a `.dmp` in `%ProgramData%\Nullgate\logs\dumps` to open with
+  WinDbg/`cdb` against the matching `nullgate_daemon.pdb`. Enable it on a machine that predates the
+  MSI change with an **elevated** PowerShell:
+  ```powershell
+  $k='HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\nullgate-daemon.exe'
+  New-Item $k -Force | Out-Null
+  New-ItemProperty $k DumpFolder 'C:\ProgramData\Nullgate\logs\dumps' -PropertyType ExpandString -Force | Out-Null
+  New-ItemProperty $k DumpType 2 -PropertyType DWord -Force | Out-Null   # 2=full, 1=mini
+  New-ItemProperty $k DumpCount 10 -PropertyType DWord -Force | Out-Null
+  ```
 
 Log directory (override with `NULLGATE_LOG_DIR`; falls back to `<data-dir>/logs` when the
 privileged path isn't writable, e.g. an unprivileged foreground run):
@@ -65,9 +87,11 @@ privileged path isn't writable, e.g. an unprivileged foreground run):
   recovering.
 - **macOS** — launchd `KeepAlive`.
 
-To verify the whole crash → crash-log → restart pipeline on a real install, set
-`NULLGATE_PANIC_SELFTEST=1` for the daemon: it panics right after startup, writes the crash log,
-and the service manager restarts it. Unset it afterwards.
+To verify the crash → crash-log → restart pipeline on a real install, set one of these for the
+daemon (then unset): `NULLGATE_PANIC_SELFTEST=1` (Rust panic → panic hook), or
+`NULLGATE_CRASH_SELFTEST=av|stackoverflow|abort` to exercise the non-panic nets — `av` (access
+violation → VEH), `stackoverflow` (→ VEH + reclaimed stderr), `abort` (bare fastfail → only the WER
+dump). `NULLGATE_FORCE_NO_CONSOLE=1` forces the service-mode capture path from a terminal.
 
 ## Android
 The Android app (`android/`, Kotlin/Compose over the `ipn-mobile` UniFFI facade) builds with the

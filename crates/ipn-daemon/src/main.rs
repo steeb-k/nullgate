@@ -61,6 +61,33 @@ enum Cmd {
     Service,
 }
 
+/// Deliberately trigger a non-panic abort, to validate the Windows crash-capture
+/// nets (VEH + reclaimed stderr) that the panic hook can't cover.
+fn crash_selftest(kind: &str) -> ! {
+    match kind {
+        // Null dereference → access violation (0xC0000005), caught first-chance
+        // by the vectored exception handler.
+        "av" => unsafe {
+            std::ptr::null_mut::<u8>().write_volatile(1);
+            std::process::abort()
+        },
+        // Unbounded recursion → stack overflow. The Rust runtime prints
+        // "has overflowed its stack" to the (reclaimed) stderr before aborting.
+        "stackoverflow" => {
+            #[allow(unconditional_recursion)]
+            fn recurse(x: u64) -> u64 {
+                let pad = std::hint::black_box([x; 256]);
+                std::hint::black_box(pad[0]).wrapping_add(recurse(x.wrapping_add(1)))
+            }
+            std::hint::black_box(recurse(std::hint::black_box(1)));
+            std::process::abort()
+        }
+        // Bare abort → 0xC0000409 fastfail. Bypasses the handlers by design; only
+        // WER LocalDumps can capture this one (prints nothing to stderr).
+        _ => std::process::abort(),
+    }
+}
+
 pub(crate) fn default_data_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("NULLGATE_DATA_DIR") {
         return PathBuf::from(d);
@@ -90,11 +117,15 @@ fn main() -> Result<()> {
         log_dir.display()
     );
 
-    // Opt-in self-test for the crash → crash-log → auto-restart pipeline: set
-    // NULLGATE_PANIC_SELFTEST=1 to force a panic right after startup. Off by
-    // default; handy for confirming service recovery on a real install.
+    // Opt-in self-tests for the crash → crash-log → auto-restart pipeline. Off by
+    // default; handy for confirming service recovery + capture on a real install.
     if std::env::var_os("NULLGATE_PANIC_SELFTEST").is_some() {
         panic!("NULLGATE_PANIC_SELFTEST: forced panic to exercise crash logging + recovery");
+    }
+    // Non-panic abort classes the panic hook can't see (this is what the real
+    // 0xc0000409 crash appears to be): NULLGATE_CRASH_SELFTEST=av|stackoverflow|abort.
+    if let Some(kind) = std::env::var_os("NULLGATE_CRASH_SELFTEST") {
+        crash_selftest(&kind.to_string_lossy());
     }
 
     #[cfg(windows)]

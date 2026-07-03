@@ -4,6 +4,18 @@ All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepa
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+### Added
+- **Capture non-panic crashes (Windows).** The daemon's crash logging previously only caught Rust
+  `panic!`s, but the recurring service crash is a `0xc0000409` fastfail from `abort()` (stack
+  overflow / allocation failure / native abort), which bypasses the panic hook. Under a service the
+  daemon now also (1) points the raw stderr handle at the crash log so the Rust runtime's own fatal
+  messages (`… has overflowed its stack`, `memory allocation of N bytes failed`, `fatal runtime
+  error: …`) are captured instead of discarded, and (2) installs a vectored exception handler that
+  logs the code + faulting address of first-chance hardware faults (access violation, stack
+  overflow) before they abort. The MSI also registers **WER LocalDumps** for `nullgate-daemon.exe`
+  (minidump to `%ProgramData%\Nullgate\logs\dumps`) so even a bare fastfail leaves an analyzable
+  dump. New `NULLGATE_CRASH_SELFTEST=av|stackoverflow|abort` (and `NULLGATE_FORCE_NO_CONSOLE=1`)
+  exercise these paths. See `docs/building.md`.
 
 ## [0.2.1] - 2026-07-01
 ### Added
