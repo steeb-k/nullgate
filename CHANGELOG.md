@@ -4,6 +4,8 @@ All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepa
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+
+## [0.2.3] - 2026-07-03
 ### Added
 - **Memory watchdog (iroh #4293 stopgap).** The daemon now samples its own resident memory every
   30 s and, past a limit (default 1024 MB), logs why and restarts itself via the service manager.
