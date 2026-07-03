@@ -63,6 +63,13 @@ const CONFIG_FILE: &str = "network.cbor";
 /// enough that new members / removals / audit entries appear within a few seconds.
 const DOC_RESYNC_MS: u64 = 8_000;
 
+/// Upper bound on a single mesh dial (`endpoint.connect()` + admission handshake).
+/// Without this an unreachable member's `connect()` can stay pending indefinitely;
+/// combined with the periodic re-dial that would accumulate iroh connection/path
+/// state every tick (see the daemon memory-growth investigation). Generous enough
+/// for a slow relay+holepunch path on a healthy network.
+const DIAL_TIMEOUT: Duration = Duration::from_secs(20);
+
 // ---------------------------------------------------------------------------
 // Persisted configuration
 // ---------------------------------------------------------------------------
@@ -307,6 +314,12 @@ struct Inner {
     doc_sync_set: StdMutex<std::collections::BTreeSet<Id>>,
     /// Last time (ms) we (re)seeded the roster-doc live-sync swarm.
     last_doc_sync: AtomicU64,
+    /// Members with a mesh dial currently in flight, so the periodic tick doesn't
+    /// stack a fresh `connect()` on top of one already in progress. Without this,
+    /// an offline member accrued a new connection attempt (and its iroh path/QUIC
+    /// state) every tick, which never got reclaimed — the daemon memory leak. Held
+    /// in an `Arc` so the fan-out helper can be exercised without a live node.
+    dialing: DialingSet,
     /// This device blocks inbound remote access (one-way; outbound still works).
     /// Read lock-free on the per-packet inbound path, so it lives on `Inner`.
     remote_access_disabled: AtomicBool,
@@ -391,6 +404,7 @@ impl Engine {
             assigned_ip: StdRwLock::new(None),
             doc_sync_set: StdMutex::new(std::collections::BTreeSet::new()),
             last_doc_sync: AtomicU64::new(0),
+            dialing: DialingSet::default(),
             remote_access_disabled: AtomicBool::new(prefs.remote_access_disabled),
             hidden: AtomicBool::new(prefs.hidden),
             conntrack: Conntrack::default(),
@@ -1533,16 +1547,15 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
         st.roster = roster.clone();
     }
 
-    // Dial missing members (off-lock).
-    for peer in to_dial {
-        let inner = inner.clone();
-        let psk = cfg.secret().psk();
-        tokio::spawn(async move {
-            if let Err(e) = dial_member(&inner, peer, psk).await {
-                tracing::debug!("dial {} failed: {e:#}", short(&peer));
-            }
-        });
-    }
+    // Dial missing members (off-lock). `spawn_dials` skips peers already being
+    // dialed and bounds each attempt, so an unreachable member doesn't accumulate
+    // a fresh `connect()` (and its iroh path/QUIC state) every tick.
+    let psk = cfg.secret().psk();
+    let dial_inner = inner.clone();
+    spawn_dials(&inner.dialing, to_dial, move |peer| {
+        let inner = dial_inner.clone();
+        async move { dial_member(&inner, peer, psk).await }
+    });
 
     // Keep the roster-doc's live-sync gossip swarm seeded with **all** current
     // members, not just the one peer we synced with at join time. iroh-docs only
@@ -1703,6 +1716,58 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
 
     let _ = inner.events.send(EngineEvent::Changed);
     Ok(())
+}
+
+/// The set of peers with a mesh dial currently in flight (see [`Inner::dialing`]).
+/// Shared, so [`spawn_dials`] and [`DialSlot`] depend only on this — the dedup +
+/// timeout invariant is unit-testable without constructing a whole [`Inner`].
+type DialingSet = Arc<StdMutex<std::collections::HashSet<Id>>>;
+
+/// Frees a peer's in-flight-dial slot when dropped, so a dial that fails, times
+/// out, or panics can't leave the peer permanently un-redialable.
+struct DialSlot {
+    dialing: DialingSet,
+    peer: Id,
+}
+
+impl Drop for DialSlot {
+    fn drop(&mut self) {
+        self.dialing.lock().unwrap().remove(&self.peer);
+    }
+}
+
+/// Spawn a bounded, de-duplicated mesh dial for each peer in `to_dial`.
+///
+/// This is the fix for the daemon memory leak: the periodic tick calls it every
+/// few seconds with every member we aren't connected to, so without a guard an
+/// unreachable member spawned a brand-new `connect()` each time and its iroh
+/// connection/path state piled up forever. Here a peer already in `dialing` is
+/// skipped, and each attempt is wrapped in [`DIAL_TIMEOUT`] so a `connect()` that
+/// never resolves can't pin resources; the [`DialSlot`] guard frees the slot on
+/// every exit path (success, error, timeout, or panic) so retries still happen.
+fn spawn_dials<F, Fut>(dialing: &DialingSet, to_dial: Vec<Id>, dial: F)
+where
+    F: Fn(Id) -> Fut + Clone + Send + 'static,
+    Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+{
+    for peer in to_dial {
+        // `insert` returns false if a dial to this peer is already in flight.
+        if !dialing.lock().unwrap().insert(peer) {
+            continue;
+        }
+        let dialing = dialing.clone();
+        let dial = dial.clone();
+        tokio::spawn(async move {
+            let _slot = DialSlot { dialing, peer };
+            match tokio::time::timeout(DIAL_TIMEOUT, dial(peer)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::debug!("dial {} failed: {e:#}", short(&peer)),
+                Err(_) => {
+                    tracing::debug!("dial {} timed out after {}s", short(&peer), DIAL_TIMEOUT.as_secs())
+                }
+            }
+        });
+    }
 }
 
 async fn dial_member(inner: &Arc<Inner>, peer: Id, psk: [u8; 32]) -> Result<()> {
@@ -2508,4 +2573,117 @@ async fn read_msg<T: DeserializeOwned>(recv: &mut RecvStream) -> Result<T> {
     let mut buf = vec![0u8; len];
     recv.read_exact(&mut buf).await.context("read body")?;
     ciborium::from_reader(buf.as_slice()).context("decode msg")
+}
+
+/// Regression tests for the daemon memory leak: the periodic tick fanned out a
+/// brand-new `connect()` to every not-yet-connected member each interval, so an
+/// unreachable member accrued iroh connection/path state without bound. The fix is
+/// [`spawn_dials`] — dedup an in-flight dial + bound it with [`DIAL_TIMEOUT`]. These
+/// drive it directly (no live node) on tokio's paused clock, asserting the exact
+/// invariant the leak violated: **repeated ticks never stack dials, and the slot is
+/// freed on timeout so retries still happen**.
+#[cfg(test)]
+mod dial_tests {
+    use super::*;
+    use std::future::pending;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn id(n: u8) -> Id {
+        [n; 32]
+    }
+
+    /// Yield enough times for any runnable spawned task to make progress under the
+    /// current-thread test runtime (deterministic while the clock is paused).
+    async fn settle() {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_ticks_launch_at_most_one_dial_per_peer() {
+        let dialing = DialingSet::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let peer = id(1);
+
+        // A dialer standing in for an unreachable member: it never resolves, so the
+        // dial stays "in flight" exactly like a `connect()` that can't complete.
+        let dial = {
+            let calls = calls.clone();
+            move |_peer: Id| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async move { pending::<Result<()>>().await }
+            }
+        };
+
+        // The leak reproduced: 500 ticks for the same unreachable peer. Pre-fix this
+        // spawned 500 dials; the guard must collapse them to a single in-flight one.
+        for _ in 0..500 {
+            spawn_dials(&dialing, vec![peer], dial.clone());
+        }
+        settle().await;
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "500 ticks must launch exactly one in-flight dial, not one per tick"
+        );
+        assert_eq!(dialing.lock().unwrap().len(), 1, "peer tracked as in-flight");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dial_slot_frees_on_timeout_so_retry_can_happen() {
+        let dialing = DialingSet::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let peer = id(2);
+        let dial = {
+            let calls = calls.clone();
+            move |_peer: Id| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async move { pending::<Result<()>>().await }
+            }
+        };
+
+        spawn_dials(&dialing, vec![peer], dial.clone());
+        settle().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(dialing.lock().unwrap().contains(&peer), "in flight before timeout");
+
+        // Past the bound, the stuck dial is abandoned and its slot released — this is
+        // what stops the unbounded accumulation while still permitting a later retry.
+        tokio::time::advance(DIAL_TIMEOUT + Duration::from_secs(1)).await;
+        settle().await;
+        assert!(
+            !dialing.lock().unwrap().contains(&peer),
+            "slot must be freed once the dial times out"
+        );
+
+        // The next tick is now free to re-dial the (still unreachable) peer.
+        spawn_dials(&dialing, vec![peer], dial.clone());
+        settle().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "retry after the slot freed");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn distinct_peers_each_get_their_own_dial() {
+        // Dedup is per-peer, not global: independent members must all be dialed.
+        let dialing = DialingSet::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dial = {
+            let calls = calls.clone();
+            move |_peer: Id| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async move { pending::<Result<()>>().await }
+            }
+        };
+
+        let peers = vec![id(1), id(2), id(3)];
+        spawn_dials(&dialing, peers.clone(), dial.clone());
+        // A second tick with the same set must add nothing (all already in flight).
+        spawn_dials(&dialing, peers, dial.clone());
+        settle().await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "one dial per distinct peer");
+        assert_eq!(dialing.lock().unwrap().len(), 3);
+    }
 }

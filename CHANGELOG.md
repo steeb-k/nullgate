@@ -17,6 +17,17 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   dump. New `NULLGATE_CRASH_SELFTEST=av|stackoverflow|abort` (and `NULLGATE_FORCE_NO_CONSOLE=1`)
   exercise these paths. See `docs/building.md`.
 
+### Fixed
+- **Daemon memory leak on an unreachable member.** The periodic maintenance tick fanned out a fresh
+  `endpoint.connect()` to every roster member we weren't currently connected to — every 3 seconds,
+  with no timeout and no dedup. A member that was offline (or on a thrashing network path) never
+  entered the connected set, so each tick spawned another dial whose iroh connection/path state was
+  never reclaimed; over a multi-day run the daemon's committed heap grew into the tens of GB (and the
+  resulting paging pinned the CPU). Dials are now de-duplicated (one in-flight attempt per peer) and
+  each is bounded by a 20 s timeout, with the in-flight slot freed on every exit path so retries
+  still happen. New `engine::spawn_dials` with `#[tokio::test]` coverage of the invariant (repeated
+  ticks never stack dials; the slot frees on timeout). See `docs/architecture.md`.
+
 ## [0.2.1] - 2026-07-01
 ### Added
 - **Headless verification over the CLI.** `nullgate-cli` can now drive a full join without a GUI.

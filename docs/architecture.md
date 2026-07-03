@@ -14,6 +14,12 @@ the membership list is a small signed document every member replicates.
 - Members form a **full mesh** of authenticated connections. iroh does NAT hole-punching for
   direct links and falls back to a relay only when a direct path can't be established. (n0 runs
   free public relays; self-hosting is on the roadmap.)
+- A periodic **maintenance tick** reconciles the mesh: it rebuilds the roster, tears down
+  connections to non-members, and dials any member we aren't yet connected to. Dialing is
+  **de-duplicated and time-bounded** (`engine::spawn_dials`) — at most one in-flight `connect()`
+  per peer, each capped by `DIAL_TIMEOUT`, with the slot freed on completion/timeout. This matters
+  because an unreachable member is retried on every tick indefinitely; without the guard those
+  attempts (and their iroh connection/path state) accumulated without bound.
 - Each member's virtual IP on the `10.99.0.0/24` subnet is **derived deterministically from its
   NodeId** during the roster fold (so every node computes the same collision-free map and no two
   members can be handed the same address, even on simultaneous approvals). A **TUN interface**
