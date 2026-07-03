@@ -4,6 +4,21 @@ All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepa
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+### Added
+- **Memory watchdog (iroh #4293 stopgap).** The daemon now samples its own resident memory every
+  30 s and, past a limit (default 1024 MB), logs why and restarts itself via the service manager.
+  This bounds the unbounded growth of iroh 1.0's per-remote mapped-address cache
+  (`socket::mapped_addrs::AddrMap`, [iroh#4293](https://github.com/n0-computer/iroh/issues/4293)) —
+  which the captured minidump showed reaching a single ~80 GB allocation before the `0xc0000409`
+  OOM abort. The cache lives inside the iroh node (built once per process, never rebuilt), so only a
+  restart reclaims it. Overrides: `NULLGATE_MEM_LIMIT_MB` (`0` disables), `NULLGATE_MEM_CHECK_SECS`.
+  Remove once the upstream eviction fix ships. `ipn-daemon/src/watchdog.rs`; see
+  `docs/architecture.md`.
+- **"Came online" notification debounce.** To absorb the brief presence blips from those
+  watchdog restarts, the desktop app only announces a peer as back online once it has been offline
+  for at least 2 minutes (`NULLGATE_ONLINE_DEBOUNCE_SECS`), so a restarting device no longer spams
+  every machine on the mesh. Pure decision logic factored out of `notify_newly_online` with unit
+  tests.
 
 ## [0.2.2] - 2026-07-02
 ### Added

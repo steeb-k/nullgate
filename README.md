@@ -69,10 +69,13 @@ On **macOS** the app lands in `/Applications`.
    member list with its private address.
 4. Connect your normal client (RDP, SSH, …) to that address, e.g. `10.99.0.7`.
 
-The background service keeps running and starts with your device. If it ever stops unexpectedly
-it restarts itself automatically, and it keeps a log (including the reason for any crash) under
-`%ProgramData%\Nullgate\logs` on Windows, `/var/log/nullgate` on Linux, and `/Library/Logs/Nullgate`
-on macOS — handy if you ever need to report a problem.
+The background service keeps running and starts with your device. If it ever stops unexpectedly —
+or if its memory use climbs too high (a safeguard against a leak in the underlying networking
+library) — it restarts itself automatically, and it keeps a log (including the reason for any crash
+or restart) under `%ProgramData%\Nullgate\logs` on Windows, `/var/log/nullgate` on Linux, and
+`/Library/Logs/Nullgate` on macOS — handy if you ever need to report a problem. A device that comes
+back within a couple of minutes of one of these quick restarts won't spam everyone with a "came
+online" notification.
 
 ### Headless / CLI
 No GUI (a server, a box you only SSH into)? Drive the same daemon with `nullgate-cli` — GTK isn't

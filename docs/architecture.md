@@ -70,6 +70,27 @@ outbound TUN→mesh path); when the block (or hide) is on, the inbound path admi
 traffic for a tracked flow. The toggle is an `AtomicBool` on the engine's `Inner` (read lock-free
 per packet, never behind the async state mutex), persisted in `device_prefs.cbor`.
 
+## Reliability: memory watchdog + presence-blip debounce
+**Memory watchdog (iroh #4293 stopgap).** iroh 1.0's per-remote mapped-address cache
+(`socket::mapped_addrs::AddrMap`) is never pruned — every distinct transport address it sees mints a
+permanent entry in two `FxHashMap`s — so under address churn the daemon's resident memory grows
+without bound until an allocation aborts the process (the captured minidump was a single ~80 GB
+request → `0xc0000409`). Those maps live inside the iroh node, which `Engine::start` builds once and
+never rebuilds (`set_online` does not recreate it), so only a **process restart** reclaims them.
+`ipn-daemon/src/watchdog.rs` samples the daemon's own RSS every 30 s and, past a limit (default
+1024 MB; override `NULLGATE_MEM_LIMIT_MB`, `NULLGATE_MEM_CHECK_SECS`; `0` disables), records the
+reason to the crash log and exits with code 92 so the service manager (SCM failure actions / systemd
+`Restart=on-failure` / launchd `KeepAlive`, all already configured for crash recovery) restarts it —
+bounding memory far below the abort. Remove once
+[iroh#4293](https://github.com/n0-computer/iroh/issues/4293) ships an eviction fix.
+
+**Presence-blip debounce.** A watchdog restart (or any brief drop) makes a device flap
+offline→online within seconds, which every *other* machine's daemon observes — and would otherwise
+turn into a "came online" notification each time. The GUI (`notify_newly_online`) tracks, per peer,
+when it first went dark this session and only announces a return once the absence has exceeded a
+threshold (default 2 minutes; `NULLGATE_ONLINE_DEBOUNCE_SECS`), so routine restarts stay silent
+while a genuine reconnection still notifies.
+
 ## Components (crates)
 - `ipn-core` — the engine: iroh node, signed roster, admission + emoji verification, presence,
   and TUN routing. UI- and IPC-agnostic (also the basis for a future Android build).

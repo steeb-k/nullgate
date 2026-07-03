@@ -22,6 +22,7 @@ use tokio::io::AsyncWriteExt;
 mod logging;
 #[cfg(windows)]
 mod service;
+mod watchdog;
 
 #[derive(Parser)]
 #[command(name = "nullgate-daemon", about = "Privileged Nullgate daemon (owns TUN + iroh node)", version)]
@@ -166,6 +167,10 @@ where
     tracing::info!("starting engine (data dir: {})", data_dir.display());
     let engine = Engine::start(&data_dir).await?;
     tracing::info!("node id: {}", engine.self_node_id_hex());
+
+    // Guard against iroh's unbounded mapped-address cache (iroh#4293): restart the
+    // process before its resident memory runs away into the OOM abort we captured.
+    watchdog::spawn(data_dir.clone());
 
     let listener = transport::bind(&socket)?;
     tracing::info!("listening on {}", socket.display());

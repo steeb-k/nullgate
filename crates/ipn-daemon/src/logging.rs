@@ -171,6 +171,23 @@ fn install_panic_hook(crash_log: PathBuf) {
     }));
 }
 
+/// Append a synchronous, flushed note to the crash log — the same durable sink
+/// the panic hook uses. For events we want on disk even though the async tracing
+/// writer may not flush before the process exits: e.g. the memory watchdog
+/// recording *why* it forced a restart immediately before calling `exit`.
+pub fn append_crash_note(data_dir: &Path, header: &str, body: &str) {
+    let path = resolve_log_dir(data_dir).join(CRASH_LOG);
+    let record = format!(
+        "\n==== {header} {stamp} (pid {pid}) ====\n{body}\n",
+        stamp = now_rfc3339_ish(),
+        pid = std::process::id(),
+    );
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(record.as_bytes());
+        let _ = f.flush();
+    }
+}
+
 fn payload_str(info: &std::panic::PanicHookInfo<'_>) -> String {
     let p = info.payload();
     if let Some(s) = p.downcast_ref::<&str>() {

@@ -31,4 +31,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Diagnostics_Debug_Extensions",
     "Win32_System_Kernel",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
 ] }
+
+# macOS has no /proc; the memory watchdog reads RSS via getrusage(2).
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

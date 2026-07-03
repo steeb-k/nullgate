@@ -20,6 +20,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use adw::prelude::*;
 use gtk::glib;
@@ -718,6 +719,10 @@ fn build_ui(
     // anything visible don't tear down + recreate widgets — which would steal
     // keyboard focus / clicks. `""` forces the next render.
     let last_sig: Rc<RefCell<String>> = Default::default();
+    // Per-peer time we first observed it offline this session, so we can announce
+    // "came online" only after a real absence — not the momentary presence blips
+    // caused by the daemon's memory-watchdog restarts (see `notify_newly_online`).
+    let offline_since: Rc<RefCell<HashMap<String, Instant>>> = Default::default();
 
     {
         let ui = ui.clone();
@@ -727,6 +732,7 @@ fn build_ui(
         let state = state.clone();
         let pending = pending.clone();
         let last_sig = last_sig.clone();
+        let offline_since = offline_since.clone();
         let app_n = app.clone();
         let add_btn = add_btn.clone();
         glib::spawn_future_local(async move {
@@ -734,7 +740,12 @@ fn build_ui(
                 match msg {
                     UiMsg::Status(Some(s)) => {
                         add_btn.set_visible(false); // already in a network
-                        notify_newly_online(&app_n, state.borrow().as_ref(), &s);
+                        notify_newly_online(
+                            &app_n,
+                            state.borrow().as_ref(),
+                            &s,
+                            &mut offline_since.borrow_mut(),
+                        );
                         pending
                             .borrow_mut()
                             .retain(|p| !s.members.iter().any(|m| m.node_id == p.node_id));
@@ -2308,14 +2319,48 @@ fn init_windows_app_id() {
 }
 
 /// Notify when a member transitions offline→online (skips the first render).
-fn notify_newly_online(app: &adw::Application, prev: Option<&NetworkStatus>, new: &NetworkStatus) {
-    let Some(prev) = prev else { return };
+/// How long a peer must have been offline before we announce it came back online.
+/// This absorbs the brief presence blips from the daemon's memory-watchdog
+/// restarts (iroh#4293 stopgap) so a device restarting doesn't spam every machine
+/// on the mesh with "came online". Override with `NULLGATE_ONLINE_DEBOUNCE_SECS`.
+fn online_notify_debounce() -> Duration {
+    const DEFAULT_SECS: u64 = 120; // 2 minutes — headroom for slower machines.
+    let secs = std::env::var("NULLGATE_ONLINE_DEBOUNCE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_SECS);
+    Duration::from_secs(secs)
+}
+
+/// Notify when a peer transitions offline→online, but only after it had been
+/// offline for at least [`online_notify_debounce`]. `offline_since` records, per
+/// peer, when we first observed it dark this session; a peer that reappears sooner
+/// than the debounce (a restart blip) is announced silently.
+fn notify_newly_online(
+    app: &adw::Application,
+    prev: Option<&NetworkStatus>,
+    new: &NetworkStatus,
+    offline_since: &mut HashMap<String, Instant>,
+) {
+    let debounce = online_notify_debounce();
+    let now = Instant::now();
     for m in &new.members {
-        if m.is_self || !m.online {
+        if m.is_self {
             continue;
         }
-        let was_online = prev.members.iter().any(|p| p.node_id == m.node_id && p.online);
-        if !was_online {
+        let was_online_prev = prev
+            .map(|p| p.members.iter().any(|q| q.node_id == m.node_id && q.online))
+            .unwrap_or(false);
+        let announce = online_transition_notifies(
+            &m.node_id,
+            m.online,
+            prev.is_some(),
+            was_online_prev,
+            offline_since,
+            now,
+            debounce,
+        );
+        if announce {
             let name = m
                 .label
                 .clone()
@@ -2324,6 +2369,38 @@ fn notify_newly_online(app: &adw::Application, prev: Option<&NetworkStatus>, new
             notify(app, &format!("{name} came online"), None);
         }
     }
+    // Forget peers no longer in the network so the map can't accrete stale ids.
+    offline_since.retain(|id, _| new.members.iter().any(|m| &m.node_id == id));
+}
+
+/// Pure decision + bookkeeping for one peer, factored out of [`notify_newly_online`]
+/// so the debounce timing is testable without GTK. Updates `offline_since` and
+/// returns whether to show a "came online" toast. `now`/`debounce` are injected so
+/// tests can drive the clock deterministically.
+fn online_transition_notifies(
+    node_id: &str,
+    online: bool,
+    have_baseline: bool,
+    was_online_prev: bool,
+    offline_since: &mut HashMap<String, Instant>,
+    now: Instant,
+    debounce: Duration,
+) -> bool {
+    if !online {
+        // Offline now: remember when it first went dark (keep the earliest stamp).
+        offline_since.entry(node_id.to_string()).or_insert(now);
+        return false;
+    }
+    // Back online: clear any offline stamp and measure how long it was gone.
+    let was_offline_for = offline_since.remove(node_id).map(|t| now.duration_since(t));
+    // First snapshot (no baseline) adopts state silently; an already-online peer
+    // is no transition at all.
+    if !have_baseline || was_online_prev {
+        return false;
+    }
+    // Suppress a brief absence (a watchdog restart blip); announce a real return,
+    // or a peer we never observed offline (e.g. one just added to the network).
+    !was_offline_for.is_some_and(|d| d < debounce)
 }
 
 /// The emoji SAS, laid out in fixed, symmetric rows so it looks identical on the
@@ -2460,5 +2537,70 @@ fn fmt_last_seen(ms: u64) -> String {
         format!("{}m ago", secs / 60)
     } else {
         format!("{}h ago", secs / 3600)
+    }
+}
+
+#[cfg(test)]
+mod online_debounce_tests {
+    use super::*;
+
+    const DB: Duration = Duration::from_secs(120);
+
+    /// A peer offline longer than the debounce, then back, is announced.
+    #[test]
+    fn long_absence_notifies() {
+        let mut seen = HashMap::new();
+        let t0 = Instant::now();
+        // Observed offline at t0 (baseline exists, was offline in prev).
+        assert!(!online_transition_notifies("a", false, true, false, &mut seen, t0, DB));
+        // Back online 200s later → real return.
+        let later = t0 + Duration::from_secs(200);
+        assert!(online_transition_notifies("a", true, true, false, &mut seen, later, DB));
+        assert!(!seen.contains_key("a")); // stamp cleared
+    }
+
+    /// A restart blip (offline < debounce) is suppressed.
+    #[test]
+    fn brief_blip_is_silent() {
+        let mut seen = HashMap::new();
+        let t0 = Instant::now();
+        assert!(!online_transition_notifies("a", false, true, false, &mut seen, t0, DB));
+        let later = t0 + Duration::from_secs(20); // watchdog-restart-sized gap
+        assert!(!online_transition_notifies("a", true, true, false, &mut seen, later, DB));
+    }
+
+    /// The earliest offline stamp wins, so repeated offline snapshots don't reset
+    /// the clock and let a long absence masquerade as a blip.
+    #[test]
+    fn offline_stamp_is_not_reset() {
+        let mut seen = HashMap::new();
+        let t0 = Instant::now();
+        online_transition_notifies("a", false, true, false, &mut seen, t0, DB);
+        // Seen offline again 90s later — must keep the t0 stamp.
+        online_transition_notifies("a", false, true, false, &mut seen, t0 + Duration::from_secs(90), DB);
+        // Online at t0+130s → 130s ≥ 120s from the *original* stamp → notify.
+        assert!(online_transition_notifies("a", true, true, false, &mut seen, t0 + Duration::from_secs(130), DB));
+    }
+
+    /// No baseline snapshot (first status, or just-reconnected) never notifies.
+    #[test]
+    fn first_snapshot_is_silent() {
+        let mut seen = HashMap::new();
+        assert!(!online_transition_notifies("a", true, false, false, &mut seen, Instant::now(), DB));
+    }
+
+    /// A peer already online in the previous snapshot is no transition.
+    #[test]
+    fn already_online_is_no_transition() {
+        let mut seen = HashMap::new();
+        assert!(!online_transition_notifies("a", true, true, true, &mut seen, Instant::now(), DB));
+    }
+
+    /// A peer that appears online without ever being seen offline (e.g. just added
+    /// to the network) is announced.
+    #[test]
+    fn never_seen_offline_notifies() {
+        let mut seen = HashMap::new();
+        assert!(online_transition_notifies("a", true, true, false, &mut seen, Instant::now(), DB));
     }
 }
