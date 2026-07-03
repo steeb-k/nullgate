@@ -4,6 +4,8 @@ All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepa
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+
+## [0.2.2] - 2026-07-02
 ### Added
 - **Capture non-panic crashes (Windows).** The daemon's crash logging previously only caught Rust
   `panic!`s, but the recurring service crash is a `0xc0000409` fastfail from `abort()` (stack

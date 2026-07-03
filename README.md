@@ -11,7 +11,7 @@ end-to-end encrypted virtual network.
 It's like Hamachi / ZeroTier / Tailscale, but with **no accounts and no central server** — your
 devices find and authenticate each other directly (built on [iroh](https://www.iroh.computer)).
 
-> **Status:** 0.2.1, under active testing. Works on **Windows, Linux, macOS, and Android**
+> **Status:** 0.2.2, under active testing. Works on **Windows, Linux, macOS, and Android**
 > (the Android app is Kotlin/Compose and routes traffic through Android's built-in VPN). Grab an
 > installer or the APK from the
 > [Releases](https://github.com/steeb-k/iroh-private-network/releases) page (Android build details:
