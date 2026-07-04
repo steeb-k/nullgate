@@ -78,7 +78,7 @@ back within a couple of minutes of one of these quick restarts won't spam everyo
 online" notification.
 
 ### Headless / CLI
-No GUI (a server, a box you only SSH into)? Drive the same daemon with `nullgate-cli` — GTK isn't
+No GUI? Drive the same daemon with `nullgate-cli` — GTK isn't
 needed. The verification code is shown as **words** instead of emojis, so you can read it aloud or
 paste it over chat and compare it exactly.
 
