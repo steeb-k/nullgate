@@ -68,9 +68,14 @@ On **macOS** the app lands in `/Applications`.
 ## Using it
 1. On one device: **+ → Create a network**, then share the ticket (copy it, or show the QR).
 2. On the other: **+ → Join with a ticket** and paste it. Both screens show an emoji code.
-3. Back on the first device, **Approve** if the emoji codes match. The new device appears in the
-   member list with its private address.
+3. Back on the first device, a banner across the top says a device wants to join — click **Review**
+   to open the approval screen, then **Approve** if the emoji codes match. The new device appears in
+   the member list with its private address.
 4. Connect your normal client (RDP, SSH, …) to that address, e.g. `10.99.0.7`.
+
+If the background service is ever stopped or not carrying traffic, the app shows a banner across the
+top with a **Start service** / **Restart service** button — clicking it prompts for your admin
+password and starts the service for you (no need to open a terminal).
 
 The background service keeps running and starts with your device. If it ever stops unexpectedly —
 or if its memory use climbs too high (a safeguard against a leak in the underlying networking

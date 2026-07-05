@@ -30,6 +30,7 @@ use ipn_ipc::{
 };
 use tokio::runtime::Handle;
 
+mod service_ctl;
 mod tray;
 
 const APP_ID: &str = "io.github.steeb_k.Nullgate";
@@ -96,6 +97,26 @@ impl Net {
     /// Push a transient toast to the UI from the GTK thread (synchronous callers).
     fn toast(&self, msg: impl Into<String>) {
         let _ = self.tx.try_send(UiMsg::Toast(msg.into()));
+    }
+
+    /// (Re)start the privileged daemon service, prompting for elevation. The
+    /// blocking OS auth prompt runs on the runtime (never the GTK thread); success
+    /// is left to the reconnect loop to notice, so only failures toast back.
+    fn restart_service(&self) {
+        let tx = self.tx.clone();
+        self.handle.spawn(async move {
+            match tokio::task::spawn_blocking(crate::service_ctl::restart_daemon_service).await {
+                Ok(Ok(())) => {} // reconnect loop clears the banner when the daemon returns
+                Ok(Err(e)) => {
+                    let _ = tx.send(UiMsg::Toast(e)).await;
+                }
+                Err(_) => {
+                    let _ = tx
+                        .send(UiMsg::Toast("Couldn't launch the elevation prompt.".into()))
+                        .await;
+                }
+            }
+        });
     }
 
     /// Ask the UI to re-render the current status.
@@ -399,6 +420,12 @@ struct Ui {
     split: adw::OverlaySplitView,
     stack: gtk::Stack,
     main_box: gtk::Box,
+    /// Full-width banner (a ToolbarView top bar, so it survives page rebuilds) for
+    /// the service state: daemon down / offline / routing off, with a (re)start button.
+    service_banner: adw::Banner,
+    /// Full-width banner announcing pending join requests, with a Review button that
+    /// opens the admin flyout's emoji-SAS approval screen.
+    join_banner: adw::Banner,
     admin_box: gtk::Box,
     diag_box: gtk::Box,
     ticket_box: gtk::Box,
@@ -509,6 +536,13 @@ fn build_ui(
     let main_scroller = gtk::ScrolledWindow::builder().child(&clamp).vexpand(true).build();
     let main_toolbar = adw::ToolbarView::new();
     main_toolbar.add_top_bar(&header);
+    // Two full-width banners below the header (outside the Clamp, so they span the
+    // window like other GNOME apps and aren't torn down by main_box rebuilds). Both
+    // start hidden; the receiver reveals/updates them per state. They can stack.
+    let service_banner = adw::Banner::builder().revealed(false).build();
+    let join_banner = adw::Banner::builder().revealed(false).build();
+    main_toolbar.add_top_bar(&service_banner);
+    main_toolbar.add_top_bar(&join_banner);
     main_toolbar.set_content(Some(&main_scroller));
 
     // --- flyout: an overlay sidebar (kept collapsed → always overlays the content
@@ -679,6 +713,8 @@ fn build_ui(
         split,
         stack,
         main_box,
+        service_banner,
+        join_banner,
         admin_box,
         diag_box,
         ticket_box,
@@ -693,6 +729,20 @@ fn build_ui(
     };
 
     render_placeholder(&ui, &connecting_page());
+
+    // Banner actions, wired once. The service banner's button (re)starts the daemon
+    // (elevated); the join banner's button opens the emoji-SAS approval screen.
+    {
+        let net = net.clone();
+        ui.service_banner.connect_button_clicked(move |_| {
+            net.restart_service();
+            net.toast("Starting the Nullgate service…");
+        });
+    }
+    {
+        let ui2 = ui.clone();
+        ui.join_banner.connect_button_clicked(move |_| ui2.open("admin"));
+    }
 
     {
         let net = net.clone();
@@ -757,6 +807,8 @@ fn build_ui(
                         add_btn.set_visible(true); // no network — offer create/join
                         *state.borrow_mut() = None;
                         last_sig.borrow_mut().clear();
+                        set_service_banner(&ui, ServiceBanner::Hidden);
+                        ui.join_banner.set_revealed(false);
                         render_placeholder(&ui, &empty_page(&net, &window));
                     }
                     UiMsg::Refresh => {
@@ -768,12 +820,16 @@ fn build_ui(
                         add_btn.set_visible(false);
                         *state.borrow_mut() = None;
                         last_sig.borrow_mut().clear();
+                        set_service_banner(&ui, ServiceBanner::DaemonDown);
+                        ui.join_banner.set_revealed(false);
                         render_placeholder(&ui, &daemon_down_page());
                     }
                     UiMsg::VersionMismatch { daemon, gui } => {
                         add_btn.set_visible(false);
                         *state.borrow_mut() = None;
                         last_sig.borrow_mut().clear();
+                        set_service_banner(&ui, ServiceBanner::Hidden);
+                        ui.join_banner.set_revealed(false);
                         render_placeholder(&ui, &version_mismatch_page(daemon, gui));
                     }
                     UiMsg::UpdateApplied => restart_self(&window),
@@ -1010,6 +1066,47 @@ fn render_placeholder(ui: &Ui, page: &adw::StatusPage) {
     ui.main_box.append(page);
 }
 
+/// The service-state banner's condition (mutually exclusive at any moment).
+enum ServiceBanner {
+    Hidden,
+    DaemonDown,
+    Offline,
+    RoutingOff,
+}
+
+/// Set the full-width service banner's message + button for the current condition.
+/// The button is wired once (see `build_ui`) and always (re)starts the service.
+fn set_service_banner(ui: &Ui, st: ServiceBanner) {
+    let b = &ui.service_banner;
+    match st {
+        ServiceBanner::Hidden => b.set_revealed(false),
+        ServiceBanner::DaemonDown => {
+            b.set_title("The Nullgate service isn't running");
+            b.set_button_label(Some("Start service"));
+            b.set_revealed(true);
+        }
+        ServiceBanner::Offline => {
+            b.set_title("Disconnected — the service lost its connection");
+            b.set_button_label(Some("Restart service"));
+            b.set_revealed(true);
+        }
+        ServiceBanner::RoutingOff => {
+            b.set_title("Routing is off — traffic isn't being carried");
+            b.set_button_label(Some("Restart service"));
+            b.set_revealed(true);
+        }
+    }
+}
+
+/// Banner text for pending join requests, pluralized by count.
+fn join_banner_text(n: usize) -> String {
+    if n <= 1 {
+        "A new device has requested network access".to_string()
+    } else {
+        format!("{n} devices have requested network access")
+    }
+}
+
 fn connecting_page() -> adw::StatusPage {
     let spinner = gtk::Spinner::builder().width_request(32).height_request(32).build();
     spinner.start();
@@ -1022,14 +1119,12 @@ fn connecting_page() -> adw::StatusPage {
         .build()
 }
 
+/// The body shown under the service banner while the daemon is down. The banner
+/// above carries the message + Start button; this is just the ambient illustration.
 fn daemon_down_page() -> adw::StatusPage {
     adw::StatusPage::builder()
         .icon_name("network-error-symbolic")
-        .title("Service not running")
-        .description(
-            "The privileged nullgate-daemon isn't reachable. Start it (Windows: the Nullgate service; \
-             Linux: the daemon / systemd service). This window reconnects automatically.",
-        )
+        .description("Reconnects automatically once the service is running.")
         .css_classes(["empty-state"])
         .vexpand(true)
         .build()
@@ -1229,27 +1324,33 @@ fn render_main(
 ) {
     clear_box(&ui.main_box);
 
-    if !s.online {
-        ui.main_box.append(
-            &adw::Banner::builder()
-                .title("Disconnected — reopen the app to reconnect")
-                .revealed(true)
-                .build(),
-        );
-    } else if !s.routing {
-        ui.main_box.append(
-            &adw::Banner::builder()
-                .title("Routing off — start the daemon elevated to carry traffic")
-                .revealed(true)
-                .build(),
-        );
+    // Full-width banners are ToolbarView top bars (outside main_box), so we set them
+    // here rather than appending into the clamped content. Service state first:
+    set_service_banner(
+        ui,
+        if !s.online {
+            ServiceBanner::Offline
+        } else if !s.routing {
+            ServiceBanner::RoutingOff
+        } else {
+            ServiceBanner::Hidden
+        },
+    );
+    // Pending join requests → a Review banner (only approvers see it), replacing the
+    // old flashing chip. Review opens the admin flyout's emoji-SAS approval screen.
+    let n_pending = pending.borrow().len();
+    if s.self_role != "peer" && n_pending > 0 {
+        ui.join_banner.set_title(&join_banner_text(n_pending));
+        ui.join_banner.set_button_label(Some("Review"));
+        ui.join_banner.set_revealed(true);
+    } else {
+        ui.join_banner.set_revealed(false);
     }
 
     // Control group: Administration (top) → Show join ticket → Diagnostics →
-    // About. Pending join requests live inside Administration; a flashing chip on
-    // the Administration row flags them.
+    // About. Pending join requests live inside Administration (opened via the
+    // Review banner above or by activating this row).
     let controls = adw::PreferencesGroup::new();
-    let n_pending = pending.borrow().len();
     {
         let row = adw::ActionRow::builder()
             .title("Administration")
@@ -1257,12 +1358,6 @@ fn render_main(
             .activatable(true)
             .build();
         row.add_prefix(&gtk::Image::from_icon_name("emblem-system-symbolic"));
-        if n_pending > 0 {
-            let chip = gtk::Label::new(Some("Join Request"));
-            chip.add_css_class("attention-chip");
-            chip.set_valign(gtk::Align::Center);
-            row.add_suffix(&chip);
-        }
         row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
         let ui2 = ui.clone();
         row.connect_activated(move |_| ui2.open("admin"));
@@ -1294,7 +1389,7 @@ fn render_main(
         // About opens the standard dialog (not a flyout) — no chevron suffix.
         let row = adw::ActionRow::builder()
             .title("About Nullgate")
-            .subtitle(&format!("Version {}", env!("CARGO_PKG_VERSION")))
+            .subtitle(format!("Version {}", env!("CARGO_PKG_VERSION")))
             .activatable(true)
             .build();
         row.add_prefix(&gtk::Image::from_icon_name("help-about-symbolic"));
@@ -1925,7 +2020,7 @@ fn fill_audit(ui: &Ui, entries: &[AuditEntry]) {
                 .unwrap_or_else(|| short_id(&e.actor_node_id));
             let row = adw::ActionRow::builder()
                 .title(&e.action)
-                .subtitle(&format!("{} · {}", who, fmt_last_seen(e.ts)))
+                .subtitle(format!("{} · {}", who, fmt_last_seen(e.ts)))
                 .build();
             row.add_css_class("property");
             g.add(&row);
@@ -2485,7 +2580,7 @@ fn online_transition_notifies(
     }
     // Suppress a brief absence (a watchdog restart blip); announce a real return,
     // or a peer we never observed offline (e.g. one just added to the network).
-    !was_offline_for.is_some_and(|d| d < debounce)
+    was_offline_for.is_none_or(|d| d >= debounce)
 }
 
 /// The emoji SAS, laid out in fixed, symmetric rows so it looks identical on the

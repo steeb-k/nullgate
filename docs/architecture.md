@@ -112,6 +112,14 @@ Creating the virtual network interface needs elevated privilege; a GUI does not.
 means the privileged work is isolated in a tiny background service while the app you click runs
 as you — so you elevate once at install time, never per launch.
 
+The one exception is (re)starting the service when it's stopped or degraded: the unprivileged GUI
+can't talk to a dead daemon and can't restart a privileged service on its own, so its status banner
+offers a **Start/Restart service** button that shells out to the OS's own graphical elevation prompt
+— UAC (`sc.exe`/`Start-Service`) on Windows, polkit (`pkexec systemctl restart …`) on Linux, and the
+macOS auth dialog (`osascript … with administrator privileges` → `launchctl kickstart`). This is a
+one-shot elevated helper (`ipn-gui/src/service_ctl.rs`); the GUI itself never holds privilege, and
+its 2-second reconnect loop clears the banner once the daemon is back.
+
 ### Android (no daemon; VpnService)
 Android has no separate-privileged-process model and won't let an app open a TUN directly, so the
 desktop daemon/GUI split doesn't apply. Instead the Kotlin/Compose app (`android/`) runs the same

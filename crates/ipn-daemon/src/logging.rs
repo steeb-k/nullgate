@@ -12,6 +12,7 @@
 //!   * Windows: `%ProgramData%\Nullgate\logs`
 //!   * Linux:   `/var/log/nullgate`
 //!   * macOS:   `/Library/Logs/Nullgate`
+//!
 //! Falls back to `<data_dir>/logs` and finally the temp dir if the preferred
 //! location can't be created (e.g. an unprivileged foreground dev run).
 
@@ -327,9 +328,9 @@ mod crash_win {
     /// Write `digits` hex chars of `val` into `out`, returning the filled slice.
     fn hex_into(out: &mut [u8; 16], val: u64, digits: usize) -> &[u8] {
         const HEX: &[u8; 16] = b"0123456789abcdef";
-        for i in 0..digits {
+        for (i, slot) in out.iter_mut().take(digits).enumerate() {
             let shift = (digits - 1 - i) * 4;
-            out[i] = HEX[((val >> shift) & 0xf) as usize];
+            *slot = HEX[((val >> shift) & 0xf) as usize];
         }
         &out[..digits]
     }

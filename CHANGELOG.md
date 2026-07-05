@@ -4,7 +4,20 @@ All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepa
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+### Added
+- **Desktop: a "Start service" / "Restart service" button on the status banner.** When the
+  background service is stopped (or reachable but offline / not routing), the app now shows a
+  full-width banner across the top with a button that (re)starts the privileged service for you —
+  raising your OS's own admin prompt (UAC on Windows, polkit on Linux, the macOS auth dialog)
+  instead of making you open a terminal. The banner clears itself once the service reconnects.
+
 ### Changed
+- **Desktop: status and join-request alerts now use full-width `adw::Banner`s.** The
+  "service not running" state moved from a full-page notice to a proper banner (with the new Start
+  button) plus a compact illustration, and the offline / routing-off banners now span the whole
+  window instead of being clamped to the content column. The **flashing red "Join Request" chip**
+  on the Administration row is replaced by a banner — "A new device has requested network access"
+  (pluralized for several) — with a **Review** button that opens the emoji-SAS approval screen.
 - **Android: the app now hides admin actions that Peers and Controllers can't use**, matching the
   desktop apps instead of showing every option to everyone and letting the engine reject the
   unauthorized taps. The overflow menu, join-request approvals, and member actions are now gated by

@@ -69,6 +69,13 @@ in the `0600` file fallback under the app's **private internal storage** (`Conte
 which is not readable by other apps on a non-rooted device. Android Keystore-backed encryption of
 that file is a possible future hardening.
 
+## Privilege boundary (GUI ↔ daemon)
+The GUI runs unprivileged and never holds elevation; all privileged work lives in the daemon. The
+one place the GUI reaches for privilege is its **Start/Restart service** banner button, and it does
+so through the OS's own audited elevation prompt (UAC / polkit / the macOS auth dialog) rather than
+any stored credential — the user authenticates each time. The button only starts the platform
+service that's already installed; it can't run arbitrary commands.
+
 ## Device name is self-asserted (NodeId is the anchor)
 The display name members see (the desktop OS hostname; on Android an auto-derived
 `"<Manufacturer> <Model> (<suffix>)"`) is written by the client into its own roster `Add` and

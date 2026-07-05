@@ -1141,7 +1141,7 @@ impl Engine {
             });
         }
         drop(nicks);
-        out.sort_by(|a, b| b.ts.cmp(&a.ts));
+        out.sort_by_key(|e| std::cmp::Reverse(e.ts));
         Ok(out)
     }
 
@@ -1275,7 +1275,7 @@ impl Engine {
                 online: is_self || ps.map(|p| p.online).unwrap_or(false),
                 last_seen: ps.map(|p| p.last_seen).unwrap_or(0),
                 is_self,
-                is_originator_device: m.added_by == cfg.originator_id && false, // device==originator-master only at genesis; informational
+                is_originator_device: false, // device==originator-master only at genesis; informational (not yet derived)
                 role,
                 access_disabled,
                 hidden,
@@ -1636,7 +1636,7 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
         // propagate a signed map so members can show it without the DB. (Not on
         // Android — the geo DB stack isn't shipped there; see `crate::geo`.)
         #[cfg(not(target_os = "android"))]
-        if cfg.originator_secret.is_some() {
+        if let Some(orig_secret) = cfg.originator_secret.as_ref() {
             // Gather (node_id, public_ip) for everyone (under the async lock).
             let pairs: Vec<(Id, Option<String>)> = {
                 let st = inner.state.lock().await;
@@ -1667,7 +1667,7 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
                 }
             };
             if !entries.is_empty() {
-                let orig = SigningKey::from_bytes(&cfg.originator_secret.unwrap());
+                let orig = SigningKey::from_bytes(orig_secret);
                 let loc =
                     Locations::signed(cfg.secret().network_id(), &orig, entries.clone(), now_ms());
                 let mut lbuf = Vec::new();
@@ -2073,31 +2073,26 @@ async fn register_mesh(inner: &Arc<Inner>, peer: Id, conn: Connection) {
         let inner = inner.clone();
         let conn = conn.clone();
         tokio::spawn(async move {
-            loop {
-                match conn.read_datagram().await {
-                    Ok(pkt) => {
-                        let tun = inner.tun.read().unwrap().clone();
-                        if let Some(tun) = tun {
-                            let mut pkt = pkt.to_vec();
-                            // One-way block: when this device disables remote access
-                            // (or is hidden), drop inbound that isn't return traffic
-                            // for a flow we initiated.
-                            let block = inner.remote_access_disabled.load(Ordering::Relaxed)
-                                || inner.hidden.load(Ordering::Relaxed);
-                            if block
-                                && !inner
-                                    .conntrack
-                                    .allows_inbound(&pkt, inner.coarse_now.load(Ordering::Relaxed))
-                            {
-                                inner.blocked_inbound.fetch_add(1, Ordering::Relaxed);
-                                continue;
-                            }
-                            // Clamp inbound TCP SYNs too (bounds the other direction).
-                            clamp_tcp_mss(&mut pkt, TUN_MSS);
-                            let _ = tun.send(&pkt).await;
-                        }
+            while let Ok(pkt) = conn.read_datagram().await {
+                let tun = inner.tun.read().unwrap().clone();
+                if let Some(tun) = tun {
+                    let mut pkt = pkt.to_vec();
+                    // One-way block: when this device disables remote access
+                    // (or is hidden), drop inbound that isn't return traffic
+                    // for a flow we initiated.
+                    let block = inner.remote_access_disabled.load(Ordering::Relaxed)
+                        || inner.hidden.load(Ordering::Relaxed);
+                    if block
+                        && !inner
+                            .conntrack
+                            .allows_inbound(&pkt, inner.coarse_now.load(Ordering::Relaxed))
+                    {
+                        inner.blocked_inbound.fetch_add(1, Ordering::Relaxed);
+                        continue;
                     }
-                    Err(_) => break,
+                    // Clamp inbound TCP SYNs too (bounds the other direction).
+                    clamp_tcp_mss(&mut pkt, TUN_MSS);
+                    let _ = tun.send(&pkt).await;
                 }
             }
         });
@@ -2239,11 +2234,9 @@ async fn conn_info(inner: &Arc<Inner>, peer: &Id) -> ConnInfo {
                     out.observed = Some(sa.to_string());
                 }
             }
-            TransportAddr::Relay(url) => {
-                if active {
-                    relay = true;
-                    out.observed.get_or_insert_with(|| url.to_string());
-                }
+            TransportAddr::Relay(url) if active => {
+                relay = true;
+                out.observed.get_or_insert_with(|| url.to_string());
             }
             _ => {}
         }

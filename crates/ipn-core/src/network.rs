@@ -7,7 +7,7 @@
 //!   * `psk`               — admission proof (HMAC key), rotatable mass-revoke,
 //!   * `rendezvous`        — private discovery seed (outsiders can't find us),
 //!   * `docs_namespace`    — the iroh-docs replica everyone opens *deterministically*
-//!                           (so the roster syncs with no doc-ticket exchange).
+//!     (so the roster syncs with no doc-ticket exchange).
 //!
 //! The **originator master key** is a *separate*, exportable ed25519 keypair (the
 //! sole authority for removals/freeze); only its public half travels in the
