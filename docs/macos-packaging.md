@@ -70,7 +70,10 @@ lipo -archs "dist/nullgate-<ver>-macos-universal/Nullgate.app/Contents/MacOS/nul
 curl -fsSL https://raw.githubusercontent.com/steeb-k/nullgate/main/install.sh | sh
 ```
 Or from the tarball: `./nullgatectl --install`. `nullgatectl` uses `sudo` and:
-- copies the app to `/Applications/Nullgate.app`,
+- copies the app to `/Applications/Nullgate.app` (via `ditto`), then registers it with Launch
+  Services (`lsregister -f`) and imports it into Spotlight (`mdimport`) — a plain copy into
+  `/Applications` skips the registration a Finder drag does, leaving the app absent from Spotlight
+  and "Open With". This runs on every `--update` too, since replacing the bundle can stale the record,
 - symlinks `nullgate`/`ipn-daemon`/`ipn-cli` into `/usr/local/bin` (and installs `nullgatectl` there),
 - installs `/Library/LaunchDaemons/io.github.steeb_k.Nullgate.daemon.plist` (root; owns the utun) and
   `…Nullgate.update.plist` (root; daily auto-update), and bootstraps them into the `system` domain,

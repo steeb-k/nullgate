@@ -97,11 +97,20 @@ apply_tree() {
   daemon_bootout
   mkdir -p "$LOG_DIR" "$BIN_DIR"
 
-  # Replace the app (staged as .new, then swapped).
+  # Replace the app (staged as .new, then swapped). ditto (not cp -R) preserves the
+  # bundle's xattrs/signature metadata intact, the way Finder's copy does.
   rm -rf "$APP_DST.new"
-  cp -R "$src/$APP_NAME" "$APP_DST.new"
+  ditto "$src/$APP_NAME" "$APP_DST.new"
   rm -rf "$APP_DST"
   mv "$APP_DST.new" "$APP_DST"
+
+  # Tell macOS the app exists. A plain sudo copy into /Applications never triggers
+  # the Launch Services registration + Spotlight import that a Finder drag would, so
+  # the app runs but never appears in Spotlight / Open With. Re-run on every update
+  # too: replacing the bundle can stale out the existing Launch Services record.
+  local lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+  [ -x "$lsregister" ] && "$lsregister" -f "$APP_DST" >/dev/null 2>&1 || true
+  command -v mdimport >/dev/null 2>&1 && mdimport "$APP_DST" >/dev/null 2>&1 || true
 
   local b
   for b in nullgate nullgate-daemon nullgate-cli; do

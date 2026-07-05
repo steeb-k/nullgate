@@ -28,6 +28,15 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   raising your OS's own admin prompt (UAC on Windows, polkit on Linux, the macOS auth dialog)
   instead of making you open a terminal. The banner clears itself once the service reconnects.
 
+### Fixed
+- **macOS: Nullgate now shows up in Spotlight (and "Open With") after install.** The installer
+  copied `Nullgate.app` into `/Applications` with a plain `sudo cp -R`, which never triggered the
+  Launch Services registration + Spotlight import that a Finder drag does — so the app ran but was
+  invisible to Spotlight search. `nullgatectl` now registers the bundle with `lsregister` and runs
+  `mdimport` after every install **and update** (a bundle replacement can stale out the existing
+  Launch Services record), and copies the bundle with `ditto` instead of `cp -R` to preserve its
+  signature/xattr metadata cleanly.
+
 ### Changed
 - **Desktop: login autostart now launches the tray agent, not the full GUI.** The per-user
   autostart entry (Windows Run key, macOS LaunchAgent, Linux XDG autostart) runs `nullgate --agent`
