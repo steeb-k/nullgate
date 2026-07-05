@@ -16,7 +16,7 @@ What it installs:
     /usr/local/bin/{nullgate, nullgate-daemon, nullgate-cli, nullgatectl}
     a root systemd service  nullgate-daemon.service   (owns the TUN; needs CAP_NET_ADMIN)
     a root systemd timer    nullgate-update.timer      (daily auto-update)
-    an app-menu entry + tray autostart            (the GUI runs as your user)
+    an app-menu entry + tray-agent autostart      (runs as your user; opens the GUI on demand)
 
 The daemon runs as root (it brings up the 10.99.0.0/24 virtual interface); the GUI
 runs unprivileged and talks to it over /tmp/nullgate.sock. Do NOT run the GUI with sudo.

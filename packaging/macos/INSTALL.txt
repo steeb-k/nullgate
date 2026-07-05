@@ -11,7 +11,7 @@ What it installs:
     /usr/local/bin/{nullgate, nullgate-daemon, nullgate-cli, nullgatectl}   (symlinks + the manager)
     a root LaunchDaemon  io.github.steeb_k.Nullgate.daemon    (owns the utun interface)
     a root LaunchDaemon  io.github.steeb_k.Nullgate.update    (daily auto-update)
-    a per-user LaunchAgent io.github.steeb_k.Nullgate.gui     (tray GUI at login)
+    a per-user LaunchAgent io.github.steeb_k.Nullgate.gui     (tray agent at login)
 
 The daemon runs as root (it brings up the 10.99.0.0/24 virtual interface); the GUI
 runs as your user and talks to it over /tmp/nullgate.sock.

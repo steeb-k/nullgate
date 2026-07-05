@@ -168,9 +168,15 @@ cmd_install() {
   systemctl daemon-reload || true
   if [ "$gui" = 1 ] && [ -f "$APPS_DIR/$APP_ID.desktop" ]; then
     install -d -m 0755 "$AUTOSTART_DIR"
-    sed "s|^Exec=.*|Exec=nullgate --minimized|" "$APPS_DIR/$APP_ID.desktop" > "$AUTOSTART_DIR/$APP_ID.desktop"
+    # Autostart the lightweight tray agent (`nullgate --agent`), not the full GUI:
+    # it owns the tray icon + notifications and opens the GUI window on demand, so
+    # closing/crashing the GUI no longer drops the tray. NoDisplay so it doesn't
+    # show as a second app-menu entry.
+    sed -e "s|^Exec=.*|Exec=nullgate --agent|" -e "s|^NoDisplay=.*||" \
+        "$APPS_DIR/$APP_ID.desktop" > "$AUTOSTART_DIR/$APP_ID.desktop"
+    echo "NoDisplay=true" >> "$AUTOSTART_DIR/$APP_ID.desktop"
     echo "X-GNOME-Autostart-enabled=true" >> "$AUTOSTART_DIR/$APP_ID.desktop"
-    log "tray GUI will start at login"
+    log "tray agent will start at login"
   fi
   systemctl enable --now nullgate-daemon.service && log "daemon enabled (starts at boot)" \
     || log "WARNING: could not enable the daemon; start it with: systemctl start nullgate-daemon"

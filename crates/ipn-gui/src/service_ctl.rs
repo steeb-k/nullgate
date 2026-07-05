@@ -9,6 +9,7 @@
 //! must run off the GTK thread (see `Net::restart_service`). Restart-capable on
 //! every platform, so one action covers both "stopped" and "running but degraded".
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Command;
 
 /// (Re)start the privileged Nullgate service via the OS graphical elevation
@@ -17,17 +18,10 @@ use std::process::Command;
 pub fn restart_daemon_service() -> Result<(), String> {
     #[cfg(windows)]
     {
-        // Outer (unprivileged) PowerShell re-launches an elevated PowerShell via
-        // `Start-Process -Verb RunAs` (the UAC prompt). `-PassThru`/`exit` propagate
-        // the inner exit code; the try/catch turns a declined UAC into exit 1.
-        let inner = "try { $p = Start-Process -Verb RunAs -Wait -PassThru -ErrorAction Stop \
-             -FilePath 'powershell' -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command',\
-             'Stop-Service NullgateDaemon -ErrorAction SilentlyContinue; Start-Service NullgateDaemon'; \
-             exit $p.ExitCode } catch { exit 1 }";
-        run(
-            Command::new("powershell").args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", inner]),
-            "Elevation was cancelled, or the service couldn't start.",
-        )
+        // No PowerShell: elevate the (code-signed) daemon binary directly with the
+        // Win32 "runas" verb and run its `restart` subcommand, waiting for the exit
+        // code. The signed exe means the UAC dialog shows the Nullgate publisher.
+        win::elevated_daemon_restart()
     }
 
     #[cfg(target_os = "linux")]
@@ -68,7 +62,7 @@ pub fn restart_daemon_service() -> Result<(), String> {
 }
 
 /// Run a command, mapping a non-zero exit / spawn failure to `friendly`.
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn run(cmd: &mut Command, friendly: &str) -> Result<(), String> {
     match cmd.output() {
         Ok(out) if out.status.success() => Ok(()),
@@ -78,7 +72,7 @@ fn run(cmd: &mut Command, friendly: &str) -> Result<(), String> {
 }
 
 /// Fold a trimmed stderr snippet into the user-facing message for diagnostics.
-#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn status_error(out: &std::process::Output, friendly: &str) -> String {
     let err = String::from_utf8_lossy(&out.stderr);
     let err = err.trim();
@@ -88,5 +82,90 @@ fn status_error(out: &std::process::Output, friendly: &str) -> String {
         // Keep it short — the banner-toast has limited room.
         let snippet: String = err.lines().next().unwrap_or(err).chars().take(160).collect();
         format!("{friendly} ({snippet})")
+    }
+}
+
+/// Windows: UAC-elevate our own `nullgate-daemon.exe restart` (no PowerShell, no
+/// `sc.exe`) via `ShellExecuteExW`'s "runas" verb, then wait for its exit code.
+#[cfg(windows)]
+mod win {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::PathBuf;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_CANCELLED};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, WaitForSingleObject, INFINITE,
+    };
+    use windows_sys::Win32::UI::Shell::{
+        ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+    /// The daemon exe sits next to this binary (both in `…/bin` when installed, or
+    /// in `target/<profile>` in dev).
+    fn daemon_exe() -> Result<PathBuf, String> {
+        let exe = std::env::current_exe()
+            .map_err(|e| format!("can't locate this program: {e}"))?;
+        let dir = exe.parent().ok_or("this program has no parent directory")?;
+        let daemon = dir.join("nullgate-daemon.exe");
+        if daemon.exists() {
+            Ok(daemon)
+        } else {
+            Err("Couldn't find nullgate-daemon.exe next to the app.".into())
+        }
+    }
+
+    /// NUL-terminated UTF-16, for the `*const u16` Win32 string arguments.
+    fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
+        s.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    pub fn elevated_daemon_restart() -> Result<(), String> {
+        let daemon = daemon_exe()?;
+        let file = wide(daemon.as_os_str());
+        let verb = wide(std::ffi::OsStr::new("runas"));
+        let params = wide(std::ffi::OsStr::new("restart"));
+
+        // SAFETY: a zeroed SHELLEXECUTEINFOW with cbSize set is the documented way
+        // to call ShellExecuteExW; all pointers outlive the call.
+        let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+        info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+        info.fMask = SEE_MASK_NOCLOSEPROCESS;
+        info.lpVerb = verb.as_ptr();
+        info.lpFile = file.as_ptr();
+        info.lpParameters = params.as_ptr();
+        info.nShow = SW_HIDE as i32;
+
+        let ok = unsafe { ShellExecuteExW(&mut info) };
+        if ok == 0 {
+            // The most common failure is the user declining the UAC consent dialog.
+            let err = unsafe { GetLastError() };
+            if err == ERROR_CANCELLED {
+                return Err("Elevation was cancelled.".into());
+            }
+            return Err(format!("Couldn't launch the elevated restart (error {err})."));
+        }
+        if info.hProcess.is_null() {
+            // Elevation started but we got no handle to wait on; treat as best-effort.
+            return Ok(());
+        }
+        // SAFETY: hProcess is a valid handle we own (SEE_MASK_NOCLOSEPROCESS); we
+        // wait on it, read its exit code, and close it exactly once.
+        let code = unsafe {
+            WaitForSingleObject(info.hProcess, INFINITE);
+            let mut code: u32 = 1;
+            let got = GetExitCodeProcess(info.hProcess, &mut code);
+            CloseHandle(info.hProcess);
+            if got == 0 {
+                0
+            } else {
+                code
+            }
+        };
+        if code != 0 {
+            Err("The service couldn't be restarted.".into())
+        } else {
+            Ok(())
+        }
     }
 }

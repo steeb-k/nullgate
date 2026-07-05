@@ -171,6 +171,25 @@ pub fn manage(cmd: &str) -> WsResult<()> {
             service.stop()?;
             println!("stopped service '{SERVICE_NAME}'");
         }
+        "restart" => {
+            // Stop (if running), wait for it to actually reach Stopped, then start.
+            // `stop()` only *requests* the stop, so starting immediately would race
+            // the SCM; poll up to ~10s. Used by the app's elevated restart action.
+            let access =
+                ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::START;
+            let service = manager.open_service(SERVICE_NAME, access)?;
+            if service.query_status()?.current_state != ServiceState::Stopped {
+                let _ = service.stop();
+                for _ in 0..50 {
+                    std::thread::sleep(Duration::from_millis(200));
+                    if service.query_status()?.current_state == ServiceState::Stopped {
+                        break;
+                    }
+                }
+            }
+            service.start::<&OsStr>(&[])?;
+            println!("restarted service '{SERVICE_NAME}'");
+        }
         "recover" => {
             // Apply/repair recovery actions on an already-installed service (e.g.
             // one installed by an older MSI that predates this). Needs elevation.

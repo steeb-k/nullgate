@@ -1,14 +1,26 @@
-//! System tray integration (mirrors seed-sync's approach, simplified to two
-//! actions: **Open Nullgate** and **Quit Nullgate**).
+//! System tray integration for the **tray agent** (`--agent`). Three actions:
+//! **Open Nullgate**, **Restart Nullgate daemon**, and **Quit Nullgate**.
 //!
 //! On Windows/macOS we use the `tray-icon` crate. On Linux that crate's backend
 //! pulls in GTK3 + libappindicator, which clashes with this GTK4 app, so Linux
 //! uses a pure-Rust StatusNotifier implementation (`ksni`) on its own thread,
 //! bridged back to the GTK main loop over an `async-channel`.
 //!
-//! Closing the window hides it (the icon persists); clicking the tray icon — or
-//! "Open Nullgate" — re-shows it. "Quit Nullgate" sends on `quit_tx`; the GTK side then
-//! disconnects from the network and exits.
+//! The tray lives in the lightweight user-session agent, not the GUI, so it
+//! survives the GUI window being closed or crashing. Each action is delivered to
+//! the agent over a dedicated `async-channel`; the agent decides what to do
+//! (launch the GUI, restart the privileged daemon, or disconnect + quit).
+
+/// Where the tray sends each menu action. The agent owns the receiving ends.
+#[derive(Clone)]
+pub struct TrayActions {
+    /// Open (or focus) the GUI window. Also fired by clicking the tray icon.
+    pub open: async_channel::Sender<()>,
+    /// (Re)start the privileged Nullgate daemon (elevates on the agent side).
+    pub restart_daemon: async_channel::Sender<()>,
+    /// Disconnect from the network and quit the agent.
+    pub quit: async_channel::Sender<()>,
+}
 
 // Tray icon (the only one): the "gate" mark, used as-is on every theme. The 64px
 // source is scaled down at runtime to whatever each platform's tray wants.
@@ -16,14 +28,9 @@ const TRAY_PNG: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../img/nullgate-tray-icon-64.png"));
 
 #[cfg(any(windows, target_os = "macos"))]
-pub fn install(
-    app: &adw::Application,
-    window: &adw::ApplicationWindow,
-    quit_tx: async_channel::Sender<()>,
-) {
-    use adw::prelude::*;
+pub fn install(actions: TrayActions) {
     use gtk::glib;
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
     // Make native popups (the tray context menu) honor the app's color scheme.
@@ -31,16 +38,18 @@ pub fn install(
     set_preferred_app_mode(adw::StyleManager::default().is_dark());
 
     let open = MenuItem::new("Open Nullgate", true, None);
+    let restart = MenuItem::new("Restart Nullgate daemon", true, None);
     let quit = MenuItem::new("Quit Nullgate", true, None);
     let menu = Menu::new();
     let _ = menu.append(&open);
+    let _ = menu.append(&restart);
+    let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&quit);
     let open_id = open.id().clone();
+    let restart_id = restart.id().clone();
     let quit_id = quit.id().clone();
 
-    let mut builder = TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
-        .with_tooltip("Nullgate");
+    let mut builder = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("Nullgate");
     if let Some(icon) = load_tray_icon() {
         builder = builder.with_icon(icon);
     }
@@ -55,11 +64,10 @@ pub fn install(
 
     // tray-icon delivers events on global channels; poll them on the GTK loop. The
     // icon is moved into the closure so it stays alive.
-    let app = app.clone();
-    let window = window.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
         let _keep = &_icon;
         let mut open_window = false;
+        let mut restart_daemon = false;
         let mut quit = false;
         while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
             // Open on double-click (Windows) or a left single-click (covers macOS,
@@ -77,19 +85,21 @@ pub fn install(
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
             if ev.id == open_id {
                 open_window = true;
+            } else if ev.id == restart_id {
+                restart_daemon = true;
             } else if ev.id == quit_id {
                 quit = true;
             }
         }
         if open_window {
-            window.set_visible(true);
-            window.present();
+            let _ = actions.open.try_send(());
+        }
+        if restart_daemon {
+            let _ = actions.restart_daemon.try_send(());
         }
         if quit {
-            let _ = quit_tx.try_send(());
+            let _ = actions.quit.try_send(());
         }
-        // Avoid an unused warning for `app` if the platform never quits here.
-        let _ = &app;
         glib::ControlFlow::Continue
     });
 }
@@ -147,11 +157,13 @@ fn set_preferred_app_mode(dark: bool) {
 // ----------------------------------------------------------------------------
 #[cfg(target_os = "linux")]
 mod linux {
-    use adw::prelude::*;
     use gtk::glib;
+
+    use super::TrayActions;
 
     enum TrayCmd {
         Open,
+        RestartDaemon,
         Quit,
     }
 
@@ -181,6 +193,7 @@ mod linux {
         }
         fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
             use ksni::menu::StandardItem;
+            use ksni::MenuItem;
             vec![
                 StandardItem {
                     label: "Open Nullgate".into(),
@@ -190,6 +203,15 @@ mod linux {
                     ..Default::default()
                 }
                 .into(),
+                StandardItem {
+                    label: "Restart Nullgate daemon".into(),
+                    activate: Box::new(|t: &mut Self| {
+                        let _ = t.tx.try_send(TrayCmd::RestartDaemon);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+                MenuItem::Separator,
                 StandardItem {
                     label: "Quit Nullgate".into(),
                     activate: Box::new(|t: &mut Self| {
@@ -230,11 +252,7 @@ mod linux {
             .collect()
     }
 
-    pub fn install(
-        app: &adw::Application,
-        window: &adw::ApplicationWindow,
-        quit_tx: async_channel::Sender<()>,
-    ) {
+    pub fn install(actions: TrayActions) {
         let icons = load_icons();
         if icons.is_empty() {
             tracing::warn!("tray icon failed to decode; tray disabled");
@@ -242,21 +260,20 @@ mod linux {
         }
         let (tx, rx) = async_channel::unbounded::<TrayCmd>();
 
-        let app = app.clone();
-        let window = window.clone();
         glib::spawn_future_local(async move {
             while let Ok(cmd) = rx.recv().await {
                 match cmd {
                     TrayCmd::Open => {
-                        window.set_visible(true);
-                        window.present();
+                        let _ = actions.open.try_send(());
+                    }
+                    TrayCmd::RestartDaemon => {
+                        let _ = actions.restart_daemon.try_send(());
                     }
                     TrayCmd::Quit => {
-                        let _ = quit_tx.try_send(());
+                        let _ = actions.quit.try_send(());
                     }
                 }
             }
-            let _ = &app;
         });
 
         let tray = IpnTray { icons, tx };
@@ -289,10 +306,6 @@ mod linux {
 pub use linux::install;
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
-pub fn install(
-    _app: &adw::Application,
-    _window: &adw::ApplicationWindow,
-    _quit_tx: async_channel::Sender<()>,
-) {
+pub fn install(_actions: TrayActions) {
     tracing::info!("tray not enabled on this platform build");
 }

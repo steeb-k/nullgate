@@ -77,6 +77,13 @@ If the background service is ever stopped or not carrying traffic, the app shows
 top with a **Start service** / **Restart service** button — clicking it prompts for your admin
 password and starts the service for you (no need to open a terminal).
 
+Nullgate lives in your **system tray**. Closing the app window just closes the window — the network
+stays up and the tray icon stays put, so **closing Nullgate never disconnects you**. Click the tray
+icon (or **Open Nullgate**) to bring the window back; notifications open it too. The tray menu also
+has **Restart Nullgate daemon** if the background service ever needs a nudge, and **Quit Nullgate**
+to disconnect and close it entirely. The tray runs from a tiny helper that starts with your login,
+so it's there whether or not the window is open.
+
 The background service keeps running and starts with your device. If it ever stops unexpectedly —
 or if its memory use climbs too high (a safeguard against a leak in the underlying networking
 library) — it restarts itself automatically, and it keeps a log (including the reason for any crash

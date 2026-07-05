@@ -7,7 +7,7 @@ is bundled from a local prefix; it can't be cross-built from Windows/Linux).
 `nullgate-<version>-macos-<arch>.tar.gz` (`arch` = `universal` or `arm64`) containing a self-contained,
 ad-hoc-signed **"Nullgate.app"** (bundled GTK), the `nullgatectl` manager, and the launchd
 templates. Because Nullgate's daemon needs root to create the `utun` interface, install sets it up as
-a **root LaunchDaemon** (not a per-user agent); the tray GUI runs per-user.
+a **root LaunchDaemon** (not a per-user agent); the tray agent runs per-user and opens the GUI on demand.
 
 ## Why conda-forge GTK, not Homebrew
 The GTK dylibs we bundle set the app's minimum-macOS floor (their `minos` load command). Homebrew

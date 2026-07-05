@@ -22,7 +22,7 @@ Rust workspace; each crate has one job. A feature usually flows through these la
 | `ipn-ipc` | Wire protocol (`IpcRequest`/`IpcResponse`/`IpcEvent`) + transport (named pipe / unix socket). Depends on `ipn-core` only for display DTOs. | expose a new engine action/event to clients |
 | `ipn-daemon` | Privileged process: owns the engine + TUN, serves IPC. Windows service + foreground modes. | route a new request to the engine |
 | `ipn-cli` | Headless IPC client (testing/scripting). | add a command for the new action |
-| `ipn-gui` | **Nullgate** — the GTK4 + libadwaita app (binary `nullgate`), unprivileged IPC client. The product name in UI/docs is "Nullgate"; `ipn-gui` stays as the codebase codename. | surface the feature in the UI |
+| `ipn-gui` | **Nullgate** — the GTK4 + libadwaita app (binary `nullgate`), unprivileged IPC client. The product name in UI/docs is "Nullgate"; `ipn-gui` stays as the codebase codename. The **same binary** also runs as the headless **tray agent** (`nullgate --agent`, `agent.rs`): it owns the tray + notifications and launches the GUI on demand. | surface the feature in the UI (window) or the tray/notifications (agent) |
 | `ipn-mobile` | UniFFI facade (`cdylib` `ipn_mobile`) wrapping `ipn-core` in-process for **Android** — no daemon/IPC. Exposes `MobileEngine` + an `EventListener` callback; the engine drives the `VpnService` TUN via fd injection. | expose an engine action/event to the Android app |
 
 The **Android app** lives in `android/` (Kotlin/Compose over `ipn-mobile`; binary product name
@@ -124,6 +124,17 @@ added.
 ## Gotchas
 - **TUN needs privilege.** Tests and headless runs set `NULLGATE_DISABLE_TUN=1`; the engine honors
   it and skips creating a real interface. Always set it in automated tests.
+- **The tray + notifications live in the agent, NOT the daemon or the GUI.** A system service can't
+  draw UI in the user session (Windows session 0, root systemd/LaunchDaemon), so the tray can't be
+  in the daemon; and tying it to the GUI made it vanish on close/crash. The persistent user-session
+  piece is `nullgate --agent` (`ipn-gui/src/agent.rs`) — it owns `tray.rs` + `notify.rs` and
+  launches the GUI on demand. When adding a tray item or notification, put it in the **agent**; the
+  GUI window keeps only in-app `adw::Toast`s. The agent is a headless GApplication with a distinct
+  app id (`…Nullgate.Agent`) and must stay `hold()`-ed (keep the guard, or `mem::forget` it — a
+  dropped `ApplicationHoldGuard` quits it). Autostart launches the agent (`--agent`), not the GUI;
+  the GUI is a normal single-instance window (closing it quits only the GUI). Verify on Windows:
+  close the GUI → tray icon stays; the tray's *Open Nullgate* / *Restart Nullgate daemon* / *Quit
+  Nullgate* all work; a notification click opens the window.
 - **Keyboard nav must survive a page rebuild (recurring Windows regression).** The GUI rebuilds
   the whole main page on state change; doing so drops keyboard focus, and GTK then defaults it to
   the first row ("Administration"). Symptom: tabbing through the member list, the selection jumps

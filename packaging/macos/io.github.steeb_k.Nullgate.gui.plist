@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Nullgate tray GUI autostart LaunchAgent (per-user, Aqua). Installed to
-     /Library/LaunchAgents so it loads for each user at login. Launches the GUI
-     minimized to the tray. No KeepAlive — if the user quits it, it stays quit
-     until next login. The GUI runs unprivileged and talks to the root daemon over
+<!-- Nullgate tray agent autostart LaunchAgent (per-user, Aqua). Installed to
+     /Library/LaunchAgents so it loads for each user at login. Launches the
+     lightweight headless tray agent (`--agent`), which owns the tray icon +
+     notifications and opens the GUI on demand — not the full GUI. No KeepAlive —
+     if the user quits it (tray "Quit Nullgate"), it stays quit until next login.
+     The agent runs unprivileged and talks to the root daemon over
      /tmp/nullgate.sock. -->
 <plist version="1.0">
 <dict>
@@ -12,7 +14,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/Applications/Nullgate.app/Contents/MacOS/nullgate</string>
-    <string>--minimized</string>
+    <string>--agent</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

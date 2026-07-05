@@ -109,34 +109,36 @@ function Get-ConsoleUser {
 }
 
 function Stop-Gui {
-    # Close any running GUI so the MSI can replace nullgate.exe in place. Returns
-    # $true if a GUI was running, so we know to relaunch it afterwards.
+    # Close any running nullgate.exe (the tray agent and/or the GUI window — both are
+    # nullgate.exe) so the MSI can replace it in place. Returns $true if one was
+    # running, so we know to relaunch the tray agent afterwards.
     $procs = Get-Process -Name 'nullgate' -ErrorAction SilentlyContinue
     if (-not $procs) { return $false }
-    Write-Log "closing the running GUI before applying the update"
+    Write-Log "closing the running tray agent/GUI before applying the update"
     $procs | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 800   # let file handles release
     return $true
 }
 
 function Restart-Gui {
-    # Relaunch the GUI (minimized to tray) in $User's interactive session, via a
-    # transient scheduled task with a Limited (non-elevated) token — the GUI must
-    # run unprivileged, exactly as it normally does. Best-effort; logged on failure.
+    # Relaunch the tray agent (`--agent`) in $User's interactive session, via a
+    # transient scheduled task with a Limited (non-elevated) token — it must run
+    # unprivileged, exactly as it normally does. The agent restores the tray; the
+    # user reopens the GUI window on demand. Best-effort; logged on failure.
     param([string]$User)
-    if (-not $User) { Write-Log "no interactive user; the GUI will start at next login"; return }
-    if (-not (Test-Path $GuiExe)) { Write-Log "GUI not found at $GuiExe; skipping relaunch"; return }
+    if (-not $User) { Write-Log "no interactive user; the tray agent will start at next login"; return }
+    if (-not (Test-Path $GuiExe)) { Write-Log "nullgate.exe not found at $GuiExe; skipping relaunch"; return }
     $task = 'NullgateGuiRelaunch'
     try {
-        $action    = New-ScheduledTaskAction -Execute $GuiExe -Argument '--minimized'
+        $action    = New-ScheduledTaskAction -Execute $GuiExe -Argument '--agent'
         $principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited
         $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
         Register-ScheduledTask -TaskName $task -Action $action -Principal $principal -Settings $settings -Force | Out-Null
         Start-ScheduledTask -TaskName $task
-        Write-Log "relaunched the GUI as $User (--minimized)"
+        Write-Log "relaunched the tray agent as $User (--agent)"
         Start-Sleep -Seconds 3   # give the task time to fire before we remove it
     } catch {
-        Write-Log "GUI relaunch failed: $($_.Exception.Message)"
+        Write-Log "tray agent relaunch failed: $($_.Exception.Message)"
     } finally {
         Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
     }

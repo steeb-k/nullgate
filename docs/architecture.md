@@ -86,7 +86,8 @@ bounding memory far below the abort. Remove once
 
 **Presence-blip debounce.** A watchdog restart (or any brief drop) makes a device flap
 offline→online within seconds, which every *other* machine's daemon observes — and would otherwise
-turn into a "came online" notification each time. The GUI (`notify_newly_online`) tracks, per peer,
+turn into a "came online" notification each time. The tray agent (`notify_newly_online` in
+`ipn-gui/src/notify.rs`) tracks, per peer,
 when it first went dark this session and only announces a return once the absence has exceeded a
 threshold (default 2 minutes; `NULLGATE_ONLINE_DEBOUNCE_SECS`), so routine restarts stay silent
 while a genuine reconnection still notifies.
@@ -101,7 +102,10 @@ while a genuine reconnection still notifies.
   Linux.
 - `ipn-gui` — **Nullgate**, the GTK4 + libadwaita desktop app (binary `nullgate`). **Unprivileged** —
   it only talks to the daemon, so day-to-day use never needs admin/root. ("Nullgate" is the
-  product name shown in the UI and docs; `ipn-gui` remains the codebase codename.)
+  product name shown in the UI and docs; `ipn-gui` remains the codebase codename.) The same binary
+  has a second, **headless mode** — `nullgate --agent`, the **tray agent** (`ipn-gui/src/agent.rs`):
+  it owns the system tray + desktop notifications, and launches the GUI window on demand. See
+  *Why the tray is a separate agent* below.
 - `ipn-cli` — a small headless client (status / create / join / approve / remove / rotate …),
   handy for scripting and testing.
 - `ipn-mobile` — the **Android** facade: a UniFFI `cdylib` (`ipn_mobile`) that runs `ipn-core`
@@ -112,13 +116,40 @@ Creating the virtual network interface needs elevated privilege; a GUI does not.
 means the privileged work is isolated in a tiny background service while the app you click runs
 as you — so you elevate once at install time, never per launch.
 
-The one exception is (re)starting the service when it's stopped or degraded: the unprivileged GUI
-can't talk to a dead daemon and can't restart a privileged service on its own, so its status banner
-offers a **Start/Restart service** button that shells out to the OS's own graphical elevation prompt
-— UAC (`sc.exe`/`Start-Service`) on Windows, polkit (`pkexec systemctl restart …`) on Linux, and the
-macOS auth dialog (`osascript … with administrator privileges` → `launchctl kickstart`). This is a
-one-shot elevated helper (`ipn-gui/src/service_ctl.rs`); the GUI itself never holds privilege, and
+The one exception is (re)starting the service when it's stopped or degraded — offered both by the
+GUI's status banner and by the tray agent's **Restart Nullgate daemon** item. The unprivileged app
+can't talk to a dead daemon and can't restart a privileged service on its own, so it raises the OS's
+own graphical elevation prompt. On **Windows** it UAC-elevates the (code-signed) daemon binary
+directly — `nullgate-daemon.exe restart` (a subcommand that stops, waits for Stopped, then starts)
+via `ShellExecuteExW`'s `runas` verb — so **no PowerShell/`sc.exe`** is involved and the consent
+dialog shows the *Nullgate* publisher. On **Linux** it's polkit (`pkexec systemctl restart …`), and
+on **macOS** the auth dialog (`osascript … with administrator privileges` → `launchctl kickstart`).
+This is a one-shot elevated helper (`ipn-gui/src/service_ctl.rs`); the app never holds privilege, and
 its 2-second reconnect loop clears the banner once the daemon is back.
+
+### Why the tray is a separate agent
+The persistent, always-there part of Nullgate is the **daemon** — it owns the network. Yet the
+daemon is a *system service* (Windows session 0, a root systemd unit, a macOS LaunchDaemon), and a
+system service is walled off from the user's graphical session: it **cannot draw a tray icon or post
+a notification you'd see**. So the tray can't live in the daemon. It also shouldn't live in the GUI
+window — tying it there means a resource-heavy GUI must run hidden at all times, and the tray
+disappears the moment the GUI is closed or crashes (misleading, since the network is still up).
+
+The tray therefore runs in a **third process**: a lightweight, unprivileged **tray agent**
+(`nullgate --agent`) that autostarts in the login session (per-user Run key / LaunchAgent / XDG
+autostart), subscribes to the daemon over the same IPC socket the GUI uses, and:
+
+- owns the **tray icon** (`ipn-gui/src/tray.rs` — `tray-icon` on Windows/macOS, `ksni` on Linux)
+  and all **desktop notifications** (`ipn-gui/src/notify.rs`), so alerts fire even with the GUI
+  closed and the tray survives a GUI crash;
+- launches the **GUI window** on demand (tray *Open Nullgate*, or a notification click). The GUI is
+  a single-instance GApplication, so re-launch just presents the existing window;
+- offers **Restart Nullgate daemon** (the same elevated helper the GUI's banner uses) and **Quit
+  Nullgate** (disconnect, then quit the agent).
+
+The GUI is now a normal window: closing it quits the GUI process only; the daemon and agent keep
+running. The agent uses a distinct GApplication id (`…Nullgate.Agent`) so it and the GUI can both be
+primary instances at once; on Windows it registers the same AppUserModelID for toast attribution.
 
 ### Android (no daemon; VpnService)
 Android has no separate-privileged-process model and won't let an app open a TUN directly, so the

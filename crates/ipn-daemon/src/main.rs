@@ -53,6 +53,10 @@ enum Cmd {
     /// Stop the installed Windows service.
     #[cfg(windows)]
     Stop,
+    /// Stop then start the installed Windows service (used by the app's elevated
+    /// "Restart Nullgate daemon" action, so no PowerShell is involved).
+    #[cfg(windows)]
+    Restart,
     /// (Re)configure auto-restart recovery on the installed Windows service.
     #[cfg(windows)]
     Recover,
@@ -144,6 +148,9 @@ fn main() -> Result<()> {
         }
         Some(Cmd::Start) => return service::manage("start").map_err(|e| anyhow::anyhow!("{e}")),
         Some(Cmd::Stop) => return service::manage("stop").map_err(|e| anyhow::anyhow!("{e}")),
+        Some(Cmd::Restart) => {
+            return service::manage("restart").map_err(|e| anyhow::anyhow!("{e}"))
+        }
         Some(Cmd::Recover) => {
             return service::manage("recover").map_err(|e| anyhow::anyhow!("{e}"))
         }

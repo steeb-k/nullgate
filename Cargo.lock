@@ -3063,6 +3063,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tray-icon",
+ "windows-sys 0.61.2",
  "winreg 0.56.0",
  "winresource",
 ]

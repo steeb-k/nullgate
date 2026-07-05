@@ -74,13 +74,14 @@ as the SYSTEM scheduled task **`NullgateUpdate`** (daily ~3am ±2h, plus 5 min a
 (`msiexec /i … /qn`). The MSI's `MajorUpgrade` stops the service, swaps files, and restarts it.
 Logs: `%ProgramData%\nullgate\update.log`.
 
-**Restarting the tray GUI.** The task runs as SYSTEM (session 0), but the GUI runs in the
+**Restarting the tray agent.** The task runs as SYSTEM (session 0), but the tray agent runs in the
 logged-in user's interactive session — the MSI's Restart Manager can close it but can't relaunch
-it across that boundary. So the updater **closes the GUI before the MSI** (so `nullgate.exe`
-replaces in place, no pending reboot) and **relaunches it minimized in the user's session
-afterward** via a one-shot Interactive scheduled task (`NullgateGuiRelaunch`, non-elevated). On
-Linux/macOS the GUI self-relaunches on the daemon's version change instead (`ipn-gui`
-`restart_self`), where updater and GUI share the user's session.
+it across that boundary. So the updater **closes any running `nullgate.exe` before the MSI** (the
+tray agent and/or an open GUI window — both are `nullgate.exe` — so it replaces in place, no pending
+reboot) and **relaunches the tray agent (`--agent`) in the user's session afterward** via a one-shot
+Interactive scheduled task (`NullgateGuiRelaunch`, non-elevated); the user reopens the GUI window on
+demand. On Linux/macOS the agent (and any open GUI) self-relaunch on the daemon's version change
+instead (`ipn-gui` `relaunch_agent` / `restart_self`), where updater and agent share the session.
 
 ## Gotchas
 - A **running `NullgateDaemon` service locks** `nullgate-daemon.exe` — stop it (`sc.exe stop NullgateDaemon`)

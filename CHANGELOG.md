@@ -5,6 +5,23 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 ### Added
+- **Desktop: the system tray + notifications moved out of the GUI into a lightweight
+  background tray agent.** Previously the whole GUI ran hidden at all times to host the tray, so
+  closing (or crashing) the GUI made the tray icon vanish even though the network kept running — and
+  the daemon, the part that actually matters, had no presence in the tray. Now a small headless
+  agent (`nullgate --agent`) autostarts at login, owns the tray icon and all desktop notifications
+  ("came online", "wants to join"), and launches the GUI on demand. The GUI is a normal window:
+  **closing it just closes it**; the daemon and tray keep running. The tray persists even if the GUI
+  crashes.
+- **Desktop: a "Restart Nullgate daemon" item in the tray menu.** Bounces the privileged daemon
+  (raising your OS's admin prompt) without opening the GUI — on Windows, Linux, and macOS. On
+  Windows the restart now **elevates the code-signed daemon directly** (a new `nullgate-daemon
+  restart` subcommand via the `runas` verb) instead of shelling out to PowerShell, so there's no
+  PowerShell dependency and the UAC prompt shows the *Nullgate* publisher. The GUI's status-banner
+  "Restart service" button uses the same path.
+- **Desktop: clicking a notification now opens Nullgate.** Peer/join notifications carry a default
+  click action (and an "Open Nullgate" button) that brings up the GUI — via the notification action
+  on Linux/macOS and the toast activation on Windows.
 - **Desktop: a "Start service" / "Restart service" button on the status banner.** When the
   background service is stopped (or reachable but offline / not routing), the app now shows a
   full-width banner across the top with a button that (re)starts the privileged service for you —
@@ -12,6 +29,10 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   instead of making you open a terminal. The banner clears itself once the service reconnects.
 
 ### Changed
+- **Desktop: login autostart now launches the tray agent, not the full GUI.** The per-user
+  autostart entry (Windows Run key, macOS LaunchAgent, Linux XDG autostart) runs `nullgate --agent`
+  — a fraction of the footprint of the old always-hidden GUI. The tray's **"Quit Nullgate"**
+  disconnects from the network and quits the agent; the GUI window closes independently.
 - **Desktop: status and join-request alerts now use full-width `adw::Banner`s.** The
   "service not running" state moved from a full-page notice to a proper banner (with the new Start
   button) plus a compact illustration, and the offline / routing-off banners now span the whole

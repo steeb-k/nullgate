@@ -20,7 +20,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
 
 use adw::prelude::*;
 use gtk::glib;
@@ -30,10 +29,12 @@ use ipn_ipc::{
 };
 use tokio::runtime::Handle;
 
+mod agent;
+mod notify;
 mod service_ctl;
 mod tray;
 
-const APP_ID: &str = "io.github.steeb_k.Nullgate";
+pub(crate) const APP_ID: &str = "io.github.steeb_k.Nullgate";
 
 /// Messages from the IO side to the UI.
 #[derive(Clone)]
@@ -366,24 +367,49 @@ fn setup_runtime_env() {
 #[cfg(not(target_os = "macos"))]
 fn setup_runtime_env() {}
 
+/// Which of the binary's three roles to run. The same `nullgate` binary is the
+/// GUI window, the headless tray agent (`--agent`), or a version probe.
+#[derive(Debug, PartialEq, Eq)]
+enum Mode {
+    Version,
+    Agent,
+    Gui,
+}
+
+fn parse_mode(args: &[String]) -> Mode {
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        Mode::Version
+    } else if args.iter().any(|a| a == "--agent") {
+        Mode::Agent
+    } else {
+        Mode::Gui
+    }
+}
+
 fn main() -> glib::ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "--version" || a == "-V") {
+    let mode = parse_mode(&args);
+    if mode == Mode::Version {
         println!("nullgate {}", env!("CARGO_PKG_VERSION"));
         return glib::ExitCode::SUCCESS;
     }
     // Before any GLib/GTK call: on macOS, redirect GTK to the bundled resources.
     setup_runtime_env();
-    #[cfg(windows)]
-    init_windows_app_id();
-    let start_minimized =
-        args.iter().any(|a| a == "--minimized") || std::env::var_os("NULLGATE_START_MINIMIZED").is_some();
 
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .init();
+
+    // The tray icon + desktop notifications live in a headless user-session agent,
+    // separate from the GUI window, so they survive the GUI being closed/crashing.
+    if mode == Mode::Agent {
+        return agent::run(ipn_ipc::default_socket());
+    }
+
+    #[cfg(windows)]
+    notify::init_windows_app_id();
 
     let (handle_tx, handle_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -409,7 +435,16 @@ fn main() -> glib::ExitCode {
     glib::set_application_name("Nullgate");
 
     let app = adw::Application::builder().application_id(APP_ID).build();
-    app.connect_activate(move |app| build_ui(app, net.clone(), rx.clone(), start_minimized));
+    app.connect_activate(move |app| {
+        // Re-launched (e.g. from the tray's "Open Nullgate", or the notification's
+        // click action) while already running: single-instance activation just
+        // presents the existing window rather than building a second one.
+        if let Some(win) = app.active_window() {
+            win.present();
+            return;
+        }
+        build_ui(app, net.clone(), rx.clone());
+    });
     let empty: [&str; 0] = [];
     app.run_with_args(&empty)
 }
@@ -483,12 +518,7 @@ fn padded_box() -> gtk::Box {
     b
 }
 
-fn build_ui(
-    app: &adw::Application,
-    net: Net,
-    rx: async_channel::Receiver<UiMsg>,
-    start_minimized: bool,
-) {
+fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>) {
     load_css();
     install_app_icon();
 
@@ -770,10 +800,6 @@ fn build_ui(
     // anything visible don't tear down + recreate widgets — which would steal
     // keyboard focus / clicks. `""` forces the next render.
     let last_sig: Rc<RefCell<String>> = Default::default();
-    // Per-peer time we first observed it offline this session, so we can announce
-    // "came online" only after a real absence — not the momentary presence blips
-    // caused by the daemon's memory-watchdog restarts (see `notify_newly_online`).
-    let offline_since: Rc<RefCell<HashMap<String, Instant>>> = Default::default();
 
     {
         let ui = ui.clone();
@@ -783,20 +809,14 @@ fn build_ui(
         let state = state.clone();
         let pending = pending.clone();
         let last_sig = last_sig.clone();
-        let offline_since = offline_since.clone();
-        let app_n = app.clone();
         let add_btn = add_btn.clone();
         glib::spawn_future_local(async move {
             while let Ok(msg) = rx.recv().await {
                 match msg {
                     UiMsg::Status(Some(s)) => {
                         add_btn.set_visible(false); // already in a network
-                        notify_newly_online(
-                            &app_n,
-                            state.borrow().as_ref(),
-                            &s,
-                            &mut offline_since.borrow_mut(),
-                        );
+                        // Peer online/offline desktop notifications now come from the
+                        // tray agent, so they fire even with this window closed.
                         pending
                             .borrow_mut()
                             .retain(|p| !s.members.iter().any(|m| m.node_id == p.node_id));
@@ -852,11 +872,8 @@ fn build_ui(
                                 });
                             }
                         }
-                        notify(
-                            &app_n,
-                            &format!("“{hostname}” wants to join"),
-                            Some("Open Nullgate to approve or deny."),
-                        );
+                        // The "wants to join" desktop notification is raised by the
+                        // tray agent; here we just surface it in the open window.
                         if let Some(s) = state.borrow().as_ref() {
                             render_if_changed(&ui, s, &net, &window, &pending, &last_sig);
                         }
@@ -876,39 +893,19 @@ fn build_ui(
         });
     }
 
-    // --- system tray + minimize-to-tray ---
-    let (quit_tx, quit_rx) = async_channel::unbounded::<()>();
-    tray::install(app, &window, quit_tx.clone());
-
+    // Quit accelerator. The GUI is now a normal window: closing it (or this
+    // shortcut) closes the window and quits the GUI process only — the daemon and
+    // the tray agent keep running, so the network stays up. Ctrl+Q on Windows/Linux;
+    // the standard Cmd+Q on macOS. Reopen from the tray's "Open Nullgate".
     {
         let action = gtk::gio::SimpleAction::new("quit", None);
-        let qtx = quit_tx.clone();
-        action.connect_activate(move |_, _| {
-            let _ = qtx.try_send(());
-        });
+        let w = window.clone();
+        action.connect_activate(move |_, _| w.close());
         app.add_action(&action);
-        // On Windows/Linux, Ctrl+Q fully quits (the platform norm). On macOS we
-        // deliberately do NOT give any key a hard-quit: fully exiting is reserved
-        // for the tray's "Quit Nullgate" item (see the Cmd+Q → hide-to-tray binding
-        // below), matching this app's tray-first design.
         #[cfg(not(target_os = "macos"))]
         app.set_accels_for_action("app.quit", &["<Ctrl>q"]);
-    }
-
-    // macOS: repurpose Cmd+Q so it behaves like Alt+F4 elsewhere — hide the window
-    // to the tray rather than quit. macOS has no native Quit menu item wired here,
-    // so nothing else claims Cmd+Q; we route it to `window.close()`, which the
-    // close-request handler below turns into a hide (the app keeps running in the
-    // tray).
-    #[cfg(target_os = "macos")]
-    {
-        let action = gtk::gio::SimpleAction::new("hide-to-tray", None);
-        let w = window.clone();
-        action.connect_activate(move |_, _| {
-            w.close();
-        });
-        app.add_action(&action);
-        app.set_accels_for_action("app.hide-to-tray", &["<Meta>q"]);
+        #[cfg(target_os = "macos")]
+        app.set_accels_for_action("app.quit", &["<Meta>q"]);
     }
 
     // "Back" navigation: Alt+Left, or Backspace (unless typing in a text field),
@@ -943,73 +940,42 @@ fn build_ui(
         });
     }
 
-    {
-        let app = app.clone();
-        let notified = std::cell::Cell::new(false);
-        window.connect_close_request(move |w| {
-            save_window_size(w);
-            w.set_visible(false);
-            if !notified.replace(true) {
-                // Put the message in the title — many Linux notification daemons
-                // show the title prominently and hide/clip the body.
-                notify(
-                    &app,
-                    "Nullgate is still running in the tray",
-                    Some("Click the tray icon to reopen, or “Quit Nullgate” to disconnect."),
-                );
-            }
-            glib::Propagation::Stop
-        });
-    }
-
-    {
-        let app = app.clone();
-        let net = net.clone();
-        let window = window.clone();
-        glib::spawn_future_local(async move {
-            while quit_rx.recv().await.is_ok() {
-                save_window_size(&window);
-                let (done_tx, done_rx) = async_channel::bounded::<()>(1);
-                let socket = net.socket.clone();
-                net.handle.spawn(async move {
-                    let _ = transport::oneshot_request(&socket, IpcRequest::Disconnect).await;
-                    let _ = done_tx.send(()).await;
-                });
-                let _ = done_rx.recv().await;
-                app.quit();
-            }
-        });
-    }
+    // Closing the window quits the GUI process (a normal app). The daemon + tray
+    // agent keep running, so the network stays up; reopen from "Open Nullgate".
+    window.connect_close_request(move |w| {
+        save_window_size(w);
+        glib::Propagation::Proceed
+    });
 
     // Best-effort reconnect to a saved network; ignore errors (e.g. "no network" —
     // the empty screen already conveys that, so no toast).
     net.request(IpcRequest::Connect, |_| None);
 
-    if start_minimized {
-        window.set_visible(false);
-    } else {
-        window.present();
-    }
+    window.present();
 
-    // Windows: tell the OS to relaunch us with the right state if the installer's
-    // Restart Manager closes us during an MSI update. Keep the registered command
-    // line in sync with whether we're showing or hidden in the tray.
+    // Windows: register a Restart-Manager relaunch so an interactive MSI update
+    // closes, replaces, and reopens the GUI window.
     #[cfg(windows)]
-    {
-        register_restart(start_minimized);
-        window.connect_visible_notify(|w| register_restart(!w.is_visible()));
+    register_restart_cmd(None);
+}
+
+/// Launch (or focus) the GUI window as a separate process — used by the tray's
+/// "Open Nullgate" and by notification clicks. The GUI is a single-instance
+/// GApplication, so if one is already open this just presents it. `current_exe`
+/// with no arguments selects GUI mode (see [`parse_mode`]).
+pub(crate) fn launch_gui() {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).spawn();
     }
 }
 
-/// Relaunch this GUI from disk (Linux/macOS), preserving tray-minimized state, then
-/// exit so the new instance takes over. Used after an auto-update swapped the binary
-/// in place. A tiny `sh` shim waits for this PID to exit first so the new instance
-/// doesn't collide with the (single-instance) old one.
+/// Relaunch this binary once the current process has exited, optionally with an
+/// extra argument. A tiny `sh` shim waits for this PID first so a single-instance
+/// GApplication doesn't collide with the outgoing instance. Linux/macOS only.
 #[cfg(not(windows))]
-fn restart_self(window: &adw::ApplicationWindow) {
-    let minimized = !window.is_visible();
+fn relaunch_after_exit(extra_arg: Option<&str>) {
     if let Ok(exe) = std::env::current_exe() {
-        let flag = if minimized { " --minimized" } else { "" };
+        let flag = extra_arg.map(|a| format!(" {a}")).unwrap_or_default();
         let script = format!(
             "while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; exec \"{exe}\"{flag}",
             pid = std::process::id(),
@@ -1017,36 +983,63 @@ fn restart_self(window: &adw::ApplicationWindow) {
         );
         let _ = std::process::Command::new("sh").arg("-c").arg(script).spawn();
     }
+}
+
+/// Relaunch the GUI from disk (Linux/macOS), then exit so the new instance takes
+/// over. Used after an auto-update swapped the binary in place.
+#[cfg(not(windows))]
+fn restart_self(_window: &adw::ApplicationWindow) {
+    relaunch_after_exit(None);
     std::process::exit(0);
+}
+
+/// Relaunch the tray agent from disk (Linux/macOS) after an auto-update. Called by
+/// the agent when the daemon returns on a newer version; the caller then quits.
+#[cfg(not(windows))]
+pub(crate) fn relaunch_agent() {
+    relaunch_after_exit(Some("--agent"));
 }
 
 /// On Windows the GUI is restarted externally, so there's nothing to do here: the
 /// SYSTEM auto-updater (`packaging/windows/nullgate-update.ps1`) relaunches it in
 /// the user's session, and the installer's Restart Manager covers interactive MSI
-/// runs (see `register_restart`).
+/// runs (see `register_restart_cmd`).
 #[cfg(windows)]
 fn restart_self(_window: &adw::ApplicationWindow) {}
 
+/// On Windows the agent is relaunched by the installer's Restart Manager (see
+/// `register_agent_restart`), so self-relaunch is a no-op.
+#[cfg(windows)]
+pub(crate) fn relaunch_agent() {}
+
 /// Register (or refresh) the Windows Restart Manager relaunch command line so an
 /// **interactive** MSI run (elevated in the user's own session) closes, replaces,
-/// and **restarts** the GUI with the correct state. The SYSTEM auto-updater can't
-/// rely on this across the session-0 boundary, so it relaunches the GUI itself;
-/// this still covers manual installs. `RESTART_NO_CRASH | RESTART_NO_HANG` so it
-/// only relaunches for a patch/reboot, not on a crash loop.
+/// and **restarts** the process — with `extra_arg` on the command line (e.g.
+/// `--agent`). `RESTART_NO_CRASH | RESTART_NO_HANG` so it only relaunches for a
+/// patch/reboot, not on a crash loop.
 #[cfg(windows)]
-fn register_restart(minimized: bool) {
+fn register_restart_cmd(extra_arg: Option<&str>) {
     #[link(name = "kernel32")]
     extern "system" {
         fn RegisterApplicationRestart(pwz_commandline: *const u16, dw_flags: u32) -> i32;
     }
     unsafe {
-        if minimized {
-            let args: Vec<u16> = "--minimized".encode_utf16().chain(std::iter::once(0)).collect();
-            let _ = RegisterApplicationRestart(args.as_ptr(), 0x1 | 0x2);
-        } else {
-            let _ = RegisterApplicationRestart(std::ptr::null(), 0x1 | 0x2);
+        match extra_arg {
+            Some(a) => {
+                let args: Vec<u16> = a.encode_utf16().chain(std::iter::once(0)).collect();
+                let _ = RegisterApplicationRestart(args.as_ptr(), 0x1 | 0x2);
+            }
+            None => {
+                let _ = RegisterApplicationRestart(std::ptr::null(), 0x1 | 0x2);
+            }
         }
     }
+}
+
+/// Windows: register the tray agent for Restart-Manager relaunch as `--agent`.
+#[cfg(windows)]
+pub(crate) fn register_agent_restart() {
+    register_restart_cmd(Some("--agent"));
 }
 
 // ---------------------------------------------------------------------------
@@ -2419,170 +2412,6 @@ fn show_about(window: &adw::ApplicationWindow) {
     about.present();
 }
 
-/// Show a desktop notification (title + optional body).
-///
-/// Linux/macOS use GLib's `GNotification`. **Windows uses native WinRT toasts**
-/// (Action Center) via [`windows_toast`] — NOT `GNotification`, whose Windows
-/// backend spawns a confusing second notification-area icon beside our tray icon.
-/// WinRT toasts need a registered AppUserModelID, set up once by
-/// [`init_windows_app_id`]. Repeats of the same title are throttled to once per 30s
-/// (a peer flapping offline/online during an update shouldn't burst toasts).
-fn notify(app: &adw::Application, title: &str, body: Option<&str>) {
-    use std::collections::HashMap;
-    use std::time::{Duration, Instant};
-    // notify() is only ever called on the GTK main thread, so thread_local is safe.
-    thread_local! {
-        static LAST: RefCell<HashMap<String, Instant>> = RefCell::new(HashMap::new());
-    }
-    let suppressed = LAST.with(|m| {
-        let mut m = m.borrow_mut();
-        let now = Instant::now();
-        if m.get(title).is_some_and(|t| now.duration_since(*t) < Duration::from_secs(30)) {
-            return true;
-        }
-        m.insert(title.to_string(), now);
-        false
-    });
-    if suppressed {
-        return;
-    }
-
-    #[cfg(not(windows))]
-    {
-        let n = gtk::gio::Notification::new(title);
-        if let Some(b) = body {
-            n.set_body(Some(b));
-        }
-        app.send_notification(None, &n);
-    }
-    #[cfg(windows)]
-    {
-        let _ = app;
-        windows_toast(title, body);
-    }
-}
-
-/// Show a native Windows toast (Action Center). Attributed to our registered
-/// AppUserModelID (see [`init_windows_app_id`]); failures are non-fatal.
-#[cfg(windows)]
-fn windows_toast(title: &str, body: Option<&str>) {
-    use tauri_winrt_notification::Toast;
-    let mut toast = Toast::new(APP_ID).title(title);
-    if let Some(b) = body {
-        toast = toast.text1(b);
-    }
-    if let Err(e) = toast.show() {
-        tracing::debug!("windows toast failed: {e}");
-    }
-}
-
-/// Windows: bind this process to our AppUserModelID and register it under HKCU so
-/// WinRT toasts are permitted and attributed to "Nullgate" (the host exe otherwise).
-/// `ToastNotificationManager` refuses to show toasts for an unregistered AUMID.
-/// Idempotent — safe to call on every launch; the MSI shortcut carries the same id.
-#[cfg(windows)]
-fn init_windows_app_id() {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-    #[link(name = "shell32")]
-    extern "system" {
-        fn SetCurrentProcessExplicitAppUserModelID(app_id: *const u16) -> i32;
-    }
-    let wide: Vec<u16> = OsStr::new(APP_ID).encode_wide().chain(std::iter::once(0)).collect();
-    unsafe {
-        SetCurrentProcessExplicitAppUserModelID(wide.as_ptr());
-    }
-    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
-    if let Ok((key, _)) = hkcu.create_subkey(format!(r"Software\Classes\AppUserModelId\{APP_ID}")) {
-        let _ = key.set_value("DisplayName", &"Nullgate");
-    }
-}
-
-/// Notify when a member transitions offline→online (skips the first render).
-/// How long a peer must have been offline before we announce it came back online.
-/// This absorbs the brief presence blips from the daemon's memory-watchdog
-/// restarts (iroh#4293 stopgap) so a device restarting doesn't spam every machine
-/// on the mesh with "came online". Override with `NULLGATE_ONLINE_DEBOUNCE_SECS`.
-fn online_notify_debounce() -> Duration {
-    const DEFAULT_SECS: u64 = 120; // 2 minutes — headroom for slower machines.
-    let secs = std::env::var("NULLGATE_ONLINE_DEBOUNCE_SECS")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(DEFAULT_SECS);
-    Duration::from_secs(secs)
-}
-
-/// Notify when a peer transitions offline→online, but only after it had been
-/// offline for at least [`online_notify_debounce`]. `offline_since` records, per
-/// peer, when we first observed it dark this session; a peer that reappears sooner
-/// than the debounce (a restart blip) is announced silently.
-fn notify_newly_online(
-    app: &adw::Application,
-    prev: Option<&NetworkStatus>,
-    new: &NetworkStatus,
-    offline_since: &mut HashMap<String, Instant>,
-) {
-    let debounce = online_notify_debounce();
-    let now = Instant::now();
-    for m in &new.members {
-        if m.is_self {
-            continue;
-        }
-        let was_online_prev = prev
-            .map(|p| p.members.iter().any(|q| q.node_id == m.node_id && q.online))
-            .unwrap_or(false);
-        let announce = online_transition_notifies(
-            &m.node_id,
-            m.online,
-            prev.is_some(),
-            was_online_prev,
-            offline_since,
-            now,
-            debounce,
-        );
-        if announce {
-            let name = m
-                .label
-                .clone()
-                .or_else(|| m.hostname.clone())
-                .unwrap_or_else(|| short_id(&m.node_id));
-            notify(app, &format!("{name} came online"), None);
-        }
-    }
-    // Forget peers no longer in the network so the map can't accrete stale ids.
-    offline_since.retain(|id, _| new.members.iter().any(|m| &m.node_id == id));
-}
-
-/// Pure decision + bookkeeping for one peer, factored out of [`notify_newly_online`]
-/// so the debounce timing is testable without GTK. Updates `offline_since` and
-/// returns whether to show a "came online" toast. `now`/`debounce` are injected so
-/// tests can drive the clock deterministically.
-fn online_transition_notifies(
-    node_id: &str,
-    online: bool,
-    have_baseline: bool,
-    was_online_prev: bool,
-    offline_since: &mut HashMap<String, Instant>,
-    now: Instant,
-    debounce: Duration,
-) -> bool {
-    if !online {
-        // Offline now: remember when it first went dark (keep the earliest stamp).
-        offline_since.entry(node_id.to_string()).or_insert(now);
-        return false;
-    }
-    // Back online: clear any offline stamp and measure how long it was gone.
-    let was_offline_for = offline_since.remove(node_id).map(|t| now.duration_since(t));
-    // First snapshot (no baseline) adopts state silently; an already-online peer
-    // is no transition at all.
-    if !have_baseline || was_online_prev {
-        return false;
-    }
-    // Suppress a brief absence (a watchdog restart blip); announce a real return,
-    // or a peer we never observed offline (e.g. one just added to the network).
-    was_offline_for.is_none_or(|d| d >= debounce)
-}
-
 /// The emoji SAS, laid out in fixed, symmetric rows so it looks identical on the
 /// joiner's "Verify this code" dialog and the originator's requests flyout
 /// (relying on text wrapping made them differ by container width). The usual
@@ -2721,66 +2550,39 @@ fn fmt_last_seen(ms: u64) -> String {
 }
 
 #[cfg(test)]
-mod online_debounce_tests {
+mod mode_tests {
     use super::*;
 
-    const DB: Duration = Duration::from_secs(120);
-
-    /// A peer offline longer than the debounce, then back, is announced.
-    #[test]
-    fn long_absence_notifies() {
-        let mut seen = HashMap::new();
-        let t0 = Instant::now();
-        // Observed offline at t0 (baseline exists, was offline in prev).
-        assert!(!online_transition_notifies("a", false, true, false, &mut seen, t0, DB));
-        // Back online 200s later → real return.
-        let later = t0 + Duration::from_secs(200);
-        assert!(online_transition_notifies("a", true, true, false, &mut seen, later, DB));
-        assert!(!seen.contains_key("a")); // stamp cleared
+    fn args(extra: &[&str]) -> Vec<String> {
+        // argv[0] is always the program path; extra flags follow.
+        std::iter::once("nullgate".to_string()).chain(extra.iter().map(|s| s.to_string())).collect()
     }
 
-    /// A restart blip (offline < debounce) is suppressed.
+    /// No flags → the GUI window.
     #[test]
-    fn brief_blip_is_silent() {
-        let mut seen = HashMap::new();
-        let t0 = Instant::now();
-        assert!(!online_transition_notifies("a", false, true, false, &mut seen, t0, DB));
-        let later = t0 + Duration::from_secs(20); // watchdog-restart-sized gap
-        assert!(!online_transition_notifies("a", true, true, false, &mut seen, later, DB));
+    fn bare_is_gui() {
+        assert_eq!(parse_mode(&args(&[])), Mode::Gui);
     }
 
-    /// The earliest offline stamp wins, so repeated offline snapshots don't reset
-    /// the clock and let a long absence masquerade as a blip.
+    /// `--agent` selects the headless tray agent.
     #[test]
-    fn offline_stamp_is_not_reset() {
-        let mut seen = HashMap::new();
-        let t0 = Instant::now();
-        online_transition_notifies("a", false, true, false, &mut seen, t0, DB);
-        // Seen offline again 90s later — must keep the t0 stamp.
-        online_transition_notifies("a", false, true, false, &mut seen, t0 + Duration::from_secs(90), DB);
-        // Online at t0+130s → 130s ≥ 120s from the *original* stamp → notify.
-        assert!(online_transition_notifies("a", true, true, false, &mut seen, t0 + Duration::from_secs(130), DB));
+    fn agent_flag_is_agent() {
+        assert_eq!(parse_mode(&args(&["--agent"])), Mode::Agent);
     }
 
-    /// No baseline snapshot (first status, or just-reconnected) never notifies.
+    /// `--version` / `-V` short-circuit to a version print regardless of other flags.
     #[test]
-    fn first_snapshot_is_silent() {
-        let mut seen = HashMap::new();
-        assert!(!online_transition_notifies("a", true, false, false, &mut seen, Instant::now(), DB));
+    fn version_wins() {
+        assert_eq!(parse_mode(&args(&["--version"])), Mode::Version);
+        assert_eq!(parse_mode(&args(&["-V"])), Mode::Version);
+        // Version takes precedence even if --agent is also present.
+        assert_eq!(parse_mode(&args(&["--agent", "--version"])), Mode::Version);
     }
 
-    /// A peer already online in the previous snapshot is no transition.
+    /// A stale `--minimized` from an old autostart entry is ignored (now GUI mode),
+    /// so upgrading installs don't leave a window that never appears.
     #[test]
-    fn already_online_is_no_transition() {
-        let mut seen = HashMap::new();
-        assert!(!online_transition_notifies("a", true, true, true, &mut seen, Instant::now(), DB));
-    }
-
-    /// A peer that appears online without ever being seen offline (e.g. just added
-    /// to the network) is announced.
-    #[test]
-    fn never_seen_offline_notifies() {
-        let mut seen = HashMap::new();
-        assert!(online_transition_notifies("a", true, true, false, &mut seen, Instant::now(), DB));
+    fn legacy_minimized_is_gui() {
+        assert_eq!(parse_mode(&args(&["--minimized"])), Mode::Gui);
     }
 }

@@ -142,7 +142,7 @@ cmd_install() {
   if [ "$gui" = 1 ]; then
     local u; u="$(console_uid)"
     [ -n "$u" ] && launchctl bootstrap "gui/$u" "$AGENTS/$APP_ID.gui.plist" >/dev/null 2>&1 || true
-    log "tray GUI will start at login"
+    log "tray agent will start at login"
   fi
   log "done. Open \"Nullgate\" from /Applications."
 }

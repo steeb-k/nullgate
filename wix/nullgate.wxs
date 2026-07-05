@@ -162,15 +162,17 @@
       </Component>
     </StandardDirectory>
 
-    <!-- Launch the GUI minimized to the tray at each user login (per-machine Run
-         key; the value runs as the logged-in user). The daemon is already an
-         auto-start service, so login brings up the tray with the network live. -->
+    <!-- Launch the lightweight tray agent (not the full GUI) at each user login
+         (per-machine Run key; the value runs as the logged-in user). The agent owns
+         the tray icon + notifications and launches the GUI on demand; the daemon is
+         already an auto-start service, so login brings up the tray with the network
+         live. Closing the GUI window no longer stops the tray — the agent does. -->
     <Component Id="AutostartRun" Directory="BinDir" Guid="*">
       <RegistryValue Root="HKLM"
                      Key="Software\Microsoft\Windows\CurrentVersion\Run"
                      Name="Nullgate"
                      Type="string"
-                     Value="&quot;[INSTALLFOLDER]bin\nullgate.exe&quot; --minimized"
+                     Value="&quot;[INSTALLFOLDER]bin\nullgate.exe&quot; --agent"
                      KeyPath="yes" />
     </Component>
 
