@@ -408,6 +408,13 @@ fn main() -> glib::ExitCode {
         return agent::run(ipn_ipc::default_socket());
     }
 
+    // Whenever the GUI starts, make sure the tray agent is up. The agent is a
+    // single-instance app, so this is a no-op if one is already running (e.g. from
+    // login autostart); but it guarantees the tray appears the first time you open
+    // Nullgate after an install, without waiting for the next login. The agent is a
+    // separate process and keeps running after this GUI window is closed.
+    spawn_agent();
+
     #[cfg(windows)]
     notify::init_windows_app_id();
 
@@ -966,6 +973,18 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
 pub(crate) fn launch_gui() {
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::process::Command::new(exe).spawn();
+    }
+}
+
+/// Ensure the tray agent is running by spawning `nullgate --agent` as a detached
+/// process. The agent is a single-instance GApplication, so if one is already
+/// running (from login autostart, or a prior GUI start) the new process hands off
+/// to it and exits — making this safe to call unconditionally. This is how the
+/// tray reliably appears whenever Nullgate is used, without the user ever having
+/// to launch the agent by hand.
+pub(crate) fn spawn_agent() {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).arg("--agent").spawn();
     }
 }
 

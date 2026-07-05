@@ -131,8 +131,13 @@ added.
   launches the GUI on demand. When adding a tray item or notification, put it in the **agent**; the
   GUI window keeps only in-app `adw::Toast`s. The agent is a headless GApplication with a distinct
   app id (`…Nullgate.Agent`) and must stay `hold()`-ed (keep the guard, or `mem::forget` it — a
-  dropped `ApplicationHoldGuard` quits it). Autostart launches the agent (`--agent`), not the GUI;
-  the GUI is a normal single-instance window (closing it quits only the GUI). Verify on Windows:
+  dropped `ApplicationHoldGuard` quits it). The agent must be *running* for the tray to exist, so
+  it's (re)launched from every session angle — **login** autostart (`--agent`), **GUI start**
+  (`spawn_agent` in `main()`), and the **installers on install/upgrade** (`nullgatectl`
+  `launch_agent_for_user`/`gui_agent_reload`; Windows via the updater's user-session relaunch).
+  Single-instance makes every one of these a safe no-op if the agent is already up. The **daemon
+  never launches it** (session 0 can't draw UI, and the agent's lifetime is independent of the
+  daemon). The GUI is a normal single-instance window (closing it quits only the GUI). Verify on Windows:
   close the GUI → tray icon stays; the tray's *Open Nullgate* / *Restart Nullgate daemon* / *Quit
   Nullgate* all work; a notification click opens the window.
 - **Keyboard nav must survive a page rebuild (recurring Windows regression).** The GUI rebuilds

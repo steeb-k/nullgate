@@ -136,8 +136,7 @@ window — tying it there means a resource-heavy GUI must run hidden at all time
 disappears the moment the GUI is closed or crashes (misleading, since the network is still up).
 
 The tray therefore runs in a **third process**: a lightweight, unprivileged **tray agent**
-(`nullgate --agent`) that autostarts in the login session (per-user Run key / LaunchAgent / XDG
-autostart), subscribes to the daemon over the same IPC socket the GUI uses, and:
+(`nullgate --agent`), subscribing to the daemon over the same IPC socket the GUI uses, that:
 
 - owns the **tray icon** (`ipn-gui/src/tray.rs` — `tray-icon` on Windows/macOS, `ksni` on Linux)
   and all **desktop notifications** (`ipn-gui/src/notify.rs`), so alerts fire even with the GUI
@@ -150,6 +149,22 @@ autostart), subscribes to the daemon over the same IPC socket the GUI uses, and:
 The GUI is now a normal window: closing it quits the GUI process only; the daemon and agent keep
 running. The agent uses a distinct GApplication id (`…Nullgate.Agent`) so it and the GUI can both be
 primary instances at once; on Windows it registers the same AppUserModelID for toast attribution.
+
+**Ensuring the agent is up.** The agent must be running for the tray to exist, so it is (re)launched
+from every angle a user session offers — and, being single-instance, a redundant launch just hands
+off to the running one and exits, so all of these are safe to fire unconditionally:
+
+- **at login** — the per-user autostart entry (Windows Run key / macOS LaunchAgent / Linux XDG
+  autostart) runs `nullgate --agent`;
+- **when the GUI starts** — `main()` spawns `nullgate --agent` (see `spawn_agent`), so opening the
+  app brings the tray up immediately even on a fresh install where autostart hasn't fired yet;
+- **on install/upgrade** — the platform installers launch the agent in the user's session as their
+  last step (`nullgatectl` on Linux/macOS; the SYSTEM auto-updater's user-session relaunch on
+  Windows), so the tray appears without waiting for a re-login.
+
+Note the daemon is deliberately *not* one of these triggers: it runs in an isolated system session
+that can't draw UI, and the agent's lifetime is independent of it (it survives daemon restarts and
+reconnects), so nothing about the daemon starting/stopping needs to touch the agent.
 
 ### Android (no daemon; VpnService)
 Android has no separate-privileged-process model and won't let an app open a TUN directly, so the

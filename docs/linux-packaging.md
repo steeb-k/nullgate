@@ -39,7 +39,10 @@ privileged steps and:
 - installs `/etc/systemd/system/ipn-daemon.service` (root; `CAP_NET_ADMIN`) and enables+starts it,
 - installs `ipn-update.service` + `ipn-update.timer` (daily auto-update) and enables the timer,
 - installs the app-menu entry + hicolor icons, and a tray-agent autostart (`nullgate --agent`,
-  `NoDisplay`) in `/etc/xdg/autostart`.
+  `NoDisplay`) in `/etc/xdg/autostart`,
+- launches the tray agent in the invoking user's session right away on install/upgrade
+  (`launch_agent_for_user`, best-effort via the user's `systemd --user`), so the tray appears
+  without waiting for the next login.
 
 Manage: `nullgatectl --status`, `nullgatectl --update [--check]`, `nullgatectl --uninstall [--purge]`.
 

@@ -77,7 +77,10 @@ Or from the tarball: `./nullgatectl --install`. `nullgatectl` uses `sudo` and:
 - symlinks `nullgate`/`ipn-daemon`/`ipn-cli` into `/usr/local/bin` (and installs `nullgatectl` there),
 - installs `/Library/LaunchDaemons/io.github.steeb_k.Nullgate.daemon.plist` (root; owns the utun) and
   `…Nullgate.update.plist` (root; daily auto-update), and bootstraps them into the `system` domain,
-- installs `/Library/LaunchAgents/io.github.steeb_k.Nullgate.gui.plist` (per-user tray autostart).
+- installs `/Library/LaunchAgents/io.github.steeb_k.Nullgate.gui.plist` (per-user tray agent,
+  `RunAtLoad`), and on install/upgrade `gui_agent_reload` bootstraps + `kickstart -k`s it in the
+  console user's Aqua session, so the tray starts now (and picks up the new binary on `--update`)
+  without waiting for the next login.
 
 Manage: `nullgatectl --status`, `nullgatectl --update [--check]`, `nullgatectl --uninstall [--purge]`.
 

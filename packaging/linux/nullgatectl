@@ -134,6 +134,43 @@ apply_tree() {
   [ "$was" = 1 ] && { log "starting nullgate-daemon"; systemctl start nullgate-daemon.service; } || true
 }
 
+# Bring the tray agent up in the invoking user's graphical session *now*, so the
+# tray appears on install/upgrade without waiting for the next login. Best-effort:
+# it only applies when a real user ran us via sudo and has an active session bus,
+# and any failure is fine (login autostart is the backstop). On upgrade we replace
+# any running agent so the new binary takes over; the agent is single-instance, so
+# a redundant launch just exits.
+launch_agent_for_user() {
+  local u uid run
+  u="${SUDO_USER:-}"
+  [ -n "$u" ] && [ "$u" != "root" ] || { log "no desktop user; the tray starts at next login"; return 0; }
+  uid="$(id -u "$u" 2>/dev/null)" || return 0
+  run="/run/user/$uid"
+  [ -S "$run/bus" ] || { log "no active session for $u; the tray starts at next login"; return 0; }
+
+  # Replace any agent already running as this user so an upgrade picks up the new
+  # binary (kill by exact command line; scoped to the user's processes).
+  pkill -u "$u" -f 'nullgate --agent' 2>/dev/null || true
+
+  # Prefer the user's own systemd manager (a transient --user unit inherits the
+  # graphical session's DISPLAY/WAYLAND_DISPLAY that a bare root launch lacks).
+  if have runuser && have systemd-run; then
+    if runuser -u "$u" -- env XDG_RUNTIME_DIR="$run" DBUS_SESSION_BUS_ADDRESS="unix:path=$run/bus" \
+         systemd-run --user --quiet --collect --unit=nullgate-agent nullgate --agent >/dev/null 2>&1; then
+      log "tray agent started for $u"
+      return 0
+    fi
+  fi
+  # Fallback: launch directly under the user's session bus.
+  if have runuser; then
+    runuser -u "$u" -- env XDG_RUNTIME_DIR="$run" DBUS_SESSION_BUS_ADDRESS="unix:path=$run/bus" \
+      nohup nullgate --agent >/dev/null 2>&1 &
+    log "tray agent started for $u"
+  else
+    log "couldn't start the tray agent now; it will start at next login"
+  fi
+}
+
 cmd_install() {
   need_root "--install" "$@"
   banner
@@ -177,6 +214,7 @@ cmd_install() {
     echo "NoDisplay=true" >> "$AUTOSTART_DIR/$APP_ID.desktop"
     echo "X-GNOME-Autostart-enabled=true" >> "$AUTOSTART_DIR/$APP_ID.desktop"
     log "tray agent will start at login"
+    launch_agent_for_user   # ...and now, so the tray shows without a re-login
   fi
   systemctl enable --now nullgate-daemon.service && log "daemon enabled (starts at boot)" \
     || log "WARNING: could not enable the daemon; start it with: systemctl start nullgate-daemon"
@@ -202,6 +240,8 @@ cmd_update() {
   banner
   local tree; tree="$(fetch_latest_tree)"
   apply_tree "$tree"
+  # If the tray autostart is installed, restart the agent onto the new binary now.
+  [ -f "$AUTOSTART_DIR/$APP_ID.desktop" ] && launch_agent_for_user
   log "updated to $latest"
 }
 

@@ -15,6 +15,18 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   ("came online", "wants to join"), and launches the GUI on demand. The GUI is a normal window:
   **closing it just closes it**; the daemon and tray keep running. The tray persists even if the GUI
   crashes.
+- **Desktop: the tray now comes up reliably, without ever launching it by hand.** The tray agent
+  used to start only from the login autostart entry, so a fresh install (or any session where
+  autostart hadn't fired) showed no tray icon until the next login. Now it's (re)launched from every
+  angle a session offers — and, being single-instance, a redundant launch is a harmless no-op:
+  - **opening the GUI** spawns the agent, so the tray appears the first time you open Nullgate;
+  - **installing/upgrading** launches it in your session as the installer's last step — on Linux and
+    macOS via `nullgatectl` (a re-login is no longer needed), and on Windows via the auto-updater's
+    user-session relaunch;
+  - **login** autostart remains the backstop.
+
+  (The agent is independent of the privileged daemon, which — running in an isolated system session —
+  can't and doesn't draw UI, so it's deliberately not one of these triggers.)
 - **Desktop: a "Restart Nullgate daemon" item in the tray menu.** Bounces the privileged daemon
   (raising your OS's admin prompt) without opening the GUI — on Windows, Linux, and macOS. On
   Windows the restart now **elevates the code-signed daemon directly** (a new `nullgate-daemon
