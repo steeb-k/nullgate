@@ -67,12 +67,20 @@ Signing tool locations; override `ARTIFACT_SIGNING_DLIB`), and timestamps via
 session (`AzureCliCredential`) so it doesn't stall on IMDS.
 
 ## Auto-update
-`packaging\windows\ipn-update.ps1` is installed to `C:\Program Files\Nullgate\bin` and registered as
-the SYSTEM scheduled task **`NullgateUpdate`** (daily ~3am ±2h, plus 5 min after boot). It compares
+`packaging\windows\nullgate-update.ps1` is installed to `C:\Program Files\Nullgate\bin` and registered
+as the SYSTEM scheduled task **`NullgateUpdate`** (daily ~3am ±2h, plus 5 min after boot). It compares
 `nullgate-daemon.exe --version` to the latest release tag of the public
 `steeb-k/nullgate` repo and, if newer, downloads the MSI and applies it silently
 (`msiexec /i … /qn`). The MSI's `MajorUpgrade` stops the service, swaps files, and restarts it.
-Logs: `%ProgramData%\ipn\update.log`.
+Logs: `%ProgramData%\nullgate\update.log`.
+
+**Restarting the tray GUI.** The task runs as SYSTEM (session 0), but the GUI runs in the
+logged-in user's interactive session — the MSI's Restart Manager can close it but can't relaunch
+it across that boundary. So the updater **closes the GUI before the MSI** (so `nullgate.exe`
+replaces in place, no pending reboot) and **relaunches it minimized in the user's session
+afterward** via a one-shot Interactive scheduled task (`NullgateGuiRelaunch`, non-elevated). On
+Linux/macOS the GUI self-relaunches on the daemon's version change instead (`ipn-gui`
+`restart_self`), where updater and GUI share the user's session.
 
 ## Gotchas
 - A **running `NullgateDaemon` service locks** `nullgate-daemon.exe` — stop it (`sc.exe stop NullgateDaemon`)

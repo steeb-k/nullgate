@@ -124,6 +124,17 @@ added.
 ## Gotchas
 - **TUN needs privilege.** Tests and headless runs set `NULLGATE_DISABLE_TUN=1`; the engine honors
   it and skips creating a real interface. Always set it in automated tests.
+- **Keyboard nav must survive a page rebuild (recurring Windows regression).** The GUI rebuilds
+  the whole main page on state change; doing so drops keyboard focus, and GTK then defaults it to
+  the first row ("Administration"). Symptom: tabbing through the member list, the selection jumps
+  back to "Administration" every few seconds. This regressed ~4 times by whack-a-mole (each time a
+  volatile field — online last-seen, `observed_addr` — was churning `render_signature` and forcing
+  a rebuild every tick). The durable fix in `render_all` **saves the focused `ActionRow` and
+  restores it after the rebuild** (`focused_row_title`/`focus_row_by_title` in `ipn-gui/src/
+  main.rs`) so focus survives *any* rebuild — keep it. Two rules when touching the GUI: (1) never
+  put a per-tick-volatile field in `render_signature`; (2) **check this on every build** — run the
+  Windows GUI, tab into the member list, and confirm the selection does NOT snap back to
+  "Administration" while a peer is connected. If it does, something re-broke focus preservation.
 - **GTK on Windows** comes from gvsbuild at `C:\gtk`; `pkg-config` must resolve `gtk4` and
   `libadwaita-1`. On Linux, install the `-dev` packages.
 - **GTK on macOS** comes from **conda-forge**, not Homebrew (`scripts/setup-conda-macos.sh` builds

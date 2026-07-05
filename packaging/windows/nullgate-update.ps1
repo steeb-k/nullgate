@@ -38,6 +38,7 @@ $AssetGlob = '*windows-x86_64.msi'
 $TaskName  = 'NullgateUpdate'
 $BinDir    = $PSScriptRoot
 $DaemonExe = Join-Path $BinDir 'nullgate-daemon.exe'
+$GuiExe    = Join-Path $BinDir 'nullgate.exe'
 $ScriptPath = $PSCommandPath
 
 # Log to the machine-wide data dir (where the LocalSystem daemon also writes).
@@ -91,6 +92,56 @@ function Get-InstalledVersion {
     return $null
 }
 
+# -- GUI restart across the SYSTEM/user session boundary ---------------------
+# This task runs as SYSTEM (session 0); the tray GUI runs as the logged-in user
+# in their interactive session. The MSI's Restart Manager can close the GUI but
+# can't relaunch it back into the user session, so the GUI would be left dead (or
+# stale) after an update. We handle it ourselves: stop the GUI before the MSI (so
+# nullgate.exe swaps in place with no pending reboot), then relaunch it in the
+# user's session afterwards.
+function Get-ConsoleUser {
+    # 'DOMAIN\user' of the interactive (console) session, or $null if nobody's on.
+    try {
+        $u = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).UserName
+        if ($u) { return $u }
+    } catch { }
+    return $null
+}
+
+function Stop-Gui {
+    # Close any running GUI so the MSI can replace nullgate.exe in place. Returns
+    # $true if a GUI was running, so we know to relaunch it afterwards.
+    $procs = Get-Process -Name 'nullgate' -ErrorAction SilentlyContinue
+    if (-not $procs) { return $false }
+    Write-Log "closing the running GUI before applying the update"
+    $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 800   # let file handles release
+    return $true
+}
+
+function Restart-Gui {
+    # Relaunch the GUI (minimized to tray) in $User's interactive session, via a
+    # transient scheduled task with a Limited (non-elevated) token — the GUI must
+    # run unprivileged, exactly as it normally does. Best-effort; logged on failure.
+    param([string]$User)
+    if (-not $User) { Write-Log "no interactive user; the GUI will start at next login"; return }
+    if (-not (Test-Path $GuiExe)) { Write-Log "GUI not found at $GuiExe; skipping relaunch"; return }
+    $task = 'NullgateGuiRelaunch'
+    try {
+        $action    = New-ScheduledTaskAction -Execute $GuiExe -Argument '--minimized'
+        $principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited
+        $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        Register-ScheduledTask -TaskName $task -Action $action -Principal $principal -Settings $settings -Force | Out-Null
+        Start-ScheduledTask -TaskName $task
+        Write-Log "relaunched the GUI as $User (--minimized)"
+        Start-Sleep -Seconds 3   # give the task time to fire before we remove it
+    } catch {
+        Write-Log "GUI relaunch failed: $($_.Exception.Message)"
+    } finally {
+        Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
+    }
+}
+
 function Invoke-Update {
     param([switch]$CheckOnly)
 
@@ -123,6 +174,11 @@ function Invoke-Update {
     Write-Log "downloading $($asset.name)"
     Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tmp -UseBasicParsing -Headers @{ 'User-Agent' = 'nullgate-update' }
 
+    # Close the tray GUI first (see the session-boundary note above), remembering
+    # whether it was running and who to relaunch it as.
+    $guiUser       = Get-ConsoleUser
+    $guiWasRunning = Stop-Gui
+
     $msiLog = Join-Path $DataDir 'update-msi.log'
     Write-Log "applying $tmp (msiexec /qn)"
     $p = Start-Process -FilePath 'msiexec.exe' `
@@ -134,6 +190,9 @@ function Invoke-Update {
     } else {
         Write-Log "msiexec failed (exit $($p.ExitCode)); see $msiLog"
     }
+    # Bring the tray GUI back — the new version on success, or the existing one if
+    # the update failed — so the user is never left without it.
+    if ($guiWasRunning) { Restart-Gui -User $guiUser }
     Remove-Item $tmp -ErrorAction SilentlyContinue
 }
 

@@ -153,8 +153,9 @@ async fn stream_events(socket: &std::path::Path, tx: &async_channel::Sender<UiMs
             }
             // After an auto-update the daemon restarts on a newer app version while
             // this GUI is still the old binary; relaunch ourselves to match (the
-            // binary was swapped in place). Windows handles GUI restart via the
-            // installer's Restart Manager, so we don't self-relaunch there.
+            // binary was swapped in place). On Windows the GUI can't self-relaunch —
+            // its exe is locked and the SYSTEM updater lives in another session — so
+            // it's restarted externally instead (see `restart_self`/`register_restart`).
             #[cfg(not(windows))]
             if !app_version.is_empty() && app_version != env!("CARGO_PKG_VERSION") {
                 let _ = tx.send(UiMsg::UpdateApplied).await;
@@ -963,15 +964,19 @@ fn restart_self(window: &adw::ApplicationWindow) {
     std::process::exit(0);
 }
 
-/// Windows restarts the GUI via the installer's Restart Manager (see
-/// `register_restart`), so there's nothing to do here.
+/// On Windows the GUI is restarted externally, so there's nothing to do here: the
+/// SYSTEM auto-updater (`packaging/windows/nullgate-update.ps1`) relaunches it in
+/// the user's session, and the installer's Restart Manager covers interactive MSI
+/// runs (see `register_restart`).
 #[cfg(windows)]
 fn restart_self(_window: &adw::ApplicationWindow) {}
 
-/// Register (or refresh) the Windows Restart Manager relaunch command line so the
-/// MSI updater closes, replaces, and **restarts** the GUI with the correct state.
-/// `RESTART_NO_CRASH | RESTART_NO_HANG` so it only relaunches for a patch/reboot,
-/// not on a crash loop.
+/// Register (or refresh) the Windows Restart Manager relaunch command line so an
+/// **interactive** MSI run (elevated in the user's own session) closes, replaces,
+/// and **restarts** the GUI with the correct state. The SYSTEM auto-updater can't
+/// rely on this across the session-0 boundary, so it relaunches the GUI itself;
+/// this still covers manual installs. `RESTART_NO_CRASH | RESTART_NO_HANG` so it
+/// only relaunches for a patch/reboot, not on a crash loop.
 #[cfg(windows)]
 fn register_restart(minimized: bool) {
     #[link(name = "kernel32")]
@@ -1091,13 +1096,21 @@ fn render_signature(s: &NetworkStatus, pending: &[PendingJoin]) -> String {
         s.home_relay.as_deref().unwrap_or(""),
     );
     for m in &s.members {
-        // Only bucket last-seen for OFFLINE members (where it's shown and drives
-        // the red ">1 week" dot). Including it for online members would change
-        // every tick ("Xs ago") and re-render the page, stealing focus.
+        // Volatile per-connection telemetry is deliberately kept OUT of the
+        // signature so it can't churn the page every tick (which is what steals
+        // keyboard focus — see `render_all`). Two offenders in particular:
+        //   * last-seen for ONLINE members ("Xs ago") changes every tick, so only
+        //     bucket it for OFFLINE members (where it's shown and drives the red
+        //     ">1 week" dot).
+        //   * `observed_addr` is an ip:port whose UDP port flaps as iroh re-probes
+        //     paths (frequently on Windows). It's diagnostic-only and shown in a
+        //     click-time member-detail snapshot, so leaving it out costs nothing.
+        // Focus preservation in `render_all` is the real safety net; this just
+        // avoids pointless rebuilds/flicker.
         let last = if m.online { String::new() } else { fmt_last_seen(m.last_seen) };
         let _ = write!(
             out,
-            "[{}|{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}|{}]",
+            "[{}|{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}]",
             m.node_id,
             m.is_self,
             m.label.as_deref().unwrap_or(""),
@@ -1108,7 +1121,6 @@ fn render_signature(s: &NetworkStatus, pending: &[PendingJoin]) -> String {
             m.online,
             m.public_ip.as_deref().unwrap_or(""),
             m.location.as_deref().unwrap_or(""),
-            m.observed_addr.as_deref().unwrap_or(""),
             last,
             m.role,
             m.access_disabled,
@@ -1141,7 +1153,55 @@ fn render_if_changed(
     render_all(ui, s, net, window, pending);
 }
 
+/// The title of the `adw::ActionRow` that currently holds keyboard focus, if any.
+/// Used to put focus back after a rebuild. Returns `None` when focus is in a text
+/// field (we must never yank an active caret out of a name/notes entry) or isn't on
+/// a row at all.
+fn focused_row_title(window: &adw::ApplicationWindow) -> Option<String> {
+    let mut w = adw::prelude::GtkWindowExt::focus(window)?;
+    if w.is::<gtk::Text>() || w.is::<gtk::TextView>() {
+        return None;
+    }
+    loop {
+        if let Some(row) = w.downcast_ref::<adw::ActionRow>() {
+            return Some(row.title().to_string());
+        }
+        w = w.parent()?;
+    }
+}
+
+/// Re-grab keyboard focus on the first `adw::ActionRow` under `root` whose title
+/// matches `title`. No-op if none matches (e.g. the row's member left the network).
+fn focus_row_by_title(root: &impl IsA<gtk::Widget>, title: &str) -> bool {
+    let mut child = root.as_ref().first_child();
+    while let Some(w) = child {
+        if let Some(row) = w.downcast_ref::<adw::ActionRow>() {
+            if row.title() == title {
+                row.grab_focus();
+                return true;
+            }
+        }
+        if focus_row_by_title(&w, title) {
+            return true;
+        }
+        child = w.next_sibling();
+    }
+    false
+}
+
 /// Render the main page and the (persistent) flyout content boxes.
+///
+/// Keyboard-focus preservation is the *durable* fix for the long-recurring
+/// "selection jumps back to Administration" bug (Windows especially). A status push
+/// can arrive while the user is tabbing the member list; tearing the widget tree
+/// down and rebuilding it drops focus, and GTK then defaults focus to the first
+/// focusable row — "Administration". The `render_signature` gate below tries to
+/// avoid needless rebuilds, but it's a hand-maintained field list that keeps
+/// regressing whenever a volatile field (last-seen, observed address, …) sneaks
+/// into it. So we no longer *rely* on the signature for keyboard correctness:
+/// capture the focused row here and restore it after the rebuild, and the bug stays
+/// dead no matter what triggers a rebuild. **Keep this focus save/restore** — see
+/// the keyboard-nav note in CLAUDE.md's Gotchas.
 fn render_all(
     ui: &Ui,
     s: &NetworkStatus,
@@ -1149,9 +1209,13 @@ fn render_all(
     window: &adw::ApplicationWindow,
     pending: &Rc<RefCell<Vec<PendingJoin>>>,
 ) {
+    let focused = focused_row_title(window);
     render_main(ui, s, net, window, pending);
     render_admin(&ui.admin_box, s, net, window, pending);
     render_diag(&ui.diag_box, s);
+    if let Some(title) = focused {
+        focus_row_by_title(window, &title);
+    }
 }
 
 /// Build the main page: connection banners, the control group (Administration,
