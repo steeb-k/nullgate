@@ -189,8 +189,12 @@ private fun NetworkBody(
         item {
             HeaderCard(status, needsConsent, onEnableRouting, onToggleOnline)
         }
-        items(pendingJoins, key = { it.nodeId }) { pj ->
-            JoinRequestCard(pj, onApprove = { onApprove(pj) }, onDeny = { onDeny(pj) })
+        // Only admins act on join requests; Peers never see the approval cards
+        // (mirrors the desktop GUI, which hides the join-requests area for Peers).
+        if (status.selfRole != "peer") {
+            items(pendingJoins, key = { it.nodeId }) { pj ->
+                JoinRequestCard(pj, onApprove = { onApprove(pj) }, onDeny = { onDeny(pj) })
+            }
         }
         item {
             Text(
@@ -342,7 +346,13 @@ private fun MemberRow(m: MemberView, onClick: () -> Unit) {
     }
 }
 
-/** Overflow menu of network-wide actions; gated by the viewer's role. */
+/**
+ * Overflow menu of network-wide actions, gated by the viewer's role so Peers and
+ * Controllers only see what they can actually do — mirroring the desktop GUI
+ * (`ipn-gui/src/main.rs`). Peer: view-only tier (Activity log, Leave). Controller:
+ * also Peer ticket, Settings, Rename. Originator: everything. The engine enforces
+ * the same rules server-side; this just avoids offering actions it would reject.
+ */
 @Composable
 private fun NetworkMenu(
     expanded: Boolean,
@@ -350,31 +360,50 @@ private fun NetworkMenu(
     onDismiss: () -> Unit,
     onAction: (Dialog) -> Unit,
 ) {
+    val isPeer = status.selfRole == "peer"
+    val isOriginator = status.isOriginator
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
-        DropdownMenuItem(text = { Text("Join ticket") }, onClick = { onAction(Dialog.PeerTicket) })
-        if (status.isOriginator) {
+        // Peer-level tickets & self-device settings: Controllers and the originator only.
+        if (!isPeer) {
+            DropdownMenuItem(text = { Text("Join ticket") }, onClick = { onAction(Dialog.PeerTicket) })
+        }
+        if (isOriginator) {
             DropdownMenuItem(
                 text = { Text("Controller ticket") },
                 onClick = { onAction(Dialog.ControllerTicket) },
             )
         }
         DropdownMenuItem(text = { Text("Activity log") }, onClick = { onAction(Dialog.AuditLog) })
-        DropdownMenuItem(text = { Text("Settings") }, onClick = { onAction(Dialog.Settings) })
-        HorizontalDivider()
-        DropdownMenuItem(text = { Text("Rename network") }, onClick = { onAction(Dialog.Rename) })
-        DropdownMenuItem(
-            text = { Text(if (status.frozen) "Unfreeze network" else "Freeze network") },
-            onClick = { onAction(Dialog.ToggleFreeze) },
-        )
-        if (status.isOriginator) {
-            DropdownMenuItem(
-                text = { Text("Originator key") },
-                onClick = { onAction(Dialog.OriginatorKey) },
-            )
-            DropdownMenuItem(text = { Text("Rotate network") }, onClick = { onAction(Dialog.Rotate) })
-            DropdownMenuItem(text = { Text("Delete network") }, onClick = { onAction(Dialog.Delete) })
+        if (!isPeer) {
+            DropdownMenuItem(text = { Text("Settings") }, onClick = { onAction(Dialog.Settings) })
+        }
+        // Network administration: rename is Controller+; the rest are originator-only.
+        // The whole block is Controller+, so its leading divider rides on `!isPeer`.
+        if (!isPeer) {
+            HorizontalDivider()
+            DropdownMenuItem(text = { Text("Rename network") }, onClick = { onAction(Dialog.Rename) })
+            if (isOriginator) {
+                DropdownMenuItem(
+                    text = { Text(if (status.frozen) "Unfreeze network" else "Freeze network") },
+                    onClick = { onAction(Dialog.ToggleFreeze) },
+                )
+                DropdownMenuItem(
+                    text = { Text("Originator key") },
+                    onClick = { onAction(Dialog.OriginatorKey) },
+                )
+                DropdownMenuItem(text = { Text("Rotate network") }, onClick = { onAction(Dialog.Rotate) })
+                DropdownMenuItem(text = { Text("Delete network") }, onClick = { onAction(Dialog.Delete) })
+            }
         }
         HorizontalDivider()
+        // Restoring originator control is a recovery action for anyone holding the master
+        // key who isn't the originator here — Peers included, mirroring the desktop GUI.
+        if (!isOriginator) {
+            DropdownMenuItem(
+                text = { Text("Restore originator access") },
+                onClick = { onAction(Dialog.RestoreOriginator) },
+            )
+        }
         DropdownMenuItem(text = { Text("Leave network") }, onClick = { onAction(Dialog.Leave) })
     }
 }

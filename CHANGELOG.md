@@ -4,6 +4,21 @@ All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepa
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+### Changed
+- **Android: the app now hides admin actions that Peers and Controllers can't use**, matching the
+  desktop apps instead of showing every option to everyone and letting the engine reject the
+  unauthorized taps. The overflow menu, join-request approvals, and member actions are now gated by
+  the viewer's role: Peers see only Activity log, their own member details, and Leave network;
+  Controllers additionally get the Peer join ticket, Settings (disable-remote-access / hide),
+  Rename network, and can remove Peers; the originator keeps the full set (Controller ticket,
+  freeze, rotate, delete, originator-key, promote/demote, remove anyone). Pending join-request
+  cards no longer render for Peers, and a Controller can no longer be offered "Remove" on another
+  Controller. Engine-side authorization is unchanged; this only aligns the Android UI's affordances
+  with the roster rules the desktop GUI already follows.
+- **Android: added "Restore originator access"** for members who hold the master recovery key but
+  aren't the originator on this device (Peers and Controllers), matching the desktop's
+  backup-vs-restore split. The originator's "Originator key" dialog still exports and imports; the
+  new entry is import-only. This closes the last Android/desktop role-UI gap for the release.
 
 ## [0.2.6] - 2026-07-05
 ### Fixed

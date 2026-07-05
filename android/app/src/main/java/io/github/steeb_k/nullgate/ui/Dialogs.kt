@@ -48,6 +48,7 @@ sealed interface Dialog {
     data object Rename : Dialog
     data object ToggleFreeze : Dialog
     data object OriginatorKey : Dialog
+    data object RestoreOriginator : Dialog
     data object Rotate : Dialog
     data object Delete : Dialog
     data object Leave : Dialog
@@ -86,7 +87,8 @@ fun AppDialogs(
             else "No new devices can join while frozen.",
             onDismiss = onDismiss,
         ) { run { EngineHolder.setFrozen(status?.frozen != true) }; onDismiss() }
-        Dialog.OriginatorKey -> OriginatorKeyDialog(onDismiss)
+        Dialog.OriginatorKey -> OriginatorKeyDialog(onDismiss, allowExport = true)
+        Dialog.RestoreOriginator -> OriginatorKeyDialog(onDismiss, allowExport = false)
         Dialog.Rotate -> ConfirmDialog(
             title = "Rotate network?",
             body = "This revokes every current member and issues a fresh ticket. Members must " +
@@ -202,17 +204,21 @@ private fun PeerTicketDialog(status: NetworkStatus?, onDismiss: () -> Unit) {
             Column {
                 val t = ticket
                 if (t == null) Text("Loading…") else QrAndText(t)
-                Spacer(Modifier.size(12.dp))
-                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                    Switch(checked = singleUse, onCheckedChange = {
-                        singleUse = it
-                        scope.launch {
-                            runCatching { EngineHolder.setPeerTicketSingleUse(it) }
-                            ticket = runCatching { EngineHolder.ticket() }.getOrNull()
-                        }
-                    })
-                    Spacer(Modifier.size(8.dp))
-                    Text("Single-use ticket")
+                // The single-use switch is an originator control (matches the desktop
+                // admin section); Controllers can still view/share the ticket itself.
+                if (status?.isOriginator == true) {
+                    Spacer(Modifier.size(12.dp))
+                    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                        Switch(checked = singleUse, onCheckedChange = {
+                            singleUse = it
+                            scope.launch {
+                                runCatching { EngineHolder.setPeerTicketSingleUse(it) }
+                                ticket = runCatching { EngineHolder.ticket() }.getOrNull()
+                            }
+                        })
+                        Spacer(Modifier.size(8.dp))
+                        Text("Single-use ticket")
+                    }
                 }
             }
         },
@@ -286,8 +292,14 @@ private fun SettingsDialog(status: NetworkStatus?, onDismiss: () -> Unit) {
     )
 }
 
+/**
+ * Master-key export/import. With [allowExport] (originator only) this backs up the key
+ * *and* offers import; without it, it's the "Restore originator access" flow any member
+ * can use to take over originator control by pasting a key exported elsewhere. Mirrors the
+ * desktop Administration flyout, which shows backup-vs-restore by originator status.
+ */
 @Composable
-private fun OriginatorKeyDialog(onDismiss: () -> Unit) {
+private fun OriginatorKeyDialog(onDismiss: () -> Unit, allowExport: Boolean) {
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
     var exported by remember { mutableStateOf<String?>(null) }
@@ -295,19 +307,27 @@ private fun OriginatorKeyDialog(onDismiss: () -> Unit) {
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Originator key") },
+        title = { Text(if (allowExport) "Originator key" else "Restore originator access") },
         text = {
             Column {
-                Text("Export the master recovery key, or import one on a new device.")
+                Text(
+                    if (allowExport)
+                        "Export the master recovery key, or import one on a new device."
+                    else
+                        "Paste the master recovery key exported from the originator device to " +
+                            "take over originator control on this device.",
+                )
                 Spacer(Modifier.size(8.dp))
-                exported?.let {
-                    Text(it, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
-                    TextButton(onClick = { clipboard.setText(AnnotatedString(it)) }) { Text("Copy") }
+                if (allowExport) {
+                    exported?.let {
+                        Text(it, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                        TextButton(onClick = { clipboard.setText(AnnotatedString(it)) }) { Text("Copy") }
+                    }
+                    TextButton(onClick = {
+                        scope.launch { exported = runCatching { EngineHolder.exportOriginatorKey() }.getOrNull() }
+                    }) { Text("Export key") }
+                    Spacer(Modifier.size(12.dp))
                 }
-                TextButton(onClick = {
-                    scope.launch { exported = runCatching { EngineHolder.exportOriginatorKey() }.getOrNull() }
-                }) { Text("Export key") }
-                Spacer(Modifier.size(12.dp))
                 OutlinedTextField(
                     value = importCode,
                     onValueChange = { importCode = it },
@@ -337,7 +357,10 @@ private fun MemberDetailDialog(
     var nickname by remember { mutableStateOf(member.label.orEmpty()) }
     var note by remember { mutableStateOf(member.note.orEmpty()) }
     val isOriginator = status?.isOriginator == true
-    val canRemove = (status?.selfRole == "controller" || status?.selfRole == "originator")
+    // Originator may remove anyone; a Controller may remove Peers only (mirrors the
+    // roster rule + desktop GUI). Never offered on your own row.
+    val canRemove = !member.isSelf && (isOriginator ||
+        (status?.selfRole == "controller" && member.role == "peer"))
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -373,7 +396,7 @@ private fun MemberDetailDialog(
                         run { EngineHolder.setMemberRole(member.nodeId, !controller) }; onDismiss()
                     }) { Text(if (controller) "Demote to Peer" else "Promote to Controller") }
                 }
-                if (!member.isSelf && canRemove) {
+                if (canRemove) {
                     TextButton(onClick = {
                         run { EngineHolder.removeMember(member.nodeId) }; onDismiss()
                     }) { Text("Remove from network") }
