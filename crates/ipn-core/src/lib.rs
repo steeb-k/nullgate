@@ -1,4 +1,4 @@
-//! `ipn-core` — the engine for **iroh-private-network** (Nullgate): a peer-to-peer
+//! `ipn-core` — the engine for **Nullgate**: a peer-to-peer
 //! virtual LAN over [iroh].
 //!
 //! This crate is UI-agnostic and IPC-agnostic (it compiles to Android too): it

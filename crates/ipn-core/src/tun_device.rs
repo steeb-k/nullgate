@@ -25,11 +25,15 @@ impl RealTun {
     /// (Desktop only — on Android the interface comes from `VpnService`.)
     #[cfg(not(target_os = "android"))]
     pub fn open(ip: Ipv4Addr, prefix: u8, mtu: u16) -> io::Result<Self> {
-        let dev = DeviceBuilder::new()
-            .name("nullgate")
-            .ipv4(ip, prefix, None)
-            .mtu(mtu)
-            .build_async()?;
+        let builder = DeviceBuilder::new().ipv4(ip, prefix, None).mtu(mtu);
+        // macOS utun interfaces are kernel-control devices whose names must be
+        // `utunN` (the OS picks the index); passing an arbitrary name like
+        // "nullgate" makes device creation fail, which would silently leave
+        // routing "off". Only name the interface on Windows/Linux, where a custom
+        // adapter name is allowed; on macOS let the OS assign the utun index.
+        #[cfg(not(target_os = "macos"))]
+        let builder = builder.name("nullgate");
+        let dev = builder.build_async()?;
         Ok(Self {
             dev,
             mtu: mtu as usize,

@@ -67,7 +67,7 @@ lipo -archs "dist/nullgate-<ver>-macos-universal/Nullgate.app/Contents/MacOS/nul
 
 ## Install / manage (on the target)
 ```sh
-curl -fsSL https://raw.githubusercontent.com/steeb-k/iroh-private-network/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/steeb-k/nullgate/main/install.sh | sh
 ```
 Or from the tarball: `./nullgatectl --install`. `nullgatectl` uses `sudo` and:
 - copies the app to `/Applications/Nullgate.app`,
@@ -86,5 +86,5 @@ quarantined — use the installer command.)
 
 ## Auto-update
 `…Nullgate.update.plist` (root LaunchDaemon; daily at 13:00 + at load) runs `nullgatectl --update`: compares
-`ipn-daemon --version` to the latest tag of the public `steeb-k/iroh-private-network` repo,
+`ipn-daemon --version` to the latest tag of the public `steeb-k/nullgate` repo,
 downloads the matching tarball, swaps the `.app`, and reloads the daemon.

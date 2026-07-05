@@ -1,6 +1,6 @@
 [Unit]
 Description=Nullgate auto-update check
-Documentation=https://github.com/steeb-k/iroh-private-network
+Documentation=https://github.com/steeb-k/nullgate
 After=network-online.target
 Wants=network-online.target
 

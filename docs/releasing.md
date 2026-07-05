@@ -2,7 +2,7 @@
 
 From 0.1.0, Nullgate ships **real installers** with **auto-update**: a code-signed **Windows MSI**, a
 **Linux tarball** (system-service installer), and a **macOS** universal `.app` tarball. Releases
-are published to the **public `steeb-k/iroh-private-network` repo**; the in-product updaters and
+are published to the **public `steeb-k/nullgate` repo**; the in-product updaters and
 the `install.sh` one-liner read its `releases/latest`. Builds are **local, no CI** — each OS's
 artifact is built on that OS (Windows native; Linux via WSL; macOS on a Mac).
 
@@ -38,11 +38,11 @@ Per-platform detail: [windows-packaging.md](windows-packaging.md),
 4. **Publish** to the public repo (authenticated `gh`). Create the release with whatever's ready,
    then upload the rest as each OS finishes:
    ```sh
-   gh release create v<ver> --repo steeb-k/iroh-private-network \
+   gh release create v<ver> --repo steeb-k/nullgate \
      --title "v<ver>" --notes-file release-notes.md \
      target/wix/nullgate-<ver>-windows-x86_64.msi
-   gh release upload v<ver> --repo steeb-k/iroh-private-network dist/nullgate-<ver>-linux-x86_64.tar.gz
-   gh release upload v<ver> --repo steeb-k/iroh-private-network dist/nullgate-<ver>-macos-universal.tar.gz
+   gh release upload v<ver> --repo steeb-k/nullgate dist/nullgate-<ver>-linux-x86_64.tar.gz
+   gh release upload v<ver> --repo steeb-k/nullgate dist/nullgate-<ver>-macos-universal.tar.gz
    ```
    Asset names must stay `nullgate-<ver>-<platform>.<ext>` — the updaters glob on
    `windows-x86_64.msi`, `linux-x86_64.tar.gz`, and `macos-(universal|<arch>).tar.gz`.

@@ -19,7 +19,7 @@
 # guard results with `[ -n … ]` and use `|| die` on the standalone critical ops.
 set -eu
 
-REPO="${NULLGATE_BINARIES_REPO:-steeb-k/iroh-private-network}"
+REPO="${NULLGATE_BINARIES_REPO:-steeb-k/nullgate}"
 ASSET_RE='https://[^"]+linux-x86_64\.tar\.gz'
 
 BIN_DIR="/usr/local/bin"

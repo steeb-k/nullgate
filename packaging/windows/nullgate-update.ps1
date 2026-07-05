@@ -4,7 +4,7 @@
   helper.
 
   The Windows analog of packaging/linux/nullgate-update. Compares the installed daemon
-  version to the latest release of the PUBLIC steeb-k/iroh-private-network repo
+  version to the latest release of the PUBLIC steeb-k/nullgate repo
   and, if newer, downloads the MSI and applies it silently. The MSI's MajorUpgrade
   handling does the heavy lifting (stop service -> replace files -> restart
   service), so "apply" is just `msiexec /i <msi> /qn`.
@@ -33,7 +33,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Repo      = if ($env:NULLGATE_BINARIES_REPO) { $env:NULLGATE_BINARIES_REPO } else { 'steeb-k/iroh-private-network' }
+$Repo      = if ($env:NULLGATE_BINARIES_REPO) { $env:NULLGATE_BINARIES_REPO } else { 'steeb-k/nullgate' }
 $AssetGlob = '*windows-x86_64.msi'
 $TaskName  = 'NullgateUpdate'
 $BinDir    = $PSScriptRoot

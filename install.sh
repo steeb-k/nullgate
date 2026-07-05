@@ -2,7 +2,7 @@
 # Nullgate (Nullgate) bootstrap — install, update, or remove in one command,
 # on Linux OR macOS:
 #
-#   curl -fsSL https://raw.githubusercontent.com/steeb-k/iroh-private-network/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/steeb-k/nullgate/main/install.sh | sh
 #
 # It detects the OS, downloads the matching release asset, unpacks it, and runs the
 # bundled `nullgatectl --install`. After the first install, manage everything with the
@@ -15,7 +15,7 @@
 # .msi from the releases page instead.
 set -eu
 
-REPO="${NULLGATE_BINARIES_REPO:-steeb-k/iroh-private-network}"
+REPO="${NULLGATE_BINARIES_REPO:-steeb-k/nullgate}"
 API="https://api.github.com/repos/$REPO/releases/latest"
 
 say()  { printf '%s\n' "$*"; }

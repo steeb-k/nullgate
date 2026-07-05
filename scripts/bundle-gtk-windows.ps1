@@ -1,4 +1,4 @@
-# Assemble a self-contained Windows distribution of iroh-private-network.
+# Assemble a self-contained Windows distribution of Nullgate.
 #
 # Mirrors seed-sync-gtk's bundling: copies the GTK4/libadwaita runtime (DLLs,
 # compiled GSettings schemas, gdk-pixbuf loaders, icon theme) next to nullgate.exe so

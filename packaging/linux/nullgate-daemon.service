@@ -1,6 +1,6 @@
 [Unit]
 Description=Nullgate daemon
-Documentation=https://github.com/steeb-k/iroh-private-network
+Documentation=https://github.com/steeb-k/nullgate
 After=network-online.target
 Wants=network-online.target
 # Never stop trying to recover: disabling the start-rate limit means a repeated

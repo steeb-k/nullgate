@@ -18,7 +18,7 @@
 # guard results with `[ -n … ]` and use `|| die` on the standalone critical ops.
 set -eu
 
-REPO="${NULLGATE_BINARIES_REPO:-steeb-k/iroh-private-network}"
+REPO="${NULLGATE_BINARIES_REPO:-steeb-k/nullgate}"
 case "$(uname -m)" in arm64) HOST=arm64 ;; *) HOST=x86_64 ;; esac
 ASSET_RE="https://[^\"]+macos-(universal|$HOST)\\.tar\\.gz"
 

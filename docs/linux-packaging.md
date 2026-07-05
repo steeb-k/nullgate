@@ -31,7 +31,7 @@ scripts/package-linux.sh --skip-build    # repackage existing target/release bin
 ## Install / manage (on the target)
 One-liner (downloads the latest release):
 ```sh
-curl -fsSL https://raw.githubusercontent.com/steeb-k/iroh-private-network/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/steeb-k/nullgate/main/install.sh | sh
 ```
 Or from the unpacked tarball: `./nullgatectl --install`. Either way `nullgatectl` uses `sudo` for the
 privileged steps and:
@@ -44,7 +44,7 @@ Manage: `nullgatectl --status`, `nullgatectl --update [--check]`, `nullgatectl -
 
 ## Auto-update
 `ipn-update.timer` (system, daily, randomized) runs `nullgatectl --update` as root: it compares
-`ipn-daemon --version` to the latest tag of the public `steeb-k/iroh-private-network` repo,
+`ipn-daemon --version` to the latest tag of the public `steeb-k/nullgate` repo,
 downloads the new tarball, atomically swaps the binaries, reloads systemd, and restarts the
 daemon.
 

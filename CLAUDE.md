@@ -1,4 +1,4 @@
-# CLAUDE.md — agent guide for iroh-private-network (Nullgate)
+# CLAUDE.md — agent guide for Nullgate (iroh-private-network)
 
 Read this before changing anything. It is the authoritative guide for how this repo is built,
 how features are added, and how they must be documented. Keep it accurate — if you change the
@@ -72,7 +72,7 @@ build-msi.ps1`, Azure Trusted Signing), a **Linux** system-service tarball (`scr
 package-linux.sh` + `packaging/linux/nullgatectl`), and a **macOS** universal `.app` tarball
 (`scripts/setup-conda-macos.sh` once to build the conda-forge GTK env, then
 `scripts/package-macos.sh`, built on a Mac). Releases are `gh release` uploads to the **public**
-`steeb-k/iroh-private-network` repo; the in-product updaters + `install.sh` read its
+`steeb-k/nullgate` repo; the in-product updaters + `install.sh` read its
 `releases/latest`. The signing metadata (`artifact-signing-metadata.json`) is **git-ignored** —
 never commit it. Builds are **local** (Windows native; Linux/Android via WSL; macOS on a Mac).
 **Do not add GitHub Actions / CI.**

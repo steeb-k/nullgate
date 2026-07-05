@@ -1,7 +1,7 @@
 // Release Windows builds are a GUI-subsystem binary so launching the app doesn't
 // pop a console window. Debug keeps the console for dev logging.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
-//! iroh-private-network desktop GUI (GTK4 + libadwaita) — an **unprivileged IPC
+//! Nullgate desktop GUI (GTK4 + libadwaita) — an **unprivileged IPC
 //! client** to `ipn-daemon`. The daemon owns the iroh node + TUN (the only thing
 //! needing elevation); this process just renders state and sends commands, so it
 //! never needs admin/root.
@@ -830,7 +830,28 @@ fn build_ui(
             let _ = qtx.try_send(());
         });
         app.add_action(&action);
+        // On Windows/Linux, Ctrl+Q fully quits (the platform norm). On macOS we
+        // deliberately do NOT give any key a hard-quit: fully exiting is reserved
+        // for the tray's "Quit Nullgate" item (see the Cmd+Q → hide-to-tray binding
+        // below), matching this app's tray-first design.
+        #[cfg(not(target_os = "macos"))]
         app.set_accels_for_action("app.quit", &["<Ctrl>q"]);
+    }
+
+    // macOS: repurpose Cmd+Q so it behaves like Alt+F4 elsewhere — hide the window
+    // to the tray rather than quit. macOS has no native Quit menu item wired here,
+    // so nothing else claims Cmd+Q; we route it to `window.close()`, which the
+    // close-request handler below turns into a hide (the app keeps running in the
+    // tray).
+    #[cfg(target_os = "macos")]
+    {
+        let action = gtk::gio::SimpleAction::new("hide-to-tray", None);
+        let w = window.clone();
+        action.connect_activate(move |_, _| {
+            w.close();
+        });
+        app.add_action(&action);
+        app.set_accels_for_action("app.hide-to-tray", &["<Meta>q"]);
     }
 
     // "Back" navigation: Alt+Left, or Backspace (unless typing in a text field),
@@ -2233,8 +2254,8 @@ fn show_about(window: &adw::ApplicationWindow) {
         .version(env!("CARGO_PKG_VERSION"))
         .developer_name("kznjk")
         .license_type(gtk::License::Gpl30)
-        .website("https://github.com/steeb-k/iroh-private-network")
-        .issue_url("https://github.com/steeb-k/iroh-private-network/issues")
+        .website("https://github.com/steeb-k/nullgate")
+        .issue_url("https://github.com/steeb-k/nullgate/issues")
         .build();
     about.present();
 }

@@ -1,7 +1,7 @@
 Nullgate (Nullgate) - macOS
 
 Quick install (downloads the latest release):
-    curl -fsSL https://raw.githubusercontent.com/steeb-k/iroh-private-network/main/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/steeb-k/nullgate/main/install.sh | sh
 
 Or from this unpacked tarball:
     ./nullgatectl --install        # uses sudo; installs the daemon as a root LaunchDaemon

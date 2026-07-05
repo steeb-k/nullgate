@@ -14,7 +14,7 @@ devices find and authenticate each other directly (built on [iroh](https://www.i
 > **Status:** 0.2.3, under active testing. Works on **Windows, Linux, macOS, and Android**
 > (the Android app is Kotlin/Compose and routes traffic through Android's built-in VPN). Grab an
 > installer or the APK from the
-> [Releases](https://github.com/steeb-k/iroh-private-network/releases) page (Android build details:
+> [Releases](https://github.com/steeb-k/nullgate/releases) page (Android build details:
 > `docs/android-packaging.md`).
 
 ## What it does
@@ -43,7 +43,7 @@ devices find and authenticate each other directly (built on [iroh](https://www.i
 ## Get it
 
 **Windows** — download `nullgate-<version>-windows-x86_64.msi` from the
-[Releases](https://github.com/steeb-k/iroh-private-network/releases) page and run it (it's
+[Releases](https://github.com/steeb-k/nullgate/releases) page and run it (it's
 code-signed). It installs the app plus the background networking service and keeps itself
 updated. Launch **Nullgate** from the Start menu — the desktop app is called
 **Nullgate**.
@@ -51,7 +51,7 @@ updated. Launch **Nullgate** from the Start menu — the desktop app is called
 **Linux & macOS** — one line in a terminal:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/steeb-k/iroh-private-network/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/steeb-k/nullgate/main/install.sh | sh
 ```
 
 It downloads the right build, sets up the background service (you'll be asked for your password

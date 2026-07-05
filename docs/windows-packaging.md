@@ -70,7 +70,7 @@ session (`AzureCliCredential`) so it doesn't stall on IMDS.
 `packaging\windows\ipn-update.ps1` is installed to `C:\Program Files\Nullgate\bin` and registered as
 the SYSTEM scheduled task **`NullgateUpdate`** (daily ~3am ±2h, plus 5 min after boot). It compares
 `nullgate-daemon.exe --version` to the latest release tag of the public
-`steeb-k/iroh-private-network` repo and, if newer, downloads the MSI and applies it silently
+`steeb-k/nullgate` repo and, if newer, downloads the MSI and applies it silently
 (`msiexec /i … /qn`). The MSI's `MajorUpgrade` stops the service, swaps files, and restarts it.
 Logs: `%ProgramData%\ipn\update.log`.
 

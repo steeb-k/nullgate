@@ -10,10 +10,10 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/steeb-k/iroh-private-network"
+repository = "https://github.com/steeb-k/nullgate"
 rust-version = "1.85"
 
 # Shared dependency versions. The iroh ecosystem crates MUST be bumped TOGETHER:

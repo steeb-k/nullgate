@@ -5,6 +5,27 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-07-05
+### Fixed
+- **Cmd+Q now hides Nullgate to the tray on macOS** (previously it did nothing — the quit
+  accelerator was bound only to `<Ctrl>q`, and Cmd is the Meta modifier on macOS). Cmd+Q now
+  matches the window's close button / Alt+F4 elsewhere: it hides the window and leaves the app
+  running in the tray. Fully quitting stays reserved for the tray's "Quit Nullgate" item.
+- **macOS routing now actually turns on.** The TUN interface was always created with the fixed
+  name `nullgate`, which macOS's `utun` kernel control rejects (utun devices must be named
+  `utunN`), so `RealTun::open` failed on macOS and the app permanently showed the "Routing off —
+  start the daemon elevated to carry traffic" banner even with an assigned `10.99.0.x` address.
+  The interface is now only explicitly named on Windows/Linux; on macOS the OS assigns the utun
+  index.
+
+### Changed
+- **Release/distribution repo renamed `iroh-private-network` → `nullgate`.** Updated the
+  in-product updaters (`packaging/{windows,linux,macos}` update scripts), `install.sh`, the systemd
+  unit `Documentation=` URLs, `INSTALL.txt` files, the workspace `repository` field, the GUI
+  About-window website/issue URLs, and the docs/README release links to
+  `github.com/steeb-k/nullgate`. The `NULLGATE_BINARIES_REPO` override still lets you point the
+  updaters elsewhere.
+
 ## [0.2.4] - 2026-07-04
 ### Changed
 - **New app + tray icons across every platform.** The redrawn "gate" mark replaces the old
