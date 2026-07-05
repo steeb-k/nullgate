@@ -31,8 +31,8 @@ android {
         // scheme is MAJOR*10000 + MINOR*100 + PATCH (0.2.0 -> 200, 0.2.1 -> 201), so it
         // stays monotonic and decodable. A stale versionCode blocks in-place updates.
         // See docs/releasing.md + docs/android-packaging.md.
-        versionCode = 206
-        versionName = "0.2.6"
+        versionCode = 300
+        versionName = "0.3.0"
     }
 
     signingConfigs {

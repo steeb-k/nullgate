@@ -4,6 +4,8 @@ All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepa
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+
+## [0.3.0] - 2026-07-05
 ### Added
 - **Desktop: the system tray + notifications moved out of the GUI into a lightweight
   background tray agent.** Previously the whole GUI ran hidden at all times to host the tray, so
@@ -36,6 +38,23 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   `mdimport` after every install **and update** (a bundle replacement can stale out the existing
   Launch Services record), and copies the bundle with `ditto` instead of `cp -R` to preserve its
   signature/xattr metadata cleanly.
+- **Keyboard navigation no longer jumps back to "Administration" every few seconds** (most visible
+  on Windows). A periodic status push would rebuild the main page's widget tree, dropping keyboard
+  focus so GTK reset it to the first row. This had been "fixed" several times by removing whichever
+  volatile field was churning the render signature, only to regress when a new one crept in. The
+  durable fix decouples keyboard correctness from the signature: `render_all` now saves the focused
+  row and restores it after any rebuild, so focus survives regardless of what triggers one. Also
+  dropped the volatile `observed_addr` (an ip:port whose UDP port flaps as iroh re-probes paths) from
+  the render signature so the page stops needlessly rebuilding every few seconds in the first place.
+- **Windows: the tray GUI now restarts after an auto-update.** The daily `NullgateUpdate` task
+  runs as SYSTEM (session 0) while the GUI runs in the logged-in user's interactive session, so
+  the MSI's Restart Manager could close the GUI but never relaunch it across that boundary —
+  leaving the daemon updated but the tray app gone (or stale) until the next login. The updater
+  (`packaging/windows/nullgate-update.ps1`) now closes the GUI before applying the MSI (so
+  `nullgate.exe` swaps in place with no pending reboot) and relaunches it minimized in the user's
+  session via a one-shot Interactive scheduled task. Linux/macOS already self-relaunch on the
+  daemon's version change (`ipn-gui` `restart_self`), where the updater shares the user session;
+  this closes the Windows-only gap.
 
 ### Changed
 - **Desktop: login autostart now launches the tray agent, not the full GUI.** The per-user
@@ -62,26 +81,6 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   aren't the originator on this device (Peers and Controllers), matching the desktop's
   backup-vs-restore split. The originator's "Originator key" dialog still exports and imports; the
   new entry is import-only. This closes the last Android/desktop role-UI gap for the release.
-
-## [0.2.6] - 2026-07-05
-### Fixed
-- **Keyboard navigation no longer jumps back to "Administration" every few seconds** (most visible
-  on Windows). A periodic status push would rebuild the main page's widget tree, dropping keyboard
-  focus so GTK reset it to the first row. This had been "fixed" several times by removing whichever
-  volatile field was churning the render signature, only to regress when a new one crept in. The
-  durable fix decouples keyboard correctness from the signature: `render_all` now saves the focused
-  row and restores it after any rebuild, so focus survives regardless of what triggers one. Also
-  dropped the volatile `observed_addr` (an ip:port whose UDP port flaps as iroh re-probes paths) from
-  the render signature so the page stops needlessly rebuilding every few seconds in the first place.
-- **Windows: the tray GUI now restarts after an auto-update.** The daily `NullgateUpdate` task
-  runs as SYSTEM (session 0) while the GUI runs in the logged-in user's interactive session, so
-  the MSI's Restart Manager could close the GUI but never relaunch it across that boundary —
-  leaving the daemon updated but the tray app gone (or stale) until the next login. The updater
-  (`packaging/windows/nullgate-update.ps1`) now closes the GUI before applying the MSI (so
-  `nullgate.exe` swaps in place with no pending reboot) and relaunches it minimized in the user's
-  session via a one-shot Interactive scheduled task. Linux/macOS already self-relaunch on the
-  daemon's version change (`ipn-gui` `restart_self`), where the updater shares the user session;
-  this closes the Windows-only gap.
 
 ## [0.2.5] - 2026-07-05
 ### Fixed
