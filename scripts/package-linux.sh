@@ -19,7 +19,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_ID="io.github.steeb_k.Nullgate"
 PKG_SRC="$ROOT/packaging/linux"
-# Per-size, hand-tuned app icons (img/icon-stacked-<sz>.png) installed as-is.
+# Per-size app icons (img/nullgate-icon-<sz>.png) installed as-is.
 ICON_SIZES="16 32 64 128 256 512"
 
 cd "$ROOT"
@@ -56,11 +56,11 @@ install -m 0644 "$PKG_SRC/nullgate-daemon.service"  "$STAGE/lib/systemd/system/n
 install -m 0644 "$PKG_SRC/nullgate-update.service"  "$STAGE/lib/systemd/system/nullgate-update.service"
 install -m 0644 "$PKG_SRC/nullgate-update.timer"    "$STAGE/lib/systemd/system/nullgate-update.timer"
 
-# hicolor icons: the per-size, hand-tuned app icons, installed as-is.
+# hicolor icons: the per-size app icons, installed as-is.
 for sz in $ICON_SIZES; do
   dir="$STAGE/share/icons/hicolor/${sz}x${sz}/apps"
   mkdir -p "$dir"
-  install -m 0644 "$ROOT/img/icon-stacked-${sz}.png" "$dir/$APP_ID.png"
+  install -m 0644 "$ROOT/img/nullgate-icon-${sz}.png" "$dir/$APP_ID.png"
 done
 
 # Tarball

@@ -5,6 +5,17 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-07-04
+### Changed
+- **New app + tray icons across every platform.** The redrawn "gate" mark replaces the old
+  `icon-stacked`/`tray-icon-splash` art. The main app icon now ships as `img/nullgate-icon.*`
+  (a fresh multi-resolution `img/nullgate-icon.ico` embedded in the Windows `.exe`, the per-size
+  hicolor PNGs for Linux, and the macOS `AppIcon.icns` — now with a native 1024 slot instead of an
+  upscale). The tray/status icon is `img/nullgate-tray-icon-64.png` on Windows/macOS/Linux. On
+  Android the launcher icon becomes the new main icon (bitmap mipmaps, replacing the old adaptive
+  vector) and the foreground-service notification uses a white-silhouette status icon
+  (`ic_stat_nullgate`) derived from the tray mark, replacing the stock lock glyph.
+
 ## [0.2.3] - 2026-07-03
 ### Added
 - **Memory watchdog (iroh #4293 stopgap).** The daemon now samples its own resident memory every

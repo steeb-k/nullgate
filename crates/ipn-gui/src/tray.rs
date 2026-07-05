@@ -10,9 +10,10 @@
 //! "Open Nullgate" — re-shows it. "Quit Nullgate" sends on `quit_tx`; the GTK side then
 //! disconnects from the network and exits.
 
-// Tray icon (the only one): a full-color "splash" icon, used as-is on every theme.
+// Tray icon (the only one): the "gate" mark, used as-is on every theme. The 64px
+// source is scaled down at runtime to whatever each platform's tray wants.
 const TRAY_PNG: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../img/tray-icon-splash.png"));
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../img/nullgate-tray-icon-64.png"));
 
 #[cfg(any(windows, target_os = "macos"))]
 pub fn install(

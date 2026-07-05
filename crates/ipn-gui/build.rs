@@ -1,4 +1,4 @@
-//! On Windows, embed the app icon (img/icon-stacked.ico) and version-info strings into
+//! On Windows, embed the app icon (img/nullgate-icon.ico) and version-info strings into
 //! the GUI executable so the taskbar/window/Explorer icon and the name Task Manager
 //! shows are Nullgate's. No-op on other platforms.
 
@@ -19,15 +19,15 @@ fn embed_windows_resource() {
     res.set("OriginalFilename", "nullgate.exe");
     res.set("InternalName", "nullgate.exe");
 
-    let ico = concat!(env!("CARGO_MANIFEST_DIR"), "/../../img/icon-stacked.ico");
+    let ico = concat!(env!("CARGO_MANIFEST_DIR"), "/../../img/nullgate-icon.ico");
     if std::path::Path::new(ico).exists() {
         res.set_icon(ico);
     } else {
-        println!("cargo:warning=img/icon-stacked.ico not found; skipping Windows icon embed");
+        println!("cargo:warning=img/nullgate-icon.ico not found; skipping Windows icon embed");
     }
 
     if let Err(e) = res.compile() {
         println!("cargo:warning=could not embed Windows resource: {e}");
     }
-    println!("cargo:rerun-if-changed=../../img/icon-stacked.ico");
+    println!("cargo:rerun-if-changed=../../img/nullgate-icon.ico");
 }

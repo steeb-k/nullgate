@@ -137,7 +137,7 @@ class NullgateVpnService : VpnService() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(stateText)
-            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setSmallIcon(R.drawable.ic_stat_nullgate)
             .setOngoing(true)
             .setContentIntent(tap)
             .setPriority(NotificationCompat.PRIORITY_LOW)

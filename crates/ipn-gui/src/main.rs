@@ -198,7 +198,7 @@ async fn stream_events(socket: &std::path::Path, tx: &async_channel::Sender<UiMs
 /// Install the app stylesheet: a base "frameless" look on every platform, plus a
 /// Windows 11-leaning layer (Segoe UI, accent, rounding) on Windows. (Borrowed
 /// from seed-sync-gtk; macOS has no extra sheet there either.)
-/// Register the bundled app icon (`icon-spin.png`) into the icon theme under
+/// Register the bundled app icon (`nullgate-icon-*.png`) into the icon theme under
 /// `APP_ID`, so `application_icon(APP_ID)` resolves on every platform (Windows'
 /// GTK theme has no entry for it otherwise). Also sets it as the default window
 /// icon. Best-effort.
@@ -210,17 +210,17 @@ fn install_app_icon() {
         return;
     };
     // Windows: %LOCALAPPDATA%\ipn\icons ; Linux: ~/.cache/ipn/icons. Register the
-    // per-size "stacked" app icon so the window/taskbar icon is crisp at each size
-    // (the artist hand-tuned the small sizes). Always (over)write so a replaced
-    // asset takes effect next launch.
+    // per-size app icon so the window/taskbar icon is crisp at each size (16 and 32
+    // are downscaled from the 1024 master; 64+ are the artist's sizes). Always
+    // (over)write so a replaced asset takes effect next launch.
     let base = dirs.cache_dir().join("nullgate").join("icons");
     let sizes: [(&str, &[u8]); 6] = [
-        ("16x16", include_bytes!("../../../img/icon-stacked-16.png")),
-        ("32x32", include_bytes!("../../../img/icon-stacked-32.png")),
-        ("64x64", include_bytes!("../../../img/icon-stacked-64.png")),
-        ("128x128", include_bytes!("../../../img/icon-stacked-128.png")),
-        ("256x256", include_bytes!("../../../img/icon-stacked-256.png")),
-        ("512x512", include_bytes!("../../../img/icon-stacked-512.png")),
+        ("16x16", include_bytes!("../../../img/nullgate-icon-16.png")),
+        ("32x32", include_bytes!("../../../img/nullgate-icon-32.png")),
+        ("64x64", include_bytes!("../../../img/nullgate-icon-64.png")),
+        ("128x128", include_bytes!("../../../img/nullgate-icon-128.png")),
+        ("256x256", include_bytes!("../../../img/nullgate-icon-256.png")),
+        ("512x512", include_bytes!("../../../img/nullgate-icon-512.png")),
     ];
     for (size, bytes) in sizes {
         let apps = base.join("hicolor").join(size).join("apps");

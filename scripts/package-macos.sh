@@ -19,7 +19,7 @@
 # the daemon as a ROOT LaunchDaemon (it needs root to create the utun interface),
 # a root daily auto-update LaunchDaemon, and a per-user tray GUI LaunchAgent.
 #
-# Requires: cargo, Xcode CLT (install_name_tool/codesign/otool/lipo/iconutil/sips),
+# Requires: cargo, Xcode CLT (install_name_tool/codesign/otool/lipo/iconutil),
 # conda-forge envs with gtk4 + libadwaita (osx-arm64; plus osx-64 for universal).
 set -euo pipefail
 
@@ -134,15 +134,14 @@ fi
 # Info.plist (CFBundleVersion from Cargo).
 sed "s/__VERSION__/$VERSION/g" "$PKG_SRC/Info.plist" > "$CONTENTS/Info.plist"
 
-# AppIcon.icns from the per-size, hand-tuned app icons (slot:source-size). The
-# 1024 slot has no source, so it's upscaled from 512.
+# AppIcon.icns from the per-size app icons (slot:source-size). The set ships a
+# native 1024 for the 512x512@2x slot, so nothing is upscaled.
 ICONSET="$(mktemp -d)/AppIcon.iconset"; mkdir -p "$ICONSET"
 for spec in 16x16:16 16x16@2x:32 32x32:32 32x32@2x:64 128x128:128 128x128@2x:256 \
-            256x256:256 256x256@2x:512 512x512:512; do
+            256x256:256 256x256@2x:512 512x512:512 512x512@2x:1024; do
   nm="${spec%%:*}"; sz="${spec##*:}"
-  cp "$ROOT/img/icon-stacked-${sz}.png" "$ICONSET/icon_$nm.png"
+  cp "$ROOT/img/nullgate-icon-${sz}.png" "$ICONSET/icon_$nm.png"
 done
-sips -z 1024 1024 "$ROOT/img/icon-stacked-512.png" --out "$ICONSET/icon_512x512@2x.png" >/dev/null 2>&1
 iconutil -c icns "$ICONSET" -o "$CONTENTS/Resources/AppIcon.icns"
 rm -rf "$(dirname "$ICONSET")"
 echo "package-macos: wrote AppIcon.icns"
