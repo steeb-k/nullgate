@@ -74,7 +74,10 @@ gitignored — regenerated every build.
   devices; a stale `versionName` just mislabels the build.
 - Release signing reads `android/keystore.properties` (gitignored — **never commit; a lost signing
   key permanently blocks in-place updates**). Without it, release builds are produced unsigned
-  (won't install); debug builds are unaffected.
+  (won't install); debug builds are unaffected. The signed release APK is published as a GitHub
+  release asset (`nullgate-<ver>-android.apk`) and users can auto-update via **Obtainium** — this is
+  why the keystore must stay constant across releases. See the "Android APK & Obtainium" section in
+  [releasing.md](releasing.md).
 - `minSdk 26`, `targetSdk 35`, `compileSdk 35`. No file-storage permissions; the only runtime
   permissions are the VPN consent (system dialog), notifications (API 33+), and camera (optional,
   for QR scanning).

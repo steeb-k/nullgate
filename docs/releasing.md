@@ -35,6 +35,11 @@ Per-platform detail: [windows-packaging.md](windows-packaging.md),
      then `scripts/package-macos.sh` → `dist/nullgate-<ver>-macos-{universal|arm64}.tar.gz`.
      Verify the floor: `otool -l …/Contents/lib/libgtk-4.*.dylib | grep -A3 LC_BUILD_VERSION`
      shows `minos 11.0`. See `macos-packaging.md` (conda-forge GTK, not Homebrew).
+   - **Android** (signed APK): needs `android/keystore.properties` (the **stable** release
+     keystore — see the Android note below). `cd android && ./gradlew :app:assembleRelease`
+     produces `android/app/build/outputs/apk/release/app-release.apk`; rename it to
+     `nullgate-<ver>-android.apk` for upload. Confirm you bumped `versionCode`/`versionName` in
+     step 2 first — a stale `versionCode` silently blocks in-place updates (Obtainium included).
 4. **Publish** to the public repo (authenticated `gh`). Create the release with whatever's ready,
    then upload the rest as each OS finishes:
    ```sh
@@ -43,9 +48,12 @@ Per-platform detail: [windows-packaging.md](windows-packaging.md),
      target/wix/nullgate-<ver>-windows-x86_64.msi
    gh release upload v<ver> --repo steeb-k/nullgate dist/nullgate-<ver>-linux-x86_64.tar.gz
    gh release upload v<ver> --repo steeb-k/nullgate dist/nullgate-<ver>-macos-universal.tar.gz
+   gh release upload v<ver> --repo steeb-k/nullgate nullgate-<ver>-android.apk
    ```
-   Asset names must stay `nullgate-<ver>-<platform>.<ext>` — the updaters glob on
-   `windows-x86_64.msi`, `linux-x86_64.tar.gz`, and `macos-(universal|<arch>).tar.gz`.
+   Asset names must stay `nullgate-<ver>-<platform>.<ext>` — the desktop updaters glob on
+   `windows-x86_64.msi`, `linux-x86_64.tar.gz`, and `macos-(universal|<arch>).tar.gz`; the Android
+   build is a single universal `nullgate-<ver>-android.apk` (Obtainium auto-selects the lone `.apk`
+   asset — see the Android note below).
 
 ## Smoke-check before announcing
 - **Windows:** install the MSI on a clean machine; confirm the app opens, the `NullgateDaemon` service
@@ -57,8 +65,34 @@ Per-platform detail: [windows-packaging.md](windows-packaging.md),
 - **Auto-update path:** with an older build installed, publish a newer release and confirm the
   updater picks it up (or force it: Windows `…\bin\ipn-update.ps1 -Check`; Linux/macOS
   `nullgatectl --update --check`).
+- **Android:** on a device that already has the *previous* release-signed build,
+  `adb install -r nullgate-<ver>-android.apk` — it must update **in place** (no uninstall) and
+  launch. An `INSTALL_FAILED_UPDATE_INCOMPATIBLE`/signature clash means the keystore changed since
+  the installed build; stop and fix it before publishing (see the Android note below).
 
 ## Notes
 - The signing metadata (`artifact-signing-metadata.json`) is **git-ignored** — see
   [windows-packaging.md](windows-packaging.md). Never commit it or the generated `wix/license.rtf`.
-- Android (signed APK via UniFFI + `VpnService`) is still planned; see `TODO.md`.
+
+## Android APK & Obtainium
+Each release also carries one **signed universal APK**, `nullgate-<ver>-android.apk` (build +
+naming in step 3). There's no in-product Android updater; users update either manually or through
+**[Obtainium](https://github.com/ImranR98/Obtainium)**, which the release structure already
+supports out of the box:
+
+- **Add the app in Obtainium** with the source URL `https://github.com/steeb-k/nullgate`. Obtainium
+  tracks the release marked **Latest**, auto-selects the lone `.apk` asset (the MSI/tarballs are
+  ignored — no APK filter needed), and offers an update whenever the APK's `versionCode` climbs.
+  Nothing extra to publish; keep doing the normal release.
+- **Signature stability is mandatory.** Android — and every sideload updater, Obtainium included —
+  refuses to install an update signed with a different key than the installed app. So **every**
+  release APK must be signed with the *same* `android/keystore.properties` keystore. A lost or
+  rotated key permanently blocks in-place updates (users would have to uninstall, losing that
+  device's identity/secrets). Back the keystore up; never rotate it. See
+  [android-packaging.md](android-packaging.md).
+- **Don't mark an APK-bearing release as draft or pre-release** — Obtainium skips those by default,
+  so it would never see the update (same "publish Latest last" rule as the desktop updaters).
+- **First-install caveat:** a phone that currently has a **debug-signed** build (from
+  `run-android.ps1` without `-Release`) can't be updated by the release-signed APK — the keys
+  differ. It must uninstall the debug build once, then install the release APK; after that every
+  Obtainium update is in-place.

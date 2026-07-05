@@ -11,11 +11,14 @@ end-to-end encrypted virtual network.
 It's like Hamachi / ZeroTier / Tailscale, but with **no accounts and no central server** — your
 devices find and authenticate each other directly (built on [iroh](https://www.iroh.computer)).
 
-> **Status:** 0.2.3, under active testing. Works on **Windows, Linux, macOS, and Android**
+> **Status:** Under active testing. Works on **Windows, Linux, macOS, and Android**
 > (the Android app is Kotlin/Compose and routes traffic through Android's built-in VPN). Grab an
 > installer or the APK from the
 > [Releases](https://github.com/steeb-k/nullgate/releases) page (Android build details:
-> `docs/android-packaging.md`).
+> `docs/android-packaging.md`). On Android you can also add this repo to
+> [Obtainium](https://github.com/ImranR98/Obtainium) (source URL
+> `https://github.com/steeb-k/nullgate`) to install and auto-update the app straight from GitHub
+> releases.
 
 ## What it does
 - **A private mesh of your devices.** Members get a static IP on an overlay network that routes
