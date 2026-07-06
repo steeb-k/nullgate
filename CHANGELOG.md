@@ -4,6 +4,13 @@ All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepa
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+### Changed
+- **Refreshed the app + tray icon artwork.** New "gate" mark (a circular badge) replaces the
+  previous square icon across every platform, regenerated through the same pipeline: the Windows
+  `.ico`, the per-size Linux hicolor PNGs, the macOS `AppIcon.icns`, the Android launcher mipmaps,
+  and the Android status-bar silhouette (`ic_stat_nullgate`). Canonical filenames
+  (`img/nullgate-icon*`, `img/nullgate-tray-icon*`) are unchanged, so no build wiring changed; the
+  previous art moved to `img/old/`.
 
 ## [0.3.0] - 2026-07-05
 ### Added
