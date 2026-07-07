@@ -4,6 +4,31 @@ All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepa
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+### Fixed
+- **Intermittent connection drops to remote peers.** Two causes, both in `ipn-core`:
+  - The maintenance tick re-dialed *every* member — including unreachable ones — through the
+    roster-doc sync (`start_sync`, every 8 s) and presence gossip (`join_peers`, every 3 s). Each
+    attempt minted a permanent entry in iroh's unbounded mapped-address cache
+    ([iroh#4293](https://github.com/n0-computer/iroh/issues/4293)), so the daemon's memory grew until
+    the watchdog restarted it (observed dozens of times a day on one machine), and every restart
+    dropped all connections at once. Re-seeding is now throttled to **reachable** members (a live
+    mesh connection or a fresh presence heartbeat), with a membership change still re-seeding everyone
+    immediately so removals/additions keep propagating within seconds.
+  - A **duplicate-connection race**: when both peers dialed each other simultaneously (routine after
+    any blip), the second connection's registration orphaned the first, and the orphan's close-watcher
+    then unconditionally evicted the *live* connection — a spurious per-peer drop. Both ends now
+    apply a deterministic tie-break so they keep the same connection, and the close-watcher only
+    evicts the entry that actually closed.
+- **A device that just created (or rotated) a network briefly rejected joiners** with "this invite
+  code is no longer valid." The creator published its genesis entry and invite to the roster document
+  but didn't fold them into its own in-memory roster until the next maintenance tick (up to a few
+  seconds), so anyone who connected in that window was checked against an empty roster and turned
+  away. The roster is now refreshed immediately after creation/rotation.
+### Added
+- **Mesh connection lifecycle logging in the daemon log** — connections log when they're
+  established, replaced by a duplicate, and closed (with the QUIC close reason: `warn` for an
+  unexpected loss, `info` for a deliberate close), so an intermittent drop is diagnosable from the
+  default log instead of being silent.
 ### Changed
 - **Refreshed the app + tray icon artwork.** New "gate" mark (a circular badge) replaces the
   previous square icon across every platform, regenerated through the same pipeline: the Windows

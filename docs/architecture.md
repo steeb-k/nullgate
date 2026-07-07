@@ -14,12 +14,34 @@ the membership list is a small signed document every member replicates.
 - Members form a **full mesh** of authenticated connections. iroh does NAT hole-punching for
   direct links and falls back to a relay only when a direct path can't be established. (n0 runs
   free public relays; self-hosting is on the roadmap.)
-- A periodic **maintenance tick** reconciles the mesh: it rebuilds the roster, tears down
-  connections to non-members, and dials any member we aren't yet connected to. Dialing is
+- A periodic **maintenance tick** (every 3 s) reconciles the mesh: it rebuilds the roster, tears
+  down connections to non-members, and dials any member we aren't yet connected to. Dialing is
   **de-duplicated and time-bounded** (`engine::spawn_dials`) — at most one in-flight `connect()`
   per peer, each capped by `DIAL_TIMEOUT`, with the slot freed on completion/timeout. This matters
   because an unreachable member is retried on every tick indefinitely; without the guard those
   attempts (and their iroh connection/path state) accumulated without bound.
+- **One connection per peer, deterministically.** When both ends dial each other at once (common
+  right after any drop, since both tick every 3 s) two connections briefly exist. A tie-break
+  (`engine::resolve_duplicate`) makes *both* sides keep the **same** one — the connection initiated
+  by the lower NodeId — and cleanly close the other; a re-dial from the same side keeps the newer
+  conn, and an already-dead entry is always replaced so a restarted peer reconnects at once. The
+  close-watcher only evicts a peer's map entry when the connection that closed is still the live one
+  (guarded by iroh's `stable_id`), so a superseded duplicate closing can't drop the live link — that
+  race previously caused unexplained per-peer drops.
+- **Connection lifecycle is logged** (at the daemon's default `info` level): mesh connections log
+  when they're **established** (with direction), **replaced** by a duplicate, and **closed** —
+  the last carrying the QUIC `ConnectionError` reason (`warn` for an unexpected loss, `info` for a
+  deliberate close). This makes an intermittent drop attributable from the log instead of silent.
+- **Swarm re-seeding is throttled to reachable members.** The roster-doc live-sync swarm and the
+  presence-gossip mesh both need periodic re-seeding to stay connected, but each attempt *dials* the
+  target — and dialing **unreachable** members on a timer was minting permanent entries in iroh's
+  mapped-address cache (see the watchdog note below), the churn that drove the restart loop behind
+  the intermittent drops. So: a **membership change** re-seeds everyone immediately (keeps
+  removals/additions propagating within seconds), while the periodic self-heal re-seeds only members
+  we believe are reachable — a live mesh conn or a fresh presence heartbeat (`engine::doc_reseed_targets`,
+  `DOC_RESYNC_MS` = 30 s) — and gossip `join_peers` runs on change or a 60 s cadence (15 s while we
+  have zero neighbors). The 3 s presence *broadcast* is unchanged: it only reaches current neighbors
+  and never dials.
 - Each member's virtual IP on the `10.99.0.0/24` subnet is **derived deterministically from its
   NodeId** during the roster fold (so every node computes the same collision-free map and no two
   members can be handed the same address, even on simultaneous approvals). A **TUN interface**
@@ -82,7 +104,11 @@ never rebuilds (`set_online` does not recreate it), so only a **process restart*
 reason to the crash log and exits with code 92 so the service manager (SCM failure actions / systemd
 `Restart=on-failure` / launchd `KeepAlive`, all already configured for crash recovery) restarts it —
 bounding memory far below the abort. Remove once
-[iroh#4293](https://github.com/n0-computer/iroh/issues/4293) ships an eviction fix.
+[iroh#4293](https://github.com/n0-computer/iroh/issues/4293) ships an eviction fix. The
+reachable-only re-seed throttle in the maintenance tick (above) attacks the *cause* — it stops the
+daemon from re-dialing unreachable members every few seconds, which is what fed those permanent
+address-map entries — so the watchdog should trip far less often; the watchdog stays as the backstop
+until the upstream fix lands.
 
 **Presence-blip debounce.** A watchdog restart (or any brief drop) makes a device flap
 offline→online within seconds, which every *other* machine's daemon observes — and would otherwise

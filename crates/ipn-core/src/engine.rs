@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::Duration;
 
@@ -21,7 +21,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
 use ed25519_dalek::SigningKey;
 use futures_lite::StreamExt;
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::endpoint::{Connection, ConnectionError, RecvStream, SendStream, Side};
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{EndpointAddr, EndpointId, TransportAddr};
 use iroh_docs::api::Doc;
@@ -58,10 +58,35 @@ const MESH_ALPN: &[u8] = b"ipn/mesh/0";
 const JOIN_ALPN: &[u8] = b"ipn/join/0";
 const CONFIG_FILE: &str = "network.cbor";
 
-/// How often (ms) to re-seed the roster-doc live-sync gossip swarm with all
-/// current members as a self-heal, independent of membership changes. Short
-/// enough that new members / removals / audit entries appear within a few seconds.
-const DOC_RESYNC_MS: u64 = 8_000;
+/// How often (ms) to re-seed the roster-doc live-sync gossip swarm as a periodic
+/// self-heal, independent of membership changes. A membership change re-seeds
+/// *all* members immediately (that's what keeps freshness tight); this periodic
+/// pass only needs to keep an already-connected swarm healthy, so it targets
+/// **reachable** members (see [`doc_reseed_targets`]). Kept ≤ the ~45s removal-
+/// propagation window the `delete_e2e`/`rotate_e2e` tests assert. It was 8s and
+/// unfiltered, which re-dialed every *unreachable* member every 8s — each attempt
+/// minting a permanent iroh mapped-address entry (n0-computer/iroh#4293) until the
+/// daemon memory watchdog restarted the process and dropped every connection. That
+/// restart loop was the main cause of the intermittent drops.
+const DOC_RESYNC_MS: u64 = 30_000;
+
+/// A peer whose presence heartbeat we've heard within this window counts as
+/// "reachable" for the periodic doc self-heal even without a live mesh connection
+/// (the roster-doc and mesh use separate iroh protocols, so a member can be gossip-
+/// reachable while its mesh link is momentarily down). Re-seeding these is cheap and
+/// is what actually keeps the swarm connected; re-seeding *unreachable* members is
+/// the churn that feeds iroh#4293.
+const PRESENCE_FRESH_MS: u64 = 300_000;
+
+/// Cadence for growing the presence gossip mesh via `join_peers`. Like the doc
+/// re-seed this dials members, so it's throttled off the 3s tick; a membership
+/// change still triggers it immediately.
+const GOSSIP_JOIN_MS: u64 = 60_000;
+
+/// Faster `join_peers` cadence while we have **zero** gossip neighbors — we're
+/// isolated and need to (re)join the mesh promptly (e.g. right after startup or a
+/// network blip). Once neighbors exist we fall back to [`GOSSIP_JOIN_MS`].
+const GOSSIP_JOIN_RETRY_MS: u64 = 15_000;
 
 /// Upper bound on a single mesh dial (`endpoint.connect()` + admission handshake).
 /// Without this an unreachable member's `connect()` can stay pending indefinitely;
@@ -314,6 +339,14 @@ struct Inner {
     doc_sync_set: StdMutex<std::collections::BTreeSet<Id>>,
     /// Last time (ms) we (re)seeded the roster-doc live-sync swarm.
     last_doc_sync: AtomicU64,
+    /// Last time (ms) we grew the presence gossip mesh via `join_peers`. Throttled
+    /// off the 3s tick (see [`GOSSIP_JOIN_MS`]) because each call dials members —
+    /// the same unbounded-address-cache churn the doc re-seed throttle avoids.
+    last_gossip_join: AtomicU64,
+    /// Live count of presence-gossip neighbors, tracked from the swarm's
+    /// `NeighborUp`/`NeighborDown` events. Zero means we're isolated, which switches
+    /// `join_peers` to the faster [`GOSSIP_JOIN_RETRY_MS`] cadence.
+    gossip_neighbors: AtomicUsize,
     /// Members with a mesh dial currently in flight, so the periodic tick doesn't
     /// stack a fresh `connect()` on top of one already in progress. Without this,
     /// an offline member accrued a new connection attempt (and its iroh path/QUIC
@@ -404,6 +437,8 @@ impl Engine {
             assigned_ip: StdRwLock::new(None),
             doc_sync_set: StdMutex::new(std::collections::BTreeSet::new()),
             last_doc_sync: AtomicU64::new(0),
+            last_gossip_join: AtomicU64::new(0),
+            gossip_neighbors: AtomicUsize::new(0),
             dialing: DialingSet::default(),
             remote_access_disabled: AtomicBool::new(prefs.remote_access_disabled),
             hidden: AtomicBool::new(prefs.hidden),
@@ -570,6 +605,11 @@ impl Engine {
             },
         );
         publish(&self.inner, &set_inv).await?;
+
+        // Fold our own genesis + invite into the in-memory roster before handing back
+        // the ticket, so we honor the invite immediately instead of rejecting a joiner
+        // who connects before the next maintenance tick rebuilds the roster.
+        refresh_roster(&self.inner).await;
 
         let ticket = Ticket::new(
             name,
@@ -820,6 +860,11 @@ impl Engine {
             },
         );
         publish(&self.inner, &set_inv).await?;
+
+        // As in `create_network`: fold the new namespace's genesis + invite into the
+        // in-memory roster now, so a ticket holder joining the rotated network isn't
+        // rejected until the next tick.
+        refresh_roster(&self.inner).await;
 
         let ticket = Ticket::new(
             name,
@@ -1371,7 +1416,25 @@ async fn activate(inner: &Arc<Inner>, cfg: StoredConfig) -> Result<()> {
         let h = tokio::spawn(async move {
             while let Some(ev) = receiver.next().await {
                 let Ok(ev) = ev else { continue };
-                let Event::Received(m) = ev else { continue };
+                // Track swarm membership so the tick can back off `join_peers` once
+                // we have neighbors (and speed it up again when we're isolated).
+                let m = match ev {
+                    Event::Received(m) => m,
+                    Event::NeighborUp(_) => {
+                        ti.gossip_neighbors.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    Event::NeighborDown(_) => {
+                        // saturating: never wrap past zero on a spurious/duplicate down.
+                        let _ = ti.gossip_neighbors.fetch_update(
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                            |n| Some(n.saturating_sub(1)),
+                        );
+                        continue;
+                    }
+                    Event::Lagged => continue,
+                };
                 let Ok(msg) = ciborium::from_reader::<GossipMsg, _>(m.content.as_ref()) else {
                     continue;
                 };
@@ -1428,6 +1491,8 @@ async fn soft_disconnect(inner: &Arc<Inner>) {
     *inner.assigned_ip.write().unwrap() = None;
     inner.doc_sync_set.lock().unwrap().clear();
     inner.last_doc_sync.store(0, Ordering::SeqCst);
+    inner.last_gossip_join.store(0, Ordering::SeqCst);
+    inner.gossip_neighbors.store(0, Ordering::SeqCst);
     // Android: ask the app to tear down its VpnService (desktop opened its own TUN,
     // which the `tun.write() = None` above already dropped).
     #[cfg(target_os = "android")]
@@ -1557,14 +1622,21 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
         async move { dial_member(&inner, peer, psk).await }
     });
 
-    // Keep the roster-doc's live-sync gossip swarm seeded with **all** current
-    // members, not just the one peer we synced with at join time. iroh-docs only
-    // broadcasts document updates within this swarm, so without re-seeding it a
-    // later Add/Remove/role change (and the activity log derived from them, and a
-    // device's own removal) propagates only to members with a healthy direct link
-    // and is otherwise missed until a restart re-resumes sync. Re-seed whenever the
-    // member set changes, and periodically as a self-heal (which also lets a newly
-    // added member's entry reach everyone by keeping the swarm well-connected).
+    // Keep the roster-doc's live-sync gossip swarm seeded so a later Add/Remove/role
+    // change (and the activity log derived from them, and a device's own removal)
+    // reaches everyone — iroh-docs only broadcasts document updates within this
+    // swarm, so a member that drifted out of it would miss updates until a restart.
+    //
+    // A membership **change** re-seeds *all* members at once (that's what keeps
+    // propagation tight). The periodic self-heal only re-seeds members we believe
+    // are **reachable** (a live mesh conn or a recent presence heartbeat): re-dialing
+    // *unreachable* members on a timer is what grew iroh's mapped-address cache
+    // (iroh#4293) and drove the watchdog restart loop — the main cause of the drops.
+    // A removed device still hears its ex-peers' heartbeats, so it stays in their
+    // reachable set long enough to pull the Remove entry well inside the e2e windows.
+    //
+    // A member-set change also forces the throttled gossip `join_peers` below.
+    let member_set_changed;
     {
         let member_ids: std::collections::BTreeSet<Id> = roster
             .members()
@@ -1581,11 +1653,32 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
                 false
             }
         };
+        member_set_changed = changed;
         let due = now.saturating_sub(inner.last_doc_sync.load(Ordering::Relaxed)) > DOC_RESYNC_MS;
-        if !member_ids.is_empty() && (changed || due) {
+        // Snapshot which members have a fresh presence heartbeat (reachable even
+        // without a live mesh conn); done under the state lock, off any await.
+        let fresh: std::collections::HashSet<Id> = {
+            let st = inner.state.lock().await;
+            member_ids
+                .iter()
+                .copied()
+                .filter(|id| {
+                    st.presence
+                        .get(id)
+                        .is_some_and(|p| now.saturating_sub(p.last_seen) <= PRESENCE_FRESH_MS)
+                })
+                .collect()
+        };
+        if let Some(targets) = doc_reseed_targets(
+            &member_ids,
+            &connected,
+            |id| fresh.contains(id),
+            changed,
+            due,
+        ) {
             inner.last_doc_sync.store(now, Ordering::Relaxed);
             let addrs: Vec<EndpointAddr> =
-                member_ids.iter().filter_map(|id| bootstrap_addr(id).ok()).collect();
+                targets.iter().filter_map(|id| bootstrap_addr(id).ok()).collect();
             let doc = doc.clone();
             tokio::spawn(async move {
                 if let Err(e) = doc.start_sync(addrs).await {
@@ -1681,8 +1774,24 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
             }
         }
 
+        // Growing the gossip mesh dials each peer, so throttle it like the doc
+        // re-seed: on a member-set change, or on a cadence that's faster while we're
+        // isolated (no neighbors) and slow once the mesh is healthy. The 3s presence
+        // broadcast above still runs every tick — it only reaches current neighbors
+        // and never dials, so it isn't part of the churn.
         if !peers.is_empty() {
-            let _ = sender.join_peers(peers).await;
+            let now = now_ms();
+            let cadence = if inner.gossip_neighbors.load(Ordering::Relaxed) == 0 {
+                GOSSIP_JOIN_RETRY_MS
+            } else {
+                GOSSIP_JOIN_MS
+            };
+            let due =
+                now.saturating_sub(inner.last_gossip_join.load(Ordering::Relaxed)) > cadence;
+            if member_set_changed || due {
+                inner.last_gossip_join.store(now, Ordering::Relaxed);
+                let _ = sender.join_peers(peers).await;
+            }
         }
     }
 
@@ -2059,12 +2168,96 @@ async fn admit_member(
     publish(inner, &entry).await
 }
 
+/// Outcome of reconciling a freshly-handshaked connection against any existing one
+/// to the same peer.
+enum DupVerdict {
+    /// No prior connection (or the same object) — adopt this one.
+    Fresh,
+    /// Adopt this one, evicting the superseded connection (closed off-lock).
+    ReplaceOld(Connection),
+    /// A connection we're keeping already exists — drop this duplicate.
+    KeepExisting,
+}
+
+/// Human-readable direction for logs: which side opened the QUIC connection.
+fn conn_dir(conn: &Connection) -> &'static str {
+    match conn.side() {
+        Side::Client => "outbound",
+        Side::Server => "inbound",
+    }
+}
+
 async fn register_mesh(inner: &Arc<Inner>, peer: Id, conn: Connection) {
+    let dir = conn_dir(&conn);
+    let new_id = conn.stable_id();
+
+    // Reconcile against any existing connection to this peer, holding the sync
+    // `conns` lock only for the decision (no await inside). Both ends run the same
+    // tie-break, so a simultaneous double-dial converges on one shared connection
+    // instead of each side keeping its own and later evicting the other's.
+    let verdict = {
+        let mut conns = inner.conns.write().unwrap();
+        match conns.get(&peer) {
+            Some(existing) if existing.stable_id() == new_id => DupVerdict::KeepExisting,
+            Some(existing) => {
+                let keep_new = resolve_duplicate(
+                    &inner.my_id,
+                    &peer,
+                    existing.side(),
+                    existing.close_reason().is_some(),
+                    conn.side(),
+                );
+                if keep_new {
+                    let old = conns.insert(peer, conn.clone()).expect("existing was present");
+                    DupVerdict::ReplaceOld(old)
+                } else {
+                    DupVerdict::KeepExisting
+                }
+            }
+            None => {
+                conns.insert(peer, conn.clone());
+                DupVerdict::Fresh
+            }
+        }
+    };
+
+    match verdict {
+        DupVerdict::KeepExisting => {
+            // Already holding a connection we're keeping; drop this duplicate without
+            // touching presence (the peer is already online via the kept conn) or
+            // spawning tasks for a conn we're closing. The remote runs the same rule.
+            tracing::info!(
+                "dropping duplicate {dir} mesh connection to {} (id {}); keeping existing",
+                short(&peer),
+                new_id
+            );
+            conn.close(0u32.into(), b"duplicate connection");
+            return;
+        }
+        DupVerdict::ReplaceOld(old) => {
+            tracing::warn!(
+                "mesh connection to {} replaced by new {dir} connection (id {} supersedes id {})",
+                short(&peer),
+                new_id,
+                old.stable_id()
+            );
+            // The superseded conn's watcher will fire, but its stable_id guard leaves
+            // the new conn's map entry + presence intact.
+            old.close(0u32.into(), b"superseded by duplicate");
+        }
+        DupVerdict::Fresh => {}
+    }
+
+    // This connection is now the live one for `peer`.
     {
-        inner.conns.write().unwrap().insert(peer, conn.clone());
         let mut st = inner.state.lock().await;
         st.presence.record_connection(peer, None, None, None, None, true);
     }
+    tracing::info!(
+        "mesh {dir} connection established to {} (id {})",
+        short(&peer),
+        new_id
+    );
     let _ = inner.events.send(EngineEvent::Changed);
 
     // Inbound data plane: datagrams from this peer are IP packets — write them to
@@ -2098,16 +2291,80 @@ async fn register_mesh(inner: &Arc<Inner>, peer: Id, conn: Connection) {
         });
     }
 
-    // Watch for close to drop the connection + mark offline.
+    // Watch for close: drop the connection + mark offline, but only if *this* conn is
+    // still the map entry. A superseded duplicate closing must not evict the live one
+    // (the bug that caused unexplained per-peer drops), so guard on `stable_id`.
     let inner2 = inner.clone();
     tokio::spawn(async move {
-        let _ = conn.closed().await;
-        inner2.conns.write().unwrap().remove(&peer);
-        let mut st = inner2.state.lock().await;
-        st.presence.record_connection(peer, None, None, None, None, false);
-        drop(st);
-        let _ = inner2.events.send(EngineEvent::Changed);
+        let reason = conn.closed().await;
+        let evicted = {
+            let mut conns = inner2.conns.write().unwrap();
+            match conns.get(&peer) {
+                Some(cur) if cur.stable_id() == new_id => {
+                    conns.remove(&peer);
+                    true
+                }
+                _ => false,
+            }
+        };
+        if evicted {
+            // A deliberate close is routine; anything else is a real drop worth a warn
+            // with the QUIC reason, so intermittent drops are diagnosable from the log.
+            match &reason {
+                ConnectionError::LocallyClosed | ConnectionError::ApplicationClosed(_) => {
+                    tracing::info!(
+                        "mesh connection to {} closed (id {}): {reason}",
+                        short(&peer),
+                        new_id
+                    );
+                }
+                _ => tracing::warn!(
+                    "mesh connection to {} lost (id {}): {reason}",
+                    short(&peer),
+                    new_id
+                ),
+            }
+            let mut st = inner2.state.lock().await;
+            st.presence.record_connection(peer, None, None, None, None, false);
+            drop(st);
+            let _ = inner2.events.send(EngineEvent::Changed);
+        } else {
+            tracing::debug!(
+                "superseded mesh connection to {} closed (id {}): {reason}",
+                short(&peer),
+                new_id
+            );
+        }
     });
+}
+
+/// Tie-break for two mesh connections to the same peer (they arise when both ends
+/// dial each other after a drop). Returns whether to keep the **new** connection.
+///
+/// The rule makes *both* endpoints converge on the same physical connection: the one
+/// initiated by the lower NodeId wins. (If instead each side kept its own outbound,
+/// they'd settle on different connections, each treating the other's kept conn as an
+/// orphan and tearing it down on idle-timeout — a perpetual flap.) A re-dial from the
+/// *same* initiator keeps the newer conn; an already-closed existing conn is always
+/// replaced so a peer that restarted can reconnect immediately.
+fn resolve_duplicate(
+    my_id: &Id,
+    peer: &Id,
+    existing_side: Side,
+    existing_closed: bool,
+    new_side: Side,
+) -> bool {
+    if existing_closed {
+        return true;
+    }
+    if existing_side == new_side {
+        return true;
+    }
+    // Opposite directions = simultaneous open. Keep the connection whose initiator has
+    // the lower NodeId; both ends compute the same winner from local information.
+    let new_initiator_is_me = new_side == Side::Client;
+    let i_am_lower = my_id < peer;
+    new_initiator_is_me == i_am_lower
 }
 
 /// Bring up routing once we know our virtual IP.
@@ -2355,6 +2612,30 @@ async fn publish(inner: &Arc<Inner>, entry: &crate::roster::Entry) -> Result<()>
     membership::publish_entry(&doc, author, entry).await
 }
 
+/// Rebuild the in-memory roster from the (local-first) doc *now*, instead of waiting
+/// for the next maintenance tick. Called right after we publish our own genesis +
+/// invite in `create_network`: without it the creator's `st.roster` stays empty for
+/// up to a tick interval, so a fast joiner (or an e2e test) is rejected with "invite
+/// no longer valid" until the roster folds. Best-effort — on failure the tick catches
+/// up. Mirrors the `was_member` latch the tick sets when we appear in the roster.
+async fn refresh_roster(inner: &Arc<Inner>) {
+    let (doc, cfg) = {
+        let st = inner.state.lock().await;
+        match (st.doc.clone(), st.config.clone()) {
+            (Some(d), Some(c)) => (d, c),
+            _ => return,
+        }
+    };
+    if let Ok(roster) =
+        membership::build_roster(&cfg.roster_cfg(), &doc, inner.node.blobs.blobs()).await
+    {
+        if roster.is_member(&inner.my_id) {
+            inner.was_member.store(true, Ordering::SeqCst);
+        }
+        inner.state.lock().await.roster = roster;
+    }
+}
+
 async fn current_psk(inner: &Arc<Inner>) -> Option<[u8; 32]> {
     let st = inner.state.lock().await;
     st.config.as_ref().map(|c| c.secret().psk())
@@ -2381,6 +2662,41 @@ fn bootstrap_addr(id: &Id) -> Result<EndpointAddr> {
         EndpointId::from_bytes(id).context("bad id")?,
         Vec::<TransportAddr>::new(),
     ))
+}
+
+/// Which members to re-seed the roster-doc live-sync swarm with this tick, or
+/// `None` to skip the (dialing) `start_sync` entirely.
+///
+/// - A membership **change** re-seeds *all* members (freshness: a new/removed/role-
+///   changed entry must reach everyone).
+/// - Otherwise, only the periodic self-heal re-seeds, and only **reachable** members
+///   (a live mesh conn, or a fresh presence heartbeat per `is_fresh`). Re-dialing
+///   *unreachable* members on a timer is the churn that grew iroh's mapped-address
+///   cache (iroh#4293) and drove the watchdog restart loop.
+///
+/// Pure (no clock, no I/O) so the policy is unit-tested directly.
+fn doc_reseed_targets(
+    members: &std::collections::BTreeSet<Id>,
+    connected: &std::collections::HashSet<Id>,
+    is_fresh: impl Fn(&Id) -> bool,
+    changed: bool,
+    due: bool,
+) -> Option<Vec<Id>> {
+    if members.is_empty() {
+        return None;
+    }
+    if changed {
+        return Some(members.iter().copied().collect());
+    }
+    if !due {
+        return None;
+    }
+    let targets: Vec<Id> = members
+        .iter()
+        .copied()
+        .filter(|id| connected.contains(id) || is_fresh(id))
+        .collect();
+    (!targets.is_empty()).then_some(targets)
 }
 
 fn parse_id(hex: &str) -> Result<Id> {
@@ -2678,5 +2994,152 @@ mod dial_tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 3, "one dial per distinct peer");
         assert_eq!(dialing.lock().unwrap().len(), 3);
+    }
+}
+
+/// Tests for the duplicate-connection tie-break that fixes the unexplained per-peer
+/// drops: a simultaneous double-dial must converge on **one** connection at *both*
+/// ends, so neither side later evicts the connection the other kept.
+#[cfg(test)]
+mod dup_tests {
+    use super::*;
+
+    fn id(n: u8) -> Id {
+        [n; 32]
+    }
+
+    #[test]
+    fn already_closed_existing_is_replaced() {
+        // A peer that restarted re-dials; our stale entry is closed → adopt the new
+        // conn immediately regardless of direction.
+        for existing in [Side::Client, Side::Server] {
+            for new in [Side::Client, Side::Server] {
+                assert!(
+                    resolve_duplicate(&id(1), &id(2), existing, true, new),
+                    "closed existing must always be replaced"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn same_direction_duplicate_prefers_newer() {
+        // Re-dial from the same initiator (both inbound, or both outbound): the newer
+        // connection wins.
+        assert!(resolve_duplicate(&id(1), &id(2), Side::Server, false, Side::Server));
+        assert!(resolve_duplicate(&id(1), &id(2), Side::Client, false, Side::Client));
+    }
+
+    #[test]
+    fn simultaneous_open_converges_on_lower_initiator_at_both_ends() {
+        // Peers A(=1) and B(=2), A < B. Two connections exist for the pair:
+        //   c1: A dialed B  → A sees side=Client, B sees side=Server
+        //   c2: B dialed A  → B sees side=Client, A sees side=Server
+        // Both ends must keep c1 (initiated by the lower id, A), whatever order the
+        // two registrations arrive in on each side.
+        let (a, b) = (id(1), id(2));
+
+        // --- A's side ---
+        // c1 registered first, then c2 arrives: keep existing c1 (reject new c2).
+        assert!(
+            !resolve_duplicate(&a, &b, Side::Client, false, Side::Server),
+            "A: c2 (inbound) must not displace c1"
+        );
+        // c2 registered first, then c1 arrives: replace with new c1.
+        assert!(
+            resolve_duplicate(&a, &b, Side::Server, false, Side::Client),
+            "A: c1 (outbound) must displace c2"
+        );
+
+        // --- B's side ---
+        // c1 registered first (inbound to B), then c2 arrives: keep c1.
+        assert!(
+            !resolve_duplicate(&b, &a, Side::Server, false, Side::Client),
+            "B: c2 (outbound) must not displace c1"
+        );
+        // c2 registered first, then c1 arrives (inbound): replace with c1.
+        assert!(
+            resolve_duplicate(&b, &a, Side::Client, false, Side::Server),
+            "B: c1 (inbound) must displace c2"
+        );
+    }
+
+    /// The core convergence property: for any registration order on each side, A and B
+    /// end up holding the connection with the *same* initiator.
+    #[test]
+    fn both_ends_pick_the_same_initiator() {
+        for (lo, hi) in [(id(1), id(2)), (id(7), id(200))] {
+            // The winning connection is the one initiated by `lo`. Verify each side,
+            // starting from either connection as the incumbent, keeps that one.
+            // A(lo) keeps the conn it initiated (Client); rejects the peer-initiated one.
+            assert!(resolve_duplicate(&lo, &hi, Side::Server, false, Side::Client));
+            assert!(!resolve_duplicate(&lo, &hi, Side::Client, false, Side::Server));
+            // B(hi) keeps the conn lo initiated (which is inbound/Server to B); rejects
+            // the one B itself initiated.
+            assert!(resolve_duplicate(&hi, &lo, Side::Client, false, Side::Server));
+            assert!(!resolve_duplicate(&hi, &lo, Side::Server, false, Side::Client));
+        }
+    }
+}
+
+/// Tests for the roster-doc re-seed target selection: a membership change re-seeds
+/// everyone, but the periodic self-heal only re-seeds *reachable* members so we don't
+/// re-dial unreachable ones on a timer (the churn behind the watchdog restart loop).
+#[cfg(test)]
+mod reseed_tests {
+    use super::*;
+    use std::collections::{BTreeSet, HashSet};
+
+    fn id(n: u8) -> Id {
+        [n; 32]
+    }
+
+    #[test]
+    fn empty_membership_never_seeds() {
+        let members = BTreeSet::new();
+        let connected = HashSet::new();
+        assert!(doc_reseed_targets(&members, &connected, |_| false, true, true).is_none());
+    }
+
+    #[test]
+    fn membership_change_seeds_all_members_even_if_unreachable() {
+        let members: BTreeSet<Id> = [id(1), id(2), id(3)].into_iter().collect();
+        let connected = HashSet::new(); // none connected
+        let got = doc_reseed_targets(&members, &connected, |_| false, true, false)
+            .expect("change must seed");
+        assert_eq!(got.len(), 3, "a membership change re-seeds every member");
+    }
+
+    #[test]
+    fn not_due_and_unchanged_skips() {
+        let members: BTreeSet<Id> = [id(1)].into_iter().collect();
+        let connected: HashSet<Id> = [id(1)].into_iter().collect();
+        assert!(
+            doc_reseed_targets(&members, &connected, |_| true, false, false).is_none(),
+            "no change and not due → nothing to do"
+        );
+    }
+
+    #[test]
+    fn periodic_selfheal_targets_only_reachable_members() {
+        let members: BTreeSet<Id> = [id(1), id(2), id(3), id(4)].into_iter().collect();
+        let connected: HashSet<Id> = [id(1)].into_iter().collect(); // 1 has a live conn
+        let fresh: HashSet<Id> = [id(2)].into_iter().collect(); // 2 has a fresh heartbeat
+        // 3 and 4 are unreachable and must be skipped.
+        let mut got =
+            doc_reseed_targets(&members, &connected, |x| fresh.contains(x), false, true)
+                .expect("reachable members present");
+        got.sort();
+        assert_eq!(got, vec![id(1), id(2)], "only conn-held or fresh members");
+    }
+
+    #[test]
+    fn periodic_selfheal_with_no_reachable_members_skips() {
+        let members: BTreeSet<Id> = [id(3), id(4)].into_iter().collect();
+        let connected = HashSet::new();
+        assert!(
+            doc_reseed_targets(&members, &connected, |_| false, false, true).is_none(),
+            "nothing reachable → skip the dialing start_sync entirely"
+        );
     }
 }
