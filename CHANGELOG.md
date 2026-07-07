@@ -4,6 +4,8 @@ All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepa
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+
+## [0.3.1] - 2026-07-06
 ### Fixed
 - **Intermittent connection drops to remote peers.** Two causes, both in `ipn-core`:
   - The maintenance tick re-dialed *every* member — including unreachable ones — through the
