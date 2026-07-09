@@ -59,3 +59,7 @@ ureq.workspace = true
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+# Dev-only iroh features: examples/relay_probe.rs reads the endpoint's
+# net-report to verify a custom relay's QUIC address-discovery endpoint, and
+# the relay e2e test spins up an in-process relay server (test-utils).
+iroh = { workspace = true, features = ["unstable-net-report", "test-utils"] }

@@ -69,6 +69,15 @@ in the `0600` file fallback under the app's **private internal storage** (`Conte
 which is not readable by other apps on a non-rooted device. Android Keystore-backed encryption of
 that file is a possible future hardening.
 
+**Custom relay access tokens** (`relays.cbor` in the data dir) are stored in plain form alongside
+the other non-secret config, *not* in the keystore. They're a deliberately weaker class of secret:
+a relay token only grants the ability to *use* the relay's bandwidth — it can't decrypt, inject, or
+impersonate anything (relayed traffic stays end-to-end encrypted QUIC, and identity is the NodeId
+key held in the keystore). The data dir is root/LocalSystem-owned on desktop installs, which bounds
+who can read it. Keystore-backing the tokens is possible future hardening. Relay settings are
+**per-device** and never distributed through the roster, so adding a relay can't be used by one
+member to redirect another member's traffic.
+
 ## Privilege boundary (GUI ↔ daemon)
 The GUI runs unprivileged and never holds elevation; all privileged work lives in the daemon. The
 one place the GUI reaches for privilege is its **Start/Restart service** banner button, and it does

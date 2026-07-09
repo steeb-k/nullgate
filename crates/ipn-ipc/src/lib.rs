@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 pub mod transport;
 
 /// Display DTOs are reused straight from the engine crate (plain serde structs).
-pub use ipn_core::{AuditEntry, MemberView, NetworkStatus};
+pub use ipn_core::{AuditEntry, MemberView, NetworkStatus, RelayPolicy, RelayServer, RelaySettings};
 
 /// Render a SAS (the emoji strings carried on [`IpcEvent::JoinSas`] /
 /// [`IpcEvent::JoinRequest`]) as words, for text-only clients like the CLI.
@@ -29,7 +29,10 @@ pub use ipn_core::admission::sas_words;
 ///
 /// v3 (0.1.7): added the per-member local-note request (`SetNote`) and the
 /// `MemberView.note` field.
-pub const PROTO_VERSION: u32 = 3;
+///
+/// v4 (0.3.2): added the custom relay server requests (`GetRelays`, `SetRelays`)
+/// and the `Relays` response.
+pub const PROTO_VERSION: u32 = 4;
 
 /// Where the GUI and daemon rendezvous. On Windows this path is only hashed into
 /// a named-pipe name; on Unix it's the actual socket path (fixed, not `$TMPDIR`,
@@ -110,6 +113,11 @@ pub enum IpcRequest {
     ExportOriginatorKey,
     /// Import an originator recovery code to gain originator powers on this network.
     ImportOriginatorKey { code: String },
+    /// Fetch this device's custom relay server configuration.
+    GetRelays,
+    /// Replace this device's custom relay server configuration. Applies to the
+    /// live endpoint immediately (no daemon restart).
+    SetRelays { settings: RelaySettings },
     /// Upgrade this connection to receive pushed [`IpcEvent`]s.
     Subscribe,
 }
@@ -132,6 +140,8 @@ pub enum IpcResponse {
     Recovery(String),
     /// The administration activity log (reply to `GetAuditLog`).
     AuditLog(Vec<AuditEntry>),
+    /// This device's custom relay configuration (reply to `GetRelays`).
+    Relays(RelaySettings),
     Ok,
     Err(String),
 }

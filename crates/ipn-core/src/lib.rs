@@ -23,6 +23,7 @@ pub mod membership;
 pub mod network;
 pub mod node;
 pub mod presence;
+pub mod relays;
 pub mod roster;
 pub mod router;
 pub mod secrets;
@@ -33,6 +34,7 @@ use std::sync::OnceLock;
 pub use engine::{AuditEntry, Engine, EngineEvent, MemberView, NetworkStatus};
 pub use network::{NetworkSecret, Ticket};
 pub use node::IrohNode;
+pub use relays::{RelayPolicy, RelayServer, RelaySettings};
 pub use roster::{Config, Entry, InviteKind, Member, Op, Role, Roster};
 
 /// Process-wide override for this device's shared display name (the value other

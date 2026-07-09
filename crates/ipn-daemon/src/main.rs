@@ -395,6 +395,11 @@ async fn handle_request(engine: &Engine, req: IpcRequest) -> IpcResponse {
             Ok(()) => IpcResponse::Ok,
             Err(e) => to_err(e),
         },
+        IpcRequest::GetRelays => IpcResponse::Relays(engine.relay_settings()),
+        IpcRequest::SetRelays { settings } => match engine.set_relay_settings(settings).await {
+            Ok(()) => IpcResponse::Ok,
+            Err(e) => to_err(e),
+        },
         IpcRequest::Subscribe => IpcResponse::Ok,
     }
 }

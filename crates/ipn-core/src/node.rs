@@ -10,12 +10,12 @@
 //!
 //! Mirrors the proven setup in seed-sync-gtk's `seed-core::node`.
 
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use anyhow::Context;
 use iroh::{
     protocol::{Router, RouterBuilder},
-    Endpoint, SecretKey,
+    Endpoint, RelayMap, RelayMode, SecretKey,
 };
 use iroh_blobs::{store::fs::FsStore, BlobsProtocol};
 use iroh_docs::{api::DocsApi, protocol::Docs};
@@ -31,6 +31,10 @@ pub struct IrohNode {
     /// The device key seed (ed25519). The NodeId is its public half, so this
     /// same key signs roster adds and presence — binding signatures to the NodeId.
     node_secret: [u8; 32],
+    /// Live handle into the endpoint's path selector: the set of relay URLs
+    /// whose paths outrank other relays. The engine updates it when the user
+    /// edits relay settings (the selector itself is fixed at bind time).
+    pub preferred_relays: crate::relays::PreferredRelays,
 }
 
 impl IrohNode {
@@ -64,6 +68,26 @@ impl IrohNode {
         // where multicast is unavailable) — degrade to "no LAN discovery" with a
         // warning rather than failing endpoint startup.
         let mut builder = Endpoint::builder(iroh::endpoint::presets::N0).secret_key(secret_key);
+
+        // Custom relay servers (see `crate::relays`). The path selector is
+        // installed unconditionally — with no preferred relays it behaves like
+        // iroh's default — because it can't be swapped after bind, while the
+        // preferred set and the relay map can both change at runtime.
+        let relay_settings = crate::relays::load_relay_settings(data_dir);
+        let preferred_relays = crate::relays::PreferredRelays::default();
+        builder = builder.path_selector(Arc::new(crate::relays::PreferMyRelaySelector::new(
+            preferred_relays.clone(),
+        )));
+        match relay_settings.relay_configs() {
+            Ok(configs) if !configs.is_empty() => {
+                preferred_relays.set(configs.iter().map(|c| c.url.clone()).collect());
+                builder = builder.relay_mode(RelayMode::Custom(RelayMap::from_iter(configs)));
+            }
+            Ok(_) => {} // no custom relays; keep the N0 defaults
+            // A broken relays.cbor must not brick connectivity: fall back to
+            // the defaults and let the user re-save valid settings.
+            Err(e) => tracing::warn!("ignoring invalid relay settings: {e:#}"),
+        }
         match iroh_mdns_address_lookup::MdnsAddressLookup::builder().build(endpoint_id) {
             Ok(mdns) => builder = builder.address_lookup(mdns),
             Err(e) => tracing::warn!("local-network (mDNS) discovery unavailable: {e}"),
@@ -97,6 +121,7 @@ impl IrohNode {
             docs,
             router,
             node_secret,
+            preferred_relays,
         })
     }
 

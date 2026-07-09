@@ -198,6 +198,10 @@ pub struct NetworkStatus {
     pub online: bool,
     /// This device's home relay URL, if one is established (diagnostics).
     pub home_relay: Option<String>,
+    /// Custom relays are configured but unreachable, so the public relays are
+    /// temporarily in use (see [`crate::relays`]).
+    #[serde(default)]
+    pub relay_fallback: bool,
     pub members: Vec<MemberView>,
 }
 
@@ -375,6 +379,15 @@ struct Inner {
     /// Our mesh/join protocol version (normally `admission::PROTOCOL_VERSION`;
     /// overridable in tests to exercise the mismatch path).
     protocol_version: AtomicU32,
+    /// User-configured custom relay servers (see [`crate::relays`]). The live
+    /// endpoint relay map is kept in sync at runtime, so edits apply without a
+    /// daemon restart.
+    relay_settings: StdRwLock<crate::relays::RelaySettings>,
+    /// Whether the relay watchdog has added the public relays because none of
+    /// the custom relays is reachable (only under [`RelayPolicy::Preferred`]).
+    ///
+    /// [`RelayPolicy::Preferred`]: crate::relays::RelayPolicy::Preferred
+    relay_fallback: AtomicBool,
     /// Last time (ms) we flushed the persisted last-seen map (throttle).
     last_seen_saved: AtomicU64,
     /// Geolocation DB, loaded only on the originator (it resolves + propagates).
@@ -411,6 +424,8 @@ impl Engine {
         let nicknames = load_nicknames(&data_dir);
         let notes = load_notes(&data_dir);
         let prefs = load_device_prefs(&data_dir);
+        // `IrohNode::spawn_with` already applied these to the endpoint at bind.
+        let relay_settings = crate::relays::load_relay_settings(&data_dir);
 
         let (events, _) = broadcast::channel(64);
         let inner = Arc::new(Inner {
@@ -449,6 +464,8 @@ impl Engine {
             was_member: AtomicBool::new(false),
             protocol_version: AtomicU32::new(admission::PROTOCOL_VERSION),
             last_seen_saved: AtomicU64::new(0),
+            relay_settings: StdRwLock::new(relay_settings),
+            relay_fallback: AtomicBool::new(false),
             #[cfg(not(target_os = "android"))]
             geo: StdRwLock::new(None),
             #[cfg(not(target_os = "android"))]
@@ -484,6 +501,12 @@ impl Engine {
                     tokio::time::sleep(Duration::from_secs(3)).await;
                 }
             });
+        }
+
+        // Custom-relay fallback watchdog (no-op unless custom relays are set).
+        {
+            let inner = inner.clone();
+            tokio::spawn(async move { relay_watchdog(&inner).await });
         }
 
         Ok(Engine { inner })
@@ -1115,6 +1138,66 @@ impl Engine {
         );
     }
 
+    /// This device's custom relay configuration (empty = iroh defaults).
+    pub fn relay_settings(&self) -> crate::relays::RelaySettings {
+        self.inner.relay_settings.read().unwrap().clone()
+    }
+
+    /// Replace the custom relay configuration, persist it, and apply it to the
+    /// **live** endpoint: the relay map is diffed in place and the path
+    /// selector's preferred set updated, so no daemon restart is needed. The
+    /// endpoint re-picks its home relay from the new map within a net-report
+    /// cycle (~30s); existing connections migrate rather than drop.
+    pub async fn set_relay_settings(&self, settings: crate::relays::RelaySettings) -> Result<()> {
+        use crate::relays;
+
+        // Validate fully before touching disk or the endpoint.
+        let custom = settings.relay_configs()?;
+        relays::save_relay_settings(&self.inner.data_dir, &settings)?;
+
+        let endpoint = &self.inner.node.endpoint;
+        let custom_urls: std::collections::BTreeSet<iroh::RelayUrl> =
+            custom.iter().map(|c| c.url.clone()).collect();
+        self.inner.node.preferred_relays.set(custom_urls.clone());
+
+        // Desired steady-state map: the custom relays, or the defaults when
+        // none are configured. Fallback (if warranted) re-engages via the
+        // watchdog rather than being preserved across a settings change.
+        let desired: Vec<std::sync::Arc<iroh::RelayConfig>> = if custom.is_empty() {
+            relays::default_relay_configs()
+        } else {
+            custom.into_iter().map(std::sync::Arc::new).collect()
+        };
+        let desired_urls: std::collections::BTreeSet<iroh::RelayUrl> =
+            desired.iter().map(|c| c.url.clone()).collect();
+
+        // Insert first, then remove strays, so the map is never empty.
+        for cfg in desired {
+            endpoint.insert_relay(cfg.url.clone(), cfg).await;
+        }
+        let old_settings =
+            std::mem::replace(&mut *self.inner.relay_settings.write().unwrap(), settings);
+        let mut stale: std::collections::BTreeSet<iroh::RelayUrl> = relays::default_relay_configs()
+            .iter()
+            .map(|c| c.url.clone())
+            .collect();
+        if let Ok(urls) = old_settings.urls() {
+            stale.extend(urls);
+        }
+        for url in stale.difference(&desired_urls) {
+            endpoint.remove_relay(url).await;
+        }
+        self.inner.relay_fallback.store(false, Ordering::Relaxed);
+
+        tracing::info!(
+            "relay settings updated: {} custom relay(s), mode {:?}",
+            desired_urls.len(),
+            self.inner.relay_settings.read().unwrap().mode
+        );
+        let _ = self.inner.events.send(EngineEvent::Changed);
+        Ok(())
+    }
+
     /// The administration activity log: a 30-day, human-readable view derived from
     /// the signed roster history. Visible to every member.
     pub async fn audit_log(&self) -> Result<Vec<AuditEntry>> {
@@ -1379,6 +1462,7 @@ impl Engine {
                 .relay_urls()
                 .next()
                 .map(|u| u.to_string()),
+            relay_fallback: self.inner.relay_fallback.load(Ordering::Relaxed),
             members,
         })
     }
@@ -2736,6 +2820,69 @@ fn current_hostname() -> String {
 fn first_host(subnet: Ipv4Addr) -> [u8; 4] {
     let o = subnet.octets();
     [o[0], o[1], o[2], 2]
+}
+
+/// Custom-relay fallback watchdog. Only acts when custom relays are configured
+/// with [`RelayPolicy::Preferred`]: after ~30s without a connection to any of
+/// the user's relays it *adds* the public iroh relays to the live map, and it
+/// removes them again as soon as a custom relay is connected (the endpoint
+/// re-probes every relay in the map on its ~20-26s net-report cycle, and the
+/// user's relay wins the home-relay pick once it answers again — typically it
+/// is the lowest-latency one, and the path selector prefers it regardless).
+///
+/// [`RelayPolicy::Preferred`]: crate::relays::RelayPolicy::Preferred
+async fn relay_watchdog(inner: &Arc<Inner>) {
+    use crate::relays::{self, RelayPolicy};
+    use iroh::Watcher as _;
+
+    const TICK: Duration = Duration::from_secs(10);
+    const MISSES_TO_FALL_BACK: u32 = 3;
+
+    let mut status = inner.node.endpoint.home_relay_status();
+    let mut misses = 0u32;
+    loop {
+        tokio::time::sleep(TICK).await;
+        let settings = inner.relay_settings.read().unwrap().clone();
+        let custom_urls: std::collections::BTreeSet<iroh::RelayUrl> = match settings.urls() {
+            Ok(urls) if !urls.is_empty() && settings.mode == RelayPolicy::Preferred => {
+                urls.into_iter().collect()
+            }
+            _ => {
+                misses = 0;
+                continue;
+            }
+        };
+        let connected_custom = status
+            .get()
+            .iter()
+            .any(|s| s.is_connected() && custom_urls.contains(s.url()));
+
+        if connected_custom {
+            misses = 0;
+            if inner.relay_fallback.swap(false, Ordering::Relaxed) {
+                for cfg in relays::default_relay_configs() {
+                    if !custom_urls.contains(&cfg.url) {
+                        inner.node.endpoint.remove_relay(&cfg.url).await;
+                    }
+                }
+                tracing::info!("custom relay reachable again; leaving the public relays");
+                let _ = inner.events.send(EngineEvent::Changed);
+            }
+        } else if !inner.relay_fallback.load(Ordering::Relaxed) {
+            misses += 1;
+            if misses >= MISSES_TO_FALL_BACK {
+                for cfg in relays::default_relay_configs() {
+                    inner.node.endpoint.insert_relay(cfg.url.clone(), cfg).await;
+                }
+                inner.relay_fallback.store(true, Ordering::Relaxed);
+                tracing::warn!(
+                    "no custom relay reachable for {}s; falling back to the public relays",
+                    TICK.as_secs() * MISSES_TO_FALL_BACK as u64
+                );
+                let _ = inner.events.send(EngineEvent::Changed);
+            }
+        }
+    }
 }
 
 /// A fresh random 16-byte invite nonce.

@@ -4,6 +4,22 @@ All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepa
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+### Added
+- **Custom relay servers.** A device can use its own self-hosted iroh relay(s) instead of the
+  public n0 ones, with an optional per-relay access token (sent as `Authorization: Bearer` on the
+  relay handshake). Configure from the GUI (**Relay servers** on the main screen, also reachable
+  from the "No network yet" page) or the CLI (`nullgate-cli relay add/remove/mode/show/clear`).
+  Two policies: **preferred** (default) — run on the custom relays, automatically fall back to the
+  public relays while none is reachable and return when one recovers (`engine::relay_watchdog`);
+  or **only** — never contact the public relays. A custom iroh `PathSelector`
+  (`relays::PreferMyRelaySelector`) additionally ranks paths through the user's own relay above
+  any other relay (direct connections still always win). Settings live in `relays.cbor`, apply to
+  the **live** endpoint with no daemon restart, and are per-device (every member should configure
+  the same relays — a token-protected relay rejects clients without the token). IPC protocol
+  bumped to v4 (`GetRelays`/`SetRelays`/`Relays`); `NetworkStatus` gained `relay_fallback`
+  (surfaced in Diagnostics and `nullgate-cli status`). New ignored e2e (`relay_e2e`) covers the
+  live relay-map swap; `examples/relay_probe.rs` probes a real relay's HTTPS + QUIC endpoints and
+  token enforcement.
 
 ## [0.3.1] - 2026-07-06
 > The macOS tarball was rebuilt and re-uploaded on 2026-07-09 with the tray-icon fix below. The

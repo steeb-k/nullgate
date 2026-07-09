@@ -84,6 +84,16 @@ has **Restart Nullgate daemon** if the background service ever needs a nudge, an
 to disconnect and close it entirely. The tray runs from a tiny helper that starts with your login,
 so it's there whether or not the window is open.
 
+**Using your own relay server:** when two devices can't connect directly, traffic is carried by a
+relay — normally the free public ones run by the iroh project. If you host your own iroh relay, open
+**Relay servers** (on the main screen, or from the "No network yet" page before you join) and add
+its address, plus its access token if it requires one. Your relay then carries the traffic whenever
+it's reachable; if it ever goes down, Nullgate quietly falls back to the public relays and returns
+to yours once it's back. If you'd rather *never* touch the public relays, switch the policy to
+**my relays only**. Set the same relays (and tokens) on **every device** in the network — a relay
+that requires a token turns away devices that don't have it. Changes apply immediately, no restart
+needed.
+
 The background service keeps running and starts with your device. If it ever stops unexpectedly —
 or if its memory use climbs too high (a safeguard against a leak in the underlying networking
 library) — it restarts itself automatically, and it keeps a log (including the reason for any crash
@@ -107,6 +117,15 @@ nullgate-cli approve <node-id>      # approve once the words match; deny with `d
 
 To add a device to a network: run `nullgate-cli watch` on an existing member, `nullgate-cli join
 <ticket>` on the new one, check the word lists match on both, then `nullgate-cli approve <node-id>`.
+
+Custom relay servers work here too:
+
+```sh
+nullgate-cli relay add https://relay.example.com:8443 --token <token>
+nullgate-cli relay mode only        # never use the public relays (`preferred` is the default)
+nullgate-cli relay show             # what's configured
+nullgate-cli relay clear            # back to the public relays
+```
 
 ## Learn more
 - [How it works](docs/architecture.md) — the design, components, and networking details.

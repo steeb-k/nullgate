@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/steeb-k/nullgate"
@@ -22,7 +22,10 @@ rust-version = "1.85"
 # proven set from seed-sync-gtk (iroh 1.0 line).
 [workspace.dependencies]
 # --- iroh P2P stack (pin together; all resolve to iroh-base 1.0) ---
-iroh = "1.0"
+# `unstable-custom-transports` exposes the PathSelector trait, which the engine
+# implements to prefer the user's own relay servers (see ipn-core/src/relays.rs).
+# It's semver-exempt, so re-verify it on every iroh bump.
+iroh = { version = "1.0", features = ["unstable-custom-transports"] }
 iroh-blobs = "0.103"
 iroh-gossip = "0.101"
 iroh-docs = "0.101"

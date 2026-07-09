@@ -83,6 +83,32 @@ enum Cmd {
     ExportKey,
     /// Import an originator recovery code to gain originator powers.
     ImportKey { code: String },
+    /// Manage this device's custom relay servers (self-hosted iroh relays).
+    Relay {
+        #[command(subcommand)]
+        cmd: RelayCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum RelayCmd {
+    /// Show the configured relay servers and policy.
+    Show,
+    /// Add a custom relay server (or update its token if already present).
+    Add {
+        /// `https://host[:port]` of the relay.
+        url: String,
+        /// Access token, sent as `Authorization: Bearer <token>`.
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Remove a custom relay server by URL.
+    Remove { url: String },
+    /// Set the policy: `preferred` (fall back to the public iroh relays while
+    /// no custom relay is reachable) or `only` (never use the public relays).
+    Mode { mode: String },
+    /// Remove all custom relays (back to the public iroh relays).
+    Clear,
 }
 
 #[tokio::main]
@@ -95,6 +121,8 @@ async fn main() -> Result<()> {
         // can't use the one-shot request/response path.
         Cmd::Join { ticket } => return cmd_join(&socket, ticket).await,
         Cmd::Watch => return cmd_watch(&socket).await,
+        // Read-modify-write against the daemon's stored settings.
+        Cmd::Relay { cmd } => return cmd_relay(&socket, cmd).await,
         Cmd::Status => IpcRequest::GetStatus,
         Cmd::Create { name } => IpcRequest::CreateNetwork { name },
         Cmd::Ticket {
@@ -145,6 +173,9 @@ async fn main() -> Result<()> {
                 s.self_role,
                 s.routing
             );
+            if s.relay_fallback {
+                println!("relay: custom relays unreachable — temporarily using the public relays");
+            }
             for m in s.members {
                 if m.is_self {
                     continue;
@@ -195,10 +226,92 @@ async fn main() -> Result<()> {
             version,
             app_version,
         } => println!("daemon ipc protocol v{version} (app v{app_version})"),
+        // Relay settings are handled entirely inside `cmd_relay`.
+        IpcResponse::Relays(_) => bail!("unexpected daemon response"),
         IpcResponse::Ok => println!("ok"),
         IpcResponse::Err(e) => bail!("daemon error: {e}"),
     }
     Ok(())
+}
+
+/// Relay subcommands: `show` is a plain read; the rest read the current
+/// settings from the daemon, edit them, and write the whole set back.
+async fn cmd_relay(socket: &Path, cmd: RelayCmd) -> Result<()> {
+    use ipn_ipc::{RelayPolicy, RelayServer, RelaySettings};
+
+    let fetch = || async {
+        match oneshot_request(socket, IpcRequest::GetRelays)
+            .await
+            .map_err(|e| anyhow::anyhow!("can't reach daemon at {}: {e}", socket.display()))?
+        {
+            IpcResponse::Relays(s) => Ok(s),
+            IpcResponse::Err(e) => bail!("daemon error: {e}"),
+            other => bail!("unexpected daemon response: {other:?}"),
+        }
+    };
+
+    let settings: RelaySettings = match cmd {
+        RelayCmd::Show => {
+            let s = fetch().await?;
+            if s.servers.is_empty() {
+                println!("no custom relays — using the public iroh relays");
+            } else {
+                println!(
+                    "mode: {}",
+                    match s.mode {
+                        RelayPolicy::Preferred =>
+                            "preferred (public relays only while no custom relay is reachable)",
+                        RelayPolicy::Only => "only (never use the public relays)",
+                    }
+                );
+                for r in &s.servers {
+                    println!(
+                        "  {}{}",
+                        r.url,
+                        if r.token.is_some() { "  (token set)" } else { "" }
+                    );
+                }
+            }
+            return Ok(());
+        }
+        RelayCmd::Add { url, token } => {
+            let mut s = fetch().await?;
+            s.servers.retain(|r| r.url != url);
+            s.servers.push(RelayServer { url, token });
+            s
+        }
+        RelayCmd::Remove { url } => {
+            let mut s = fetch().await?;
+            let before = s.servers.len();
+            s.servers.retain(|r| r.url != url);
+            if s.servers.len() == before {
+                bail!("no configured relay with URL {url}");
+            }
+            s
+        }
+        RelayCmd::Mode { mode } => {
+            let mut s = fetch().await?;
+            s.mode = match mode.to_lowercase().as_str() {
+                "preferred" | "prefer" => RelayPolicy::Preferred,
+                "only" => RelayPolicy::Only,
+                other => bail!("unknown mode {other:?} (use `preferred` or `only`)"),
+            };
+            s
+        }
+        RelayCmd::Clear => RelaySettings::default(),
+    };
+
+    match oneshot_request(socket, IpcRequest::SetRelays { settings })
+        .await
+        .map_err(|e| anyhow::anyhow!("can't reach daemon at {}: {e}", socket.display()))?
+    {
+        IpcResponse::Ok => {
+            println!("ok — relay settings applied (no restart needed)");
+            Ok(())
+        }
+        IpcResponse::Err(e) => bail!("daemon error: {e}"),
+        other => bail!("unexpected daemon response: {other:?}"),
+    }
 }
 
 /// Print a SAS as a numbered word list. The emojis are meaningless over a terminal,

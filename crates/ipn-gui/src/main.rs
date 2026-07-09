@@ -26,6 +26,7 @@ use gtk::glib;
 use ipn_ipc::transport::{self, read_frame, write_frame};
 use ipn_ipc::{
     AuditEntry, Frame, IpcEvent, IpcRequest, IpcResponse, MemberView, Message, NetworkStatus,
+    RelayPolicy, RelayServer, RelaySettings,
 };
 use tokio::runtime::Handle;
 
@@ -134,6 +135,11 @@ enum UiMsg {
     /// The administration activity log to display in its flyout.
     AuditLog(Vec<AuditEntry>),
     Toast(String),
+    /// The device's relay settings, to render in the "Relay servers" flyout.
+    Relays(RelaySettings),
+    /// A relay-settings write succeeded; re-fetch so the open panel shows the
+    /// applied state (sequenced after the write, unlike a parallel GetRelays).
+    RelaysSaved,
     /// Re-render the current status (e.g. after a pending-join change).
     Refresh,
     DaemonDown,
@@ -603,6 +609,7 @@ struct Ui {
     ticket_box: gtk::Box,
     member_box: gtk::Box,
     audit_box: gtk::Box,
+    relays_box: gtk::Box,
     member_title: adw::WindowTitle,
     notes_view: gtk::TextView,
     notes_target: Rc<RefCell<Option<String>>>,
@@ -730,6 +737,7 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
     let ticket_box = padded_box();
     let member_box = padded_box();
     let audit_box = padded_box();
+    let relays_box = padded_box();
 
     // The flyout stack and a navigation history of the panels we drilled through,
     // so a panel's Back button steps back one level (e.g. member → notes → back →
@@ -783,6 +791,7 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
     let (ticket_panel, _) = make_panel("Join ticket", &ticket_box);
     let (member_panel, member_title) = make_panel("Member", &member_box);
     let (audit_panel, _) = make_panel("Activity log", &audit_box);
+    let (relays_panel, _) = make_panel("Relay servers", &relays_box);
 
     // Notes panel: an editable text area presented as a rounded card that fills
     // the flyout below the header (with margins so it doesn't bleed to the edges)
@@ -870,6 +879,7 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
     stack.add_named(&member_panel, Some("member"));
     stack.add_named(&audit_panel, Some("audit"));
     stack.add_named(&notes_panel, Some("notes"));
+    stack.add_named(&relays_panel, Some("relays"));
     split.set_sidebar(Some(&stack));
 
     let toast_overlay = adw::ToastOverlay::new();
@@ -887,6 +897,7 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
         ticket_box,
         member_box,
         audit_box,
+        relays_box,
         member_title,
         notes_view,
         notes_target,
@@ -1014,6 +1025,14 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
                         if let Some(s) = state.borrow().as_ref() {
                             render_if_changed(&ui, s, &net, &window, &pending, &last_sig);
                         }
+                    }
+                    UiMsg::Relays(settings) => {
+                        render_relays(&ui.relays_box, &settings, &net, &window);
+                        ui.open("relays");
+                    }
+                    UiMsg::RelaysSaved => {
+                        toast_overlay.add_toast(adw::Toast::new("Relay settings applied"));
+                        open_relays(&net);
                     }
                     UiMsg::Toast(t) => toast_overlay.add_toast(adw::Toast::new(&t)),
                 }
@@ -1312,12 +1331,25 @@ fn empty_page(net: &Net, window: &adw::ApplicationWindow) -> adw::StatusPage {
         let window = window.clone();
         join.connect_clicked(move |_| join_dialog(&window, &net));
     }
+    // Relay settings are device-level, so they're reachable (and worth setting)
+    // before joining anything — a token-protected relay must be configured
+    // before the join for the join traffic to use it.
+    let outer = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    outer.append(&buttons);
+    let relays = gtk::Button::with_label("Relay servers…");
+    relays.add_css_class("flat");
+    relays.set_halign(gtk::Align::Center);
+    {
+        let net = net.clone();
+        relays.connect_clicked(move |_| open_relays(&net));
+    }
+    outer.append(&relays);
     adw::StatusPage::builder()
         .icon_name("network-workgroup-symbolic")
         .title("No network yet")
         .description("Create a private network for your own devices, or join one with a ticket.")
         .css_classes(["empty-state"])
-        .child(&buttons)
+        .child(&outer)
         .vexpand(true)
         .build()
 }
@@ -1339,6 +1371,8 @@ fn render_signature(s: &NetworkStatus, pending: &[PendingJoin]) -> String {
         s.self_ip.as_deref().unwrap_or(""),
         s.home_relay.as_deref().unwrap_or(""),
     );
+    // Rare state flips (not per-tick volatile, so safe in the signature).
+    let _ = write!(out, "{}|", s.relay_fallback);
     for m in &s.members {
         // Volatile per-connection telemetry is deliberately kept OUT of the
         // signature so it can't churn the page every tick (which is what steals
@@ -1535,6 +1569,16 @@ fn render_main(
         controls.add(&row);
     }
     {
+        let row = flyout_row(
+            "Relay servers",
+            "Use your own iroh relay instead of the public ones",
+            "network-server-symbolic",
+        );
+        let net2 = net.clone();
+        row.connect_activated(move |_| open_relays(&net2));
+        controls.add(&row);
+    }
+    {
         // About opens the standard dialog (not a flyout) — no chevron suffix.
         let row = adw::ActionRow::builder()
             .title("About Nullgate")
@@ -1673,6 +1717,12 @@ fn render_diag(b: &gtk::Box, s: &NetworkStatus) {
     clear_box(b);
     let g = adw::PreferencesGroup::new();
     g.add(&property_row("Home relay", &s.home_relay.clone().unwrap_or_else(|| "—".into())));
+    if s.relay_fallback {
+        g.add(&property_row(
+            "Relay fallback",
+            "custom relays unreachable — temporarily using the public relays",
+        ));
+    }
     let direct = s.members.iter().filter(|m| !m.is_self && m.online && m.direct == Some(true)).count();
     let relayed = s.members.iter().filter(|m| !m.is_self && m.online && m.direct == Some(false)).count();
     g.add(&property_row("Connections", &format!("{direct} direct · {relayed} via relay")));
@@ -1681,6 +1731,157 @@ fn render_diag(b: &gtk::Box, s: &NetworkStatus) {
         if s.routing { "on — carrying traffic" } else { "off — needs the elevated daemon" },
     ));
     b.append(&g);
+}
+
+/// Fetch the current relay settings; the response renders + opens the flyout.
+fn open_relays(net: &Net) {
+    net.request(IpcRequest::GetRelays, |r| match r {
+        Ok(IpcResponse::Relays(s)) => Some(UiMsg::Relays(s)),
+        Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
+        Err(_) => Some(UiMsg::DaemonDown),
+        _ => None,
+    });
+}
+
+/// Write relay settings to the daemon; on success the panel re-fetches (via
+/// `RelaysSaved`) so it always shows the state the daemon actually applied.
+fn set_relays(net: &Net, settings: RelaySettings) {
+    net.request(IpcRequest::SetRelays { settings }, |r| match r {
+        Ok(IpcResponse::Ok) => Some(UiMsg::RelaysSaved),
+        Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
+        Err(_) => Some(UiMsg::DaemonDown),
+        _ => None,
+    });
+}
+
+/// The "Relay servers" flyout: the configured custom relays (with add/remove),
+/// and the policy for combining them with the public relays. Device-level —
+/// available with or without a network.
+fn render_relays(b: &gtk::Box, s: &RelaySettings, net: &Net, window: &adw::ApplicationWindow) {
+    clear_box(b);
+
+    let list = adw::PreferencesGroup::builder()
+        .title("Custom relays")
+        .description(
+            "Relays carry traffic between devices that can't connect directly. \
+             Every device in the network should use the same relay settings — \
+             a relay that requires a token rejects devices that don't have it.",
+        )
+        .build();
+    let add = icon_button("list-add-symbolic", "Add a relay server");
+    {
+        let net2 = net.clone();
+        let window2 = window.clone();
+        let cur = s.clone();
+        add.connect_clicked(move |_| add_relay_dialog(&window2, &net2, &cur));
+    }
+    list.set_header_suffix(Some(&add));
+
+    if s.servers.is_empty() {
+        let row = adw::ActionRow::builder()
+            .title("No custom relays")
+            .subtitle("Using the public iroh relays")
+            .build();
+        row.add_css_class("property");
+        list.add(&row);
+    }
+    for server in &s.servers {
+        let row = adw::ActionRow::builder()
+            .title(&server.url)
+            .subtitle(if server.token.is_some() {
+                "Access token set"
+            } else {
+                "No access token"
+            })
+            .build();
+        let remove = icon_button("user-trash-symbolic", "Remove this relay");
+        {
+            let net2 = net.clone();
+            let mut without = s.clone();
+            let url = server.url.clone();
+            without.servers.retain(|r| r.url != url);
+            remove.connect_clicked(move |_| set_relays(&net2, without.clone()));
+        }
+        row.add_suffix(&remove);
+        list.add(&row);
+    }
+    b.append(&list);
+
+    // Policy only matters once a custom relay exists.
+    if !s.servers.is_empty() {
+        let policy = adw::PreferencesGroup::new();
+        let combo = adw::ComboRow::builder()
+            .title("If my relays are unreachable")
+            .subtitle("Applies while none of the custom relays answers")
+            .model(&gtk::StringList::new(&[
+                "Fall back to the public relays",
+                "Stay offline from relays (my relays only)",
+            ]))
+            .build();
+        combo.set_selected(match s.mode {
+            RelayPolicy::Preferred => 0,
+            RelayPolicy::Only => 1,
+        });
+        {
+            let net2 = net.clone();
+            let cur = s.clone();
+            combo.connect_selected_notify(move |c| {
+                let mode = if c.selected() == 1 { RelayPolicy::Only } else { RelayPolicy::Preferred };
+                if mode != cur.mode {
+                    let mut next = cur.clone();
+                    next.mode = mode;
+                    set_relays(&net2, next);
+                }
+            });
+        }
+        policy.add(&combo);
+        b.append(&policy);
+    }
+}
+
+/// Dialog collecting a relay URL + optional access token, appended to `cur`.
+fn add_relay_dialog(window: &adw::ApplicationWindow, net: &Net, cur: &RelaySettings) {
+    let fields = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let url = gtk::Entry::builder()
+        .placeholder_text("https://relay.example.com:8443")
+        .activates_default(true)
+        .build();
+    let token = gtk::Entry::builder()
+        .placeholder_text("Access token (optional)")
+        .activates_default(true)
+        .build();
+    fields.append(&url);
+    fields.append(&token);
+    let dialog = adw::MessageDialog::builder()
+        .transient_for(window)
+        .heading("Add a relay server")
+        .body("The address of your own iroh relay. If it requires an access token, paste it below.")
+        .extra_child(&fields)
+        .build();
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("add", "Add");
+    dialog.set_response_appearance("add", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("add"));
+    let net = net.clone();
+    let cur = cur.clone();
+    dialog.connect_response(None, move |_, resp| {
+        if resp != "add" {
+            return;
+        }
+        let url = url.text().trim().to_string();
+        if url.is_empty() {
+            return;
+        }
+        let token = token.text().trim().to_string();
+        let mut next = cur.clone();
+        next.servers.retain(|r| r.url != url);
+        next.servers.push(RelayServer {
+            url,
+            token: if token.is_empty() { None } else { Some(token) },
+        });
+        set_relays(&net, next);
+    });
+    dialog.present();
 }
 
 fn render_admin(

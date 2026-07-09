@@ -12,8 +12,22 @@ the membership list is a small signed document every member replicates.
   (`admission::PROTOCOL_VERSION`); a mismatch is rejected with a clear error on both ends. The
   GUI↔daemon IPC is likewise versioned (an `IpcRequest::Hello` check).
 - Members form a **full mesh** of authenticated connections. iroh does NAT hole-punching for
-  direct links and falls back to a relay only when a direct path can't be established. (n0 runs
-  free public relays; self-hosting is on the roadmap.)
+  direct links and falls back to a relay only when a direct path can't be established. n0 runs
+  free public relays; a device can instead use **custom relay servers** (self-hosted iroh relays,
+  `ipn-core/src/relays.rs`), configured per device in `relays.cbor` with an optional per-relay
+  access token (sent as `Authorization: Bearer` on the relay handshake; the relay rejects clients
+  without it). Two policies: **preferred** — the endpoint runs on the custom relays alone, and a
+  watchdog (`engine::relay_watchdog`, 10 s tick) *adds* the public relays to the live relay map
+  after ~30 s with no custom relay connected, removing them again once one reconnects (iroh
+  re-probes every relay on its ~20-26 s net-report cycle, so recovery is automatic); or **only** —
+  never touch the public relays. A custom `PathSelector` (`relays::PreferMyRelaySelector`,
+  installed at bind via iroh's `unstable-custom-transports` feature) mirrors iroh's default
+  biased-RTT path choice but ranks a path through one of the user's relays above any other relay —
+  direct paths still always win. Settings changes apply to the **live** endpoint
+  (`Endpoint::insert_relay`/`remove_relay` + the selector's shared preferred-set), so no daemon
+  restart is needed. The settings are deliberately **not** distributed through the roster: every
+  member configures its own (a token-protected relay would reject unconfigured members anyway,
+  which would also break relay-assisted hole-punching with them).
 - A periodic **maintenance tick** (every 3 s) reconciles the mesh: it rebuilds the roster, tears
   down connections to non-members, and dials any member we aren't yet connected to. Dialing is
   **de-duplicated and time-bounded** (`engine::spawn_dials`) — at most one in-flight `connect()`

@@ -38,7 +38,11 @@ Key module map in `ipn-core/src`: `engine.rs` (orchestration + public API), `ros
 rules), `membership.rs` (roster over iroh-docs; `load_entries` also feeds the derived audit log),
 `admission.rs` (PSK + SAS), `network.rs` (secret derivation + ticket w/ invite nonce), `node.rs`
 (iroh node), `router.rs` + `tun_device.rs` (data plane), `conntrack.rs` (one-way "disable remote
-access" block), `presence.rs` (gossip presence + access/hidden flags).
+access" block), `presence.rs` (gossip presence + access/hidden flags), `relays.rs` (custom relay
+servers: per-device `relays.cbor` w/ optional Bearer tokens, preferred/only policy, the
+`PreferMyRelaySelector` path selector — needs iroh's `unstable-custom-transports` feature, pinned
+in the root `Cargo.toml`; fallback watchdog lives in `engine.rs`; settings apply to the live
+endpoint via `insert_relay`/`remove_relay`, no daemon restart).
 
 Roles: **Originator** = master-key possession (orthogonal to roster role); roster roles are
 **Peer** and **Controller**. Controllers add/remove Peers + issue Peer invites; only the
