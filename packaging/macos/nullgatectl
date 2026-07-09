@@ -62,19 +62,47 @@ need_root() {
 console_user() { stat -f %Su /dev/console 2>/dev/null; }
 console_uid()  { id -u "$(console_user)" 2>/dev/null; }
 
+# Stop every tray agent belonging to $1 (a uid) and wait for it to actually exit.
+# Not all of them are launchd's: the GUI spawns one too, so `launchctl bootout` alone
+# would leave strays running the *old* bundle. They also hold the agent's flock, and a
+# freshly kickstarted agent exits on losing that race — so wait for the fd to close
+# rather than just signalling. The " --agent" in the pattern keeps the GUI process out.
+gui_agent_kill() {
+  local u="$1" i=0
+  pkill -u "$u" -f 'MacOS/nullgate --agent' >/dev/null 2>&1 || true
+  while pgrep -u "$u" -f 'MacOS/nullgate --agent' >/dev/null 2>&1; do
+    i=$((i + 1))
+    [ "$i" -gt 30 ] && { pkill -9 -u "$u" -f 'MacOS/nullgate --agent' >/dev/null 2>&1 || true; break; }
+    sleep 0.1
+  done
+}
+
 # (Re)start the per-user tray agent in the console user's Aqua session, so the tray
 # appears now on a fresh install and picks up the new binary on an upgrade — without
-# waiting for the next login. `bootstrap` loads it (RunAtLoad starts it); `kickstart
-# -k` force-restarts it if it was already loaded (upgrade). Best-effort.
+# waiting for the next login.
+#
+# `bootstrap` is a *no-op on an already-loaded job*, so it alone never picks up a
+# changed plist: machines that loaded the pre-a10dbed job kept launching the GUI
+# (`--minimized`) instead of the tray agent, indefinitely. Worse, the loaded job
+# still pointed at the replaced bundle's binary, so launchd's spawns died with
+# OS_REASON_CODESIGNING. Always `bootout` first, then load the plist from disk.
 gui_agent_reload() {
   local u; u="$(console_uid)"
   [ -n "$u" ] || { log "no console user; the tray starts at next login"; return 0; }
-  launchctl bootstrap "gui/$u" "$AGENTS/$APP_ID.gui.plist" >/dev/null 2>&1 || true
-  if launchctl kickstart -k "gui/$u/$APP_ID.gui" >/dev/null 2>&1; then
-    log "tray agent started for uid $u"
-  else
-    log "tray agent will start at next login"
-  fi
+  launchctl bootout "gui/$u/$APP_ID.gui" >/dev/null 2>&1 || true
+  gui_agent_kill "$u"
+  # RunAtLoad starts it; kickstart only as a fallback if it was already loaded.
+  launchctl bootstrap "gui/$u" "$AGENTS/$APP_ID.gui.plist" >/dev/null 2>&1 \
+    || launchctl kickstart "gui/$u/$APP_ID.gui" >/dev/null 2>&1 || true
+  local i=0
+  while [ "$i" -lt 30 ]; do
+    if pgrep -u "$u" -f 'MacOS/nullgate --agent' >/dev/null 2>&1; then
+      log "tray agent started for uid $u"
+      return 0
+    fi
+    i=$((i + 1)); sleep 0.1
+  done
+  log "WARNING: the tray agent did not start; it will start at next login"
 }
 
 version_gt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$2" ]; }

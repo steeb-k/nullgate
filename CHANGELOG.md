@@ -6,7 +6,28 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 ## [Unreleased]
 
 ## [0.3.1] - 2026-07-06
+> The macOS tarball was rebuilt and re-uploaded on 2026-07-09 with the tray-icon fix below. The
+> version was deliberately not bumped, so existing macOS 0.3.1 installs will not auto-update to it.
 ### Fixed
+- **macOS: a new tray icon appeared every time the GUI was opened.** The tray agent relied on
+  GApplication's single-instance guarantee, which GLib implements over a D-Bus session bus — and
+  macOS has none. Every `nullgate --agent` therefore became its own "primary" instance, and since
+  the GUI spawns the agent on each start, the icons piled up (four live agents were observed after a
+  few launches). On macOS the agent now takes an exclusive `flock` on a per-uid lock file and exits
+  quietly if another agent already holds it. The macOS installer also stops any stray agents — the
+  GUI-spawned ones aren't launchd's to `bootout` — and waits for them to exit before restarting the
+  tray, so an upgrade can't leave an agent running from the replaced bundle.
+- **macOS: the tray's "Open Nullgate" opened a duplicate window** when one was already up — the same
+  missing-D-Bus cause. The GUI now claims a per-uid `flock` plus a small unix socket; a second launch
+  pokes that socket so the existing window presents itself, then exits. (`open -a Nullgate.app` looks
+  like the natural fix and is not: the agent runs the bundle's `CFBundleExecutable`, so Launch
+  Services considers the app already running and just activates the *headless agent* — no window
+  ever appears.)
+- **macOS: the login tray agent never picked up a changed LaunchAgent plist.** `launchctl bootstrap`
+  is a no-op on an already-loaded job, so machines that first loaded the pre-0.2.0 plist kept
+  launching `nullgate --minimized` (a GUI window) instead of `--agent`, indefinitely — and once the
+  bundle was replaced underneath it, launchd's spawns died with `OS_REASON_CODESIGNING`. `nullgatectl`
+  now `bootout`s the job before loading the plist from disk, and verifies the agent actually came up.
 - **Intermittent connection drops to remote peers.** Two causes, both in `ipn-core`:
   - The maintenance tick re-dialed *every* member — including unreachable ones — through the
     roster-doc sync (`start_sync`, every 8 s) and presence gossip (`join_peers`, every 3 s). Each

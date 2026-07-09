@@ -137,7 +137,20 @@ added.
   `launch_agent_for_user`/`gui_agent_reload`; Windows via the updater's user-session relaunch).
   Single-instance makes every one of these a safe no-op if the agent is already up. The **daemon
   never launches it** (session 0 can't draw UI, and the agent's lifetime is independent of the
-  daemon). The GUI is a normal single-instance window (closing it quits only the GUI). Verify on Windows:
+  daemon).
+- **GApplication single-instance does nothing on macOS.** GLib implements it over a D-Bus session
+  bus, which macOS has none of, so *every* launch becomes its own primary. Both long-lived roles
+  rebuild it on `flock` in `macos_single_instance` (`ipn-gui/src/main.rs`): the **agent** takes
+  `/tmp/nullgate-agent-<uid>.lock` (without it, each GUI start left another agent and another tray
+  icon), and the **GUI** takes `/tmp/nullgate-gui-<uid>.lock` plus a `…-gui-<uid>.sock` that a second
+  launch pokes so the existing window presents itself (without it, the tray's *Open Nullgate* opened
+  a duplicate window). Do **not** "simplify" `launch_gui` to `open -a Nullgate.app`: the agent runs
+  the bundle's `CFBundleExecutable`, so Launch Services thinks the app is already running and
+  activates the *headless agent* — the window never appears. Two corollaries for `nullgatectl`:
+  stray GUI-spawned agents are not launchd jobs, so `launchctl bootout` won't stop them
+  (`gui_agent_kill` pkills them and waits for the lock's fd to close); and `launchctl bootstrap` is a
+  **no-op on an already-loaded job**, so always `bootout` first or a changed plist never takes effect
+  (this stranded machines on the pre-0.2.0 `--minimized` job for months). The GUI is a normal single-instance window (closing it quits only the GUI). Verify on Windows:
   close the GUI → tray icon stays; the tray's *Open Nullgate* / *Restart Nullgate daemon* / *Quit
   Nullgate* all work; a notification click opens the window.
 - **Keyboard nav must survive a page rebuild (recurring Windows regression).** The GUI rebuilds

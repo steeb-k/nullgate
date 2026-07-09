@@ -3057,6 +3057,7 @@ dependencies = [
  "ipn-ipc",
  "ksni",
  "libadwaita",
+ "libc",
  "qrcode",
  "tauri-winrt-notification",
  "tokio",

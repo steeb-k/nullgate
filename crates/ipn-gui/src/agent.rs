@@ -47,8 +47,37 @@ enum AgentMsg {
     UpdateApplied,
 }
 
+/// Hold the agent's `flock` for the life of the process, returning `false` if another
+/// agent already holds it. See [`crate::macos_single_instance`] for why macOS needs
+/// this at all: without it, every GUI start left behind another agent — and another
+/// tray icon. Linux/Windows keep using GApplication's own single-instance path.
+#[cfg(target_os = "macos")]
+fn acquire_single_instance_lock() -> bool {
+    use crate::macos_single_instance::{agent_lock_path, take_flock};
+
+    match take_flock(&agent_lock_path()) {
+        Ok(Some(lock)) => {
+            // The lock lives exactly as long as its fd; hold it for the whole process.
+            std::mem::forget(lock);
+            true
+        }
+        Ok(None) => false,
+        // Don't let a lock-file problem cost the user their tray icon.
+        Err(e) => {
+            tracing::warn!(error = %e, "agent: cannot open lock file; starting unguarded");
+            true
+        }
+    }
+}
+
 /// Run the tray agent to completion. Returns when "Quit Nullgate" is chosen.
 pub fn run(socket: PathBuf) -> glib::ExitCode {
+    #[cfg(target_os = "macos")]
+    if !acquire_single_instance_lock() {
+        tracing::info!("agent: another tray agent already holds the lock; exiting");
+        return glib::ExitCode::SUCCESS;
+    }
+
     // A Tokio runtime on a side thread does the socket IO, mirroring the GUI.
     let (handle_tx, handle_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {

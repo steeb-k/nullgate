@@ -36,6 +36,89 @@ mod tray;
 
 pub(crate) const APP_ID: &str = "io.github.steeb_k.Nullgate";
 
+/// Single-instance support for macOS, where GApplication's own machinery is inert.
+///
+/// GLib implements "a second launch just activates the first" over a D-Bus session
+/// bus, and macOS has none — so `g_application_register` never finds a primary and
+/// every launch becomes one. Both long-lived roles rebuild the guarantee here on top
+/// of `flock`: the tray agent (exactly one tray icon) and the GUI (exactly one
+/// window). `open -a` is not an option for either — the agent runs the bundle's
+/// `CFBundleExecutable`, so Launch Services thinks the app is already running and
+/// activates the *headless agent* instead of opening a window.
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_single_instance {
+    use std::fs::{File, OpenOptions};
+    use std::io;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    fn uid() -> u32 {
+        // SAFETY: `getuid` is always safe; it reads the calling process's real uid.
+        unsafe { libc::getuid() }
+    }
+
+    /// Paths are per-uid: each user's Aqua session runs its own agent and GUI.
+    fn gui_lock_path() -> String {
+        format!("/tmp/nullgate-gui-{}.lock", uid())
+    }
+    fn gui_sock_path() -> String {
+        format!("/tmp/nullgate-gui-{}.sock", uid())
+    }
+    pub(crate) fn agent_lock_path() -> String {
+        format!("/tmp/nullgate-agent-{}.lock", uid())
+    }
+
+    /// Take an exclusive, non-blocking `flock`. `Ok(None)` means another process holds
+    /// it. The kernel drops the lock when the fd closes, so — unlike a pidfile — it
+    /// cannot survive a crash. Callers must keep the returned `File` alive.
+    pub(crate) fn take_flock(path: &str) -> io::Result<Option<File>> {
+        let file = OpenOptions::new().create(true).write(true).mode(0o600).open(path)?;
+        // SAFETY: `file` owns a valid open fd for the duration of the call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Ok(None);
+        }
+        Ok(Some(file))
+    }
+
+    /// Outcome of trying to become the one GUI process.
+    pub(crate) enum GuiSlot {
+        /// This process owns the window. The listener, when present, receives
+        /// "present yourself" pokes from later launches.
+        Primary(Option<UnixListener>),
+        /// A window is already open and has been asked to come forward; exit quietly.
+        AlreadyOpen,
+    }
+
+    pub(crate) fn claim_gui_slot() -> GuiSlot {
+        let lock = match take_flock(&gui_lock_path()) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                // Someone owns the window: poke them, then step aside. A failed connect
+                // is not worth blocking on — the primary is up either way.
+                let _ = UnixStream::connect(gui_sock_path());
+                return GuiSlot::AlreadyOpen;
+            }
+            // A lock-file problem must never cost the user their window.
+            Err(e) => {
+                tracing::warn!(error = %e, "gui: cannot open lock file; starting unguarded");
+                return GuiSlot::Primary(None);
+            }
+        };
+        // The lock lives exactly as long as its fd; hold it for the whole process.
+        std::mem::forget(lock);
+        // We hold the lock, so any socket here is a leftover from a dead primary.
+        let _ = std::fs::remove_file(gui_sock_path());
+        match UnixListener::bind(gui_sock_path()) {
+            Ok(listener) => GuiSlot::Primary(Some(listener)),
+            Err(e) => {
+                tracing::warn!(error = %e, "gui: cannot bind present socket; window won't be reusable");
+                GuiSlot::Primary(None)
+            }
+        }
+    }
+}
+
 /// Messages from the IO side to the UI.
 #[derive(Clone)]
 enum UiMsg {
@@ -408,11 +491,25 @@ fn main() -> glib::ExitCode {
         return agent::run(ipn_ipc::default_socket());
     }
 
+    // macOS: GApplication can't dedupe us (no D-Bus session bus), so a second launch
+    // — e.g. the tray's "Open Nullgate" while the window is already up — would build a
+    // duplicate window. Hand the request to the existing window instead, and exit.
+    #[cfg(target_os = "macos")]
+    let present_requests = match macos_single_instance::claim_gui_slot() {
+        macos_single_instance::GuiSlot::AlreadyOpen => return glib::ExitCode::SUCCESS,
+        macos_single_instance::GuiSlot::Primary(listener) => listener,
+    };
+
     // Whenever the GUI starts, make sure the tray agent is up. The agent is a
     // single-instance app, so this is a no-op if one is already running (e.g. from
     // login autostart); but it guarantees the tray appears the first time you open
     // Nullgate after an install, without waiting for the next login. The agent is a
     // separate process and keeps running after this GUI window is closed.
+    //
+    // Single-instance is enforced by GApplication on Windows/Linux, but on macOS
+    // that runs over a D-Bus session bus which doesn't exist — so the agent takes an
+    // `flock` there (see `macos_single_instance`). Without it, every GUI start left
+    // behind another agent, and another tray icon.
     spawn_agent();
 
     #[cfg(windows)]
@@ -442,6 +539,8 @@ fn main() -> glib::ExitCode {
     glib::set_application_name("Nullgate");
 
     let app = adw::Application::builder().application_id(APP_ID).build();
+    #[cfg(target_os = "macos")]
+    let present_requests = RefCell::new(present_requests);
     app.connect_activate(move |app| {
         // Re-launched (e.g. from the tray's "Open Nullgate", or the notification's
         // click action) while already running: single-instance activation just
@@ -451,9 +550,40 @@ fn main() -> glib::ExitCode {
             return;
         }
         build_ui(app, net.clone(), rx.clone());
+        // macOS only, and only once: start answering the pokes that later launches
+        // send instead of opening a window of their own.
+        #[cfg(target_os = "macos")]
+        if let Some(listener) = present_requests.borrow_mut().take() {
+            serve_present_requests(app, listener);
+        }
     });
     let empty: [&str; 0] = [];
     app.run_with_args(&empty)
+}
+
+/// Present the window whenever another launch connects to our socket. Accepting
+/// blocks, so it lives on its own thread and reaches GTK through an `async-channel`,
+/// like every other off-thread event in this process.
+#[cfg(target_os = "macos")]
+fn serve_present_requests(app: &adw::Application, listener: std::os::unix::net::UnixListener) {
+    let (tx, rx) = async_channel::unbounded::<()>();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            // A failed accept says nothing about the next one; a closed channel means
+            // the GUI is gone, so stop.
+            if stream.is_ok() && tx.send_blocking(()).is_err() {
+                break;
+            }
+        }
+    });
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        while rx.recv().await.is_ok() {
+            if let Some(win) = app.active_window() {
+                win.present();
+            }
+        }
+    });
 }
 
 /// Handles to the persistent widgets, passed to the render functions.
@@ -970,6 +1100,13 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
 /// "Open Nullgate" and by notification clicks. The GUI is a single-instance
 /// GApplication, so if one is already open this just presents it. `current_exe`
 /// with no arguments selects GUI mode (see [`parse_mode`]).
+///
+/// Note for macOS: this must spawn the executable directly. `open -a Nullgate.app`
+/// looks like the idiomatic call, but the tray agent runs the bundle's
+/// `CFBundleExecutable`, so Launch Services already counts the bundle as "running"
+/// and merely sends an activate event to the headless agent — no window ever
+/// appears. The duplicate-window problem that `open` would have solved is instead
+/// handled by [`macos_single_instance`].
 pub(crate) fn launch_gui() {
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::process::Command::new(exe).spawn();
@@ -977,11 +1114,11 @@ pub(crate) fn launch_gui() {
 }
 
 /// Ensure the tray agent is running by spawning `nullgate --agent` as a detached
-/// process. The agent is a single-instance GApplication, so if one is already
-/// running (from login autostart, or a prior GUI start) the new process hands off
-/// to it and exits — making this safe to call unconditionally. This is how the
-/// tray reliably appears whenever Nullgate is used, without the user ever having
-/// to launch the agent by hand.
+/// process. The agent is single-instance — a GApplication primary on Windows/Linux,
+/// an `flock` holder on macOS — so if one is already running (from login autostart,
+/// or a prior GUI start) the new process hands off to it and exits, making this safe
+/// to call unconditionally. This is how the tray reliably appears whenever Nullgate
+/// is used, without the user ever having to launch the agent by hand.
 pub(crate) fn spawn_agent() {
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::process::Command::new(exe).arg("--agent").spawn();
