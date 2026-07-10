@@ -4,6 +4,11 @@ All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepa
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+### Changed
+- **Installer/`nullgatectl` header art.** The `install.sh` bootstrap and the `nullgatectl`
+  manager (Linux + macOS) now print the full-colour Nullgate logo on a colour-capable
+  interactive terminal. On pipes, log files, dumb terminals, or when `NO_COLOR` is set they
+  fall back to the plain block-glyph wordmark, so redirected output never gets escape codes.
 
 ## [0.3.2] - 2026-07-09
 > The macOS tarball was built after the `v0.3.2` tag and **includes the sleep/wake fix below**; the
