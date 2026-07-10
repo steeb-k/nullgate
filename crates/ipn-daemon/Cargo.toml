@@ -36,5 +36,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 # macOS has no /proc; the memory watchdog reads RSS via getrusage(2).
+# core-foundation-sys supplies the CFRunLoop the IOKit power notifications need.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
+core-foundation-sys = "0.8"

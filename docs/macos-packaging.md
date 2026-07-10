@@ -38,6 +38,11 @@ instead builds `osx-arm64` against the **macOS 11** SDK (the floor for all Apple
   the `.pc`-only helpers the Rust `-sys` builds need. Override the paths via
   `NULLGATE_CONDA_ARM` / `NULLGATE_CONDA_X86`.
 
+  The envs are **just GTK dylib prefixes — nothing in them is tied to this source tree**, so an env
+  built for another checkout (or another project) is reusable as-is via those two variables. Worth
+  knowing because `.conda-gtk/` is git-ignored: it does not survive a re-clone, and it disappears
+  when an old checkout is deleted, while a copy elsewhere on the machine stays perfectly good.
+
 ## Build
 ```sh
 scripts/setup-conda-macos.sh --universal # once: create the conda-forge GTK env(s)
@@ -58,12 +63,20 @@ Then it writes `Info.plist`, renders `AppIcon.icns`, and seals the bundle. At ru
 `setup_runtime_env()` points GTK at the bundled `share/`+`lib/`+`etc/` relative to the executable.
 
 ## Verify the OS floor
-Confirm the bundled GTK carries the macOS-11 floor (not the build host's OS):
+**This is a per-env check, not a per-build one.** `minos` is a property of the GTK dylibs, which the
+build only copies — so once an env is known to carry `minos 11.0`, every build against it does too.
+Run this when you *create or update* a conda env (or adopt one from elsewhere), and before cutting a
+release. Don't re-run it on every local build; it can't have changed.
+
 ```sh
 otool -l "dist/nullgate-<ver>-macos-universal/Nullgate.app/Contents/lib/libgtk-4."*.dylib \
   | grep -A3 LC_BUILD_VERSION      # expect: minos 11.0 (arm64 slice)
 lipo -archs "dist/nullgate-<ver>-macos-universal/Nullgate.app/Contents/MacOS/nullgate"  # -> arm64 x86_64
 ```
+A conda-forge env satisfies the floor by construction (conda-forge builds `osx-arm64` against 11.0
+and `osx-64` against ~10.13). The check exists to catch the *wrong env* being picked up — a Homebrew
+prefix leaking in via `PKG_CONFIG_PATH`, or a stale `NULLGATE_CONDA_*` pointing somewhere unintended
+— not to catch conda-forge changing its mind.
 
 ## Install / manage (on the target)
 ```sh

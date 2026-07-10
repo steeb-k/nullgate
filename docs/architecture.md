@@ -116,7 +116,7 @@ outbound TUN→mesh path); when the block (or hide) is on, the inbound path admi
 traffic for a tracked flow. The toggle is an `AtomicBool` on the engine's `Inner` (read lock-free
 per packet, never behind the async state mutex), persisted in `device_prefs.cbor`.
 
-## Reliability: memory watchdog + presence-blip debounce
+## Reliability: memory watchdog + presence-blip debounce + sleep/wake
 **Memory watchdog (iroh #4293 stopgap).** iroh 1.0's per-remote mapped-address cache
 (`socket::mapped_addrs::AddrMap`) is never pruned — every distinct transport address it sees mints a
 permanent entry in two `FxHashMap`s — so under address churn the daemon's resident memory grows
@@ -141,6 +141,26 @@ turn into a "came online" notification each time. The tray agent (`notify_newly_
 when it first went dark this session and only announces a return once the absence has exceeded a
 threshold (default 2 minutes; `NULLGATE_ONLINE_DEBOUNCE_SECS`), so routine restarts stay silent
 while a genuine reconnection still notifies.
+
+**Sleep/wake (`ipn-daemon/src/power.rs`).** The debounce above cannot help a *suspended* device: it
+has been dark for hours, so every reconnection reads as genuine. And a suspended device reconnects
+far more often than one might expect — macOS schedules a **dark wake** (a brief maintenance wake,
+courtesy of Power Nap, and entirely independent of the "wake for network access" setting) every few
+minutes on battery. The daemon is frozen, not stopped, so each dark wake resumed it, re-established
+the mesh for a couple of seconds, and made every *other* device in the pool announce "came online".
+
+So the daemon follows the machine's power state: it calls `Engine::set_online(false)` before the
+system sleeps — peers get a clean QUIC close instead of an idle timeout — and `set_online(true)`
+again only on a **full wake**. Dark wakes are ignored, which is also honest: nothing can reach a
+laptop that is seconds from sleeping again. A device the user had already disconnected by hand is
+left alone, since `power.rs` only restores what it took down (`resume_on_wake`).
+
+The policy in `power.rs` is platform-free; the backend is not. macOS uses `IOPMConnection`
+(`power/macos.rs`), because the documented `IORegisterForSystemPower` reports a dark wake and a real
+wake identically — `IOPMConnection` instead hands the callback the system *capability* bits, and a
+wake without the graphics bit is a dark wake. Windows' Modern Standby (S0) has the same problem and
+would hook `PowerRegisterSuspendResumeNotification`; Linux would take a logind sleep inhibitor.
+Neither is implemented. `NULLGATE_DISABLE_POWER_EVENTS=1` turns the whole thing off.
 
 ## Components (crates)
 - `ipn-core` — the engine: iroh node, signed roster, admission + emoji verification, presence,

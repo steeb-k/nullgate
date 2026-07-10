@@ -20,6 +20,7 @@ use ipn_ipc::{Frame, IpcEvent, IpcRequest, IpcResponse, Message};
 use tokio::io::AsyncWriteExt;
 
 mod logging;
+mod power;
 #[cfg(windows)]
 mod service;
 mod watchdog;
@@ -178,6 +179,10 @@ where
     // Guard against iroh's unbounded mapped-address cache (iroh#4293): restart the
     // process before its resident memory runs away into the OOM abort we captured.
     watchdog::spawn(data_dir.clone());
+
+    // Leave the network while the machine sleeps, so a suspended laptop stops
+    // announcing itself to the pool on every dark wake.
+    power::spawn(engine.clone());
 
     let listener = transport::bind(&socket)?;
     tracing::info!("listening on {}", socket.display());

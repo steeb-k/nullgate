@@ -173,6 +173,19 @@ added.
   user-visible state changed and `Changed` is only emitted then (plus a ~30s catch-all tick), and
   the daemon coalesces event bursts into one status push per 250ms quiet window — don't add
   unconditional `Changed` emits to hot paths.
+- **A sleeping macOS laptop is not an offline one.** macOS takes a **dark wake** every few minutes on
+  battery (Power Nap maintenance — *not* the "wake for network access"/`womp` setting, which is off
+  on battery by default). The daemon is frozen, not stopped, so each dark wake used to resurrect the
+  mesh for seconds and make every other device announce "came online" all night. `ipn-daemon/src/
+  power.rs` now leaves the network before sleep and rejoins only on a **full** wake. Two things to
+  know: (1) it must use `IOPMConnection` (`power/macos.rs`), **not** the documented
+  `IORegisterForSystemPower` — the latter reports dark wake and real wake identically
+  (`kIOMessageSystemHasPoweredOn` for both), which is precisely the distinction the fix needs; the
+  IOPMConnection symbols are exported from IOKit but headerless, so the FFI is transcribed from
+  Apple's open-source `IOPMLibPrivate.h` (only the low capability bits are used — they're
+  cross-checked against the public `IOPM.h`). (2) The sleep callback **must finish the disconnect
+  before it acknowledges** the event, or powerd freezes the machine mid-teardown. The `notify.rs`
+  online-debounce cannot substitute for any of this: a laptop asleep for hours clears any debounce.
 - **GTK on Windows** comes from gvsbuild at `C:\gtk`; `pkg-config` must resolve `gtk4` and
   `libadwaita-1`. On Linux, install the `-dev` packages.
 - **GTK on macOS** comes from **conda-forge**, not Homebrew (`scripts/setup-conda-macos.sh` builds

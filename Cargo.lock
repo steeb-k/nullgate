@@ -3106,6 +3106,7 @@ version = "0.3.2"
 dependencies = [
  "anyhow",
  "clap",
+ "core-foundation-sys",
  "directories",
  "ipn-core",
  "ipn-ipc",

@@ -4,6 +4,15 @@ All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepa
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+### Fixed
+- **macOS: a sleeping laptop kept announcing itself to the pool.** Every few minutes on battery,
+  macOS takes a *dark wake* — a brief maintenance wake scheduled by Power Nap, unrelated to the
+  "wake for network access" setting. The daemon kept running across suspend, so each dark wake
+  re-established the mesh for a few seconds and every other device announced "<host> came online",
+  all night long. The daemon now watches system power state: it leaves the network before the
+  machine sleeps (peers see a clean disconnect instead of an idle timeout) and rejoins only on a
+  full wake, ignoring dark wakes. A device the user had manually disconnected stays disconnected.
+  Set `NULLGATE_DISABLE_POWER_EVENTS=1` to restore the old behavior.
 
 ## [0.3.2] - 2026-07-09
 ### Added

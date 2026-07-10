@@ -38,6 +38,8 @@ devices find and authenticate each other directly (built on [iroh](https://www.i
   visible to everyone on the network.
 - **Per-device privacy switches.** On your own device you can **disable remote access** (you can
   still reach others, but no one can reach you) or **hide from the member list**.
+- **Sleeps when your laptop does.** A device that goes to sleep leaves the network on the way down
+  and rejoins when you wake it, so it won't keep announcing itself while it's shut in your bag.
 - **You stay in control.** Remove a device, freeze the network so no one new can join, or
   rotate its secret to reset access entirely. Removed devices drop off automatically.
 - **Stays up to date.** A small background updater keeps every device on the latest release.
@@ -101,6 +103,13 @@ or restart) under `%ProgramData%\Nullgate\logs` on Windows, `/var/log/nullgate` 
 `/Library/Logs/Nullgate` on macOS — handy if you ever need to report a problem. A device that comes
 back within a couple of minutes of one of these quick restarts won't spam everyone with a "came
 online" notification.
+
+When you put a Mac to sleep it leaves the network first, and rejoins when you wake it back up. This
+matters more than it sounds: macOS quietly wakes itself every few minutes to run background
+maintenance, even on battery and even with "wake for network access" turned off. Without this, each
+of those invisible wakes would look to everyone else like your laptop rejoining the network — a
+notification every few minutes, all night. (Windows and Linux don't do this yet; a sleeping device
+there still goes quiet, just via a connection timeout rather than a clean goodbye.)
 
 ### Headless / CLI
 No GUI? Drive the same daemon with `nullgate-cli` — GTK isn't
