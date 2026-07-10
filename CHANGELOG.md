@@ -4,6 +4,8 @@ All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepa
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+
+## [0.3.2] - 2026-07-09
 ### Added
 - **Custom relay servers.** A device can use its own self-hosted iroh relay(s) instead of the
   public n0 ones, with an optional per-relay access token (sent as `Authorization: Bearer` on the
