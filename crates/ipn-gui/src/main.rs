@@ -1760,29 +1760,26 @@ fn set_relays(net: &Net, settings: RelaySettings) {
 fn render_relays(b: &gtk::Box, s: &RelaySettings, net: &Net, window: &adw::ApplicationWindow) {
     clear_box(b);
 
-    let list = adw::PreferencesGroup::builder()
-        .title("Custom relays")
-        .description(
-            "Relays carry traffic between devices that can't connect directly. \
-             Every device in the network should use the same relay settings — \
-             a relay that requires a token rejects devices that don't have it.",
-        )
-        .build();
-    let add = icon_button("list-add-symbolic", "Add a relay server");
+    let list = adw::PreferencesGroup::new();
     {
-        let net2 = net.clone();
-        let window2 = window.clone();
-        let cur = s.clone();
-        add.connect_clicked(move |_| add_relay_dialog(&window2, &net2, &cur));
-    }
-    list.set_header_suffix(Some(&add));
-
-    if s.servers.is_empty() {
         let row = adw::ActionRow::builder()
-            .title("No custom relays")
-            .subtitle("Using the public iroh relays")
+            .title("Add relay server")
+            .activatable(true)
             .build();
-        row.add_css_class("property");
+        let add = icon_button("list-add-symbolic", "Add a relay server");
+        {
+            let net2 = net.clone();
+            let window2 = window.clone();
+            let cur = s.clone();
+            add.connect_clicked(move |_| add_relay_dialog(&window2, &net2, &cur));
+        }
+        row.add_suffix(&add);
+        {
+            let net2 = net.clone();
+            let window2 = window.clone();
+            let cur = s.clone();
+            row.connect_activated(move |_| add_relay_dialog(&window2, &net2, &cur));
+        }
         list.add(&row);
     }
     for server in &s.servers {
