@@ -4,6 +4,12 @@ All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepa
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+
+## [0.3.2] - 2026-07-09
+> The macOS tarball was built after the `v0.3.2` tag and **includes the sleep/wake fix below**; the
+> Windows, Linux, and Android 0.3.2 artifacts predate it and do not. macOS installs (all still on
+> 0.3.1, since 0.3.2 originally shipped without a macOS asset) auto-update to it. The other
+> platforms are unaffected by the fix — it is macOS-only — and pick up the shared commit in 0.3.3.
 ### Fixed
 - **macOS: a sleeping laptop kept announcing itself to the pool.** Every few minutes on battery,
   macOS takes a *dark wake* — a brief maintenance wake scheduled by Power Nap, unrelated to the
@@ -14,7 +20,6 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   full wake, ignoring dark wakes. A device the user had manually disconnected stays disconnected.
   Set `NULLGATE_DISABLE_POWER_EVENTS=1` to restore the old behavior.
 
-## [0.3.2] - 2026-07-09
 ### Added
 - **Custom relay servers.** A device can use its own self-hosted iroh relay(s) instead of the
   public n0 ones, with an optional per-relay access token (sent as `Authorization: Bearer` on the
