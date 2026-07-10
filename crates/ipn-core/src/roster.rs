@@ -240,7 +240,10 @@ pub struct Member {
 }
 
 /// The folded current state of the roster.
-#[derive(Clone, Debug, Default)]
+// PartialEq: the maintenance tick diffs the rebuilt roster against the current
+// one to decide whether anything member-visible changed (and thus whether a
+// `Changed` event is worth emitting).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Roster {
     members: BTreeMap<Id, Member>,
     frozen: bool,
@@ -601,6 +604,27 @@ mod tests {
         assert!(r.is_member(&id(&devo)));
         assert_eq!(r.role(&id(&devo)), Role::Controller);
         assert_eq!(r.member(&id(&devo)).unwrap().virtual_ip, Ipv4Addr::new(10, 99, 0, 2));
+    }
+
+    /// The tick's "did anything change" event gate diffs the rebuilt roster
+    /// against the current one, so build equality must hold for identical
+    /// entries and break for any authorized mutation.
+    #[test]
+    fn build_equality_tracks_content() {
+        let (cfg, om, _devo, entries) = setup();
+        assert_eq!(Roster::build(&cfg, &entries), Roster::build(&cfg, &entries));
+
+        let mut renamed = entries.clone();
+        renamed.push(sign(NET, &om, Op::SetName { name: "attic".into(), ts: 2 }));
+        assert_ne!(Roster::build(&cfg, &entries), Roster::build(&cfg, &renamed));
+
+        let mut frozen = entries.clone();
+        frozen.push(sign(NET, &om, Op::Freeze { frozen: true, ts: 2 }));
+        assert_ne!(Roster::build(&cfg, &entries), Roster::build(&cfg, &frozen));
+
+        let mut added = entries.clone();
+        added.push(add(NET, &om, &key(3), 3, Role::Peer, nonce(7), 2));
+        assert_ne!(Roster::build(&cfg, &entries), Roster::build(&cfg, &added));
     }
 
     #[test]

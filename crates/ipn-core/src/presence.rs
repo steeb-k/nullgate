@@ -245,8 +245,18 @@ pub struct PresenceTracker {
     peers: HashMap<Id, PeerStatus>,
 }
 
+/// A last-seen jump big enough to be user-visible ("was away, resurfaced"):
+/// beyond it a routine heartbeat still counts as a change worth re-rendering.
+const LAST_SEEN_JUMP_MS: u64 = 10 * 60 * 1000;
+
 impl PresenceTracker {
     /// Record a verified heartbeat (monotonic: older timestamps are ignored).
+    ///
+    /// Returns whether anything **the UI displays** changed — a routine
+    /// heartbeat that only bumps `last_seen` by a few seconds returns `false`,
+    /// so the engine doesn't emit a `Changed` event for every one (with N
+    /// members that was N events per 3s, the churn behind the GUI's constant
+    /// re-render).
     pub fn record_heartbeat(
         &mut self,
         node_id: Id,
@@ -255,18 +265,26 @@ impl PresenceTracker {
         access_disabled: bool,
         hidden: bool,
         ts: u64,
-    ) {
+    ) -> bool {
         let e = self.peers.entry(node_id).or_default();
-        if ts >= e.last_seen {
-            e.last_seen = ts;
-            e.hostname = Some(hostname);
-            e.access_disabled = access_disabled;
-            e.hidden = hidden;
-            // The peer advertises its own public IP; prefer it when present.
-            if public_ip.is_some() {
-                e.public_ip = public_ip;
-            }
+        if ts < e.last_seen {
+            return false;
         }
+        let mut changed = e.last_seen == 0 // first sighting
+            || ts.saturating_sub(e.last_seen) > LAST_SEEN_JUMP_MS
+            || e.hostname.as_deref() != Some(hostname.as_str())
+            || e.access_disabled != access_disabled
+            || e.hidden != hidden;
+        e.last_seen = ts;
+        e.hostname = Some(hostname);
+        e.access_disabled = access_disabled;
+        e.hidden = hidden;
+        // The peer advertises its own public IP; prefer it when present.
+        if public_ip.is_some() && e.public_ip != public_ip {
+            e.public_ip = public_ip;
+            changed = true;
+        }
+        changed
     }
 
     /// Seed a peer's last-seen time (from the persisted store at startup) so the
@@ -279,6 +297,11 @@ impl PresenceTracker {
     }
 
     /// Record what we observe about a live connection to a peer.
+    ///
+    /// Returns whether anything **the UI displays** changed. `observed_addr`
+    /// deliberately doesn't count: its UDP port flaps as iroh re-probes paths
+    /// (constantly on Windows) and it's only shown in the click-time member
+    /// detail, so it's stored but never worth a re-render on its own.
     pub fn record_connection(
         &mut self,
         node_id: Id,
@@ -287,19 +310,23 @@ impl PresenceTracker {
         local_ip: Option<String>,
         public_ip: Option<String>,
         online: bool,
-    ) {
+    ) -> bool {
         let e = self.peers.entry(node_id).or_default();
+        let mut changed = e.online != online || e.direct != direct;
         e.online = online;
         e.direct = direct;
         if observed_addr.is_some() {
             e.observed_addr = observed_addr;
         }
-        if local_ip.is_some() {
+        if local_ip.is_some() && e.local_ip != local_ip {
             e.local_ip = local_ip;
+            changed = true;
         }
-        if public_ip.is_some() {
+        if public_ip.is_some() && e.public_ip != public_ip {
             e.public_ip = public_ip;
+            changed = true;
         }
+        changed
     }
 
     /// Set the roster-assigned virtual IP for a peer.
@@ -308,8 +335,12 @@ impl PresenceTracker {
     }
 
     /// Set a peer's resolved location (from the originator's propagated map).
-    pub fn set_location(&mut self, node_id: Id, location: Option<String>) {
-        self.peers.entry(node_id).or_default().location = location;
+    /// Returns whether the displayed value actually changed.
+    pub fn set_location(&mut self, node_id: Id, location: Option<String>) -> bool {
+        let e = self.peers.entry(node_id).or_default();
+        let changed = e.location != location;
+        e.location = location;
+        changed
     }
 
     pub fn get(&self, node_id: &Id) -> Option<&PeerStatus> {
@@ -373,5 +404,59 @@ mod tests {
         assert_eq!(t.get(&id).unwrap().hostname.as_deref(), Some("new"));
         assert_eq!(t.get(&id).unwrap().public_ip.as_deref(), Some("1.2.3.4"));
         assert_eq!(t.get(&id).unwrap().last_seen, 200);
+    }
+
+    /// The change-reporting contract the engine's event gating relies on: a
+    /// routine heartbeat must NOT count as a change, everything user-visible must.
+    #[test]
+    fn heartbeat_reports_only_user_visible_changes() {
+        let mut t = PresenceTracker::default();
+        let id = key(6).verifying_key().to_bytes();
+        // First sighting is a change.
+        assert!(t.record_heartbeat(id, "pc".into(), None, false, false, 1000));
+        // Routine 3s heartbeat with identical fields: no change.
+        assert!(!t.record_heartbeat(id, "pc".into(), None, false, false, 4000));
+        // Stale timestamp: ignored, no change.
+        assert!(!t.record_heartbeat(id, "renamed".into(), None, false, false, 2000));
+        // Hostname / flags / public IP changes all count.
+        assert!(t.record_heartbeat(id, "renamed".into(), None, false, false, 7000));
+        assert!(t.record_heartbeat(id, "renamed".into(), None, true, false, 10_000));
+        assert!(t.record_heartbeat(id, "renamed".into(), Some("1.2.3.4".into()), true, false, 13_000));
+        assert!(!t.record_heartbeat(id, "renamed".into(), Some("1.2.3.4".into()), true, false, 16_000));
+        // A long silence resurfacing counts even with identical fields.
+        assert!(t.record_heartbeat(
+            id,
+            "renamed".into(),
+            Some("1.2.3.4".into()),
+            true,
+            false,
+            16_000 + LAST_SEEN_JUMP_MS + 1_000,
+        ));
+    }
+
+    #[test]
+    fn connection_reports_only_user_visible_changes() {
+        let mut t = PresenceTracker::default();
+        let id = key(7).verifying_key().to_bytes();
+        // Coming online is a change.
+        assert!(t.record_connection(id, Some("1.2.3.4:1000".into()), Some(false), None, None, true));
+        // observed_addr port flap alone: stored, but not a change.
+        assert!(!t.record_connection(id, Some("1.2.3.4:2000".into()), Some(false), None, None, true));
+        assert_eq!(t.get(&id).unwrap().observed_addr.as_deref(), Some("1.2.3.4:2000"));
+        // direct flip, IP discovery, and offline flip all count.
+        assert!(t.record_connection(id, None, Some(true), None, None, true));
+        assert!(t.record_connection(id, None, Some(true), Some("192.168.1.9".into()), None, true));
+        assert!(t.record_connection(id, None, Some(true), Some("192.168.1.9".into()), None, false));
+        // Identical repeat: no change.
+        assert!(!t.record_connection(id, None, Some(true), Some("192.168.1.9".into()), None, false));
+    }
+
+    #[test]
+    fn location_reports_change() {
+        let mut t = PresenceTracker::default();
+        let id = key(8).verifying_key().to_bytes();
+        assert!(t.set_location(id, Some("Osaka, Japan".into())));
+        assert!(!t.set_location(id, Some("Osaka, Japan".into())));
+        assert!(t.set_location(id, None));
     }
 }

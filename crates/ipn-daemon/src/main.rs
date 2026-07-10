@@ -220,13 +220,7 @@ async fn handle_conn(engine: Engine, stream: transport::Stream) -> Result<()> {
         if matches!(req, IpcRequest::Subscribe) {
             let st = engine.status().await.ok();
             send_event(&writer, IpcEvent::Status(st)).await?;
-            let mut ev = engine.subscribe();
-            while let Ok(e) = ev.recv().await {
-                let ipc = map_event(&engine, e).await;
-                if send_event(&writer, ipc).await.is_err() {
-                    break;
-                }
-            }
+            subscribe_loop(&engine, &writer).await;
             return Ok(());
         }
 
@@ -245,6 +239,79 @@ async fn handle_conn(engine: Engine, stream: transport::Stream) -> Result<()> {
     Ok(())
 }
 
+/// Forward engine events to one subscriber, **coalescing status pushes**: a
+/// burst of `Changed` events (roster fold + several connection observations can
+/// land together) becomes a single `Status` push once the stream has been quiet
+/// for [`STATUS_QUIET_MS`]. Join events are time-critical UX (the user is
+/// staring at an emoji code) and are forwarded immediately, without flushing or
+/// discarding a pending status. A `Lagged` receiver just means we missed some
+/// `Changed`s — mark a status pending rather than killing the subscription
+/// (which previously left the client event-less until it reconnected).
+async fn subscribe_loop(
+    engine: &Engine,
+    writer: &Arc<tokio::sync::Mutex<tokio::io::WriteHalf<transport::Stream>>>,
+) {
+    use ipn_core::EngineEvent as E;
+    use tokio::sync::broadcast::error::RecvError;
+
+    const STATUS_QUIET_MS: u64 = 250;
+
+    let mut ev = engine.subscribe();
+    let mut pending_status = false;
+    loop {
+        let next = if pending_status {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(STATUS_QUIET_MS),
+                ev.recv(),
+            )
+            .await
+            {
+                // Quiet window elapsed — flush one coalesced status.
+                Err(_) => {
+                    pending_status = false;
+                    tracing::debug!("pushing coalesced status");
+                    let st = engine.status().await.ok();
+                    if send_event(writer, IpcEvent::Status(st)).await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                Ok(r) => r,
+            }
+        } else {
+            ev.recv().await
+        };
+        match next {
+            Ok(E::JoinSas { sas }) => {
+                if send_event(writer, IpcEvent::JoinSas { sas }).await.is_err() {
+                    return;
+                }
+            }
+            Ok(E::JoinRequest {
+                node_id,
+                hostname,
+                sas,
+            }) => {
+                let ipc = IpcEvent::JoinRequest {
+                    node_id,
+                    hostname,
+                    sas,
+                };
+                if send_event(writer, ipc).await.is_err() {
+                    return;
+                }
+            }
+            // Changed, and the Android-only TUN coordination events (never
+            // emitted by the desktop daemon): all just mean "status is stale".
+            Ok(E::Changed | E::TunSetupRequired { .. } | E::TunTeardownRequired) => {
+                pending_status = true;
+            }
+            Err(RecvError::Lagged(_)) => pending_status = true,
+            Err(RecvError::Closed) => return,
+        }
+    }
+}
+
 async fn send_event(
     writer: &Arc<tokio::sync::Mutex<tokio::io::WriteHalf<transport::Stream>>>,
     ev: IpcEvent,
@@ -259,29 +326,6 @@ async fn send_event(
     )
     .await?;
     Ok(())
-}
-
-async fn map_event(engine: &Engine, e: ipn_core::EngineEvent) -> IpcEvent {
-    use ipn_core::EngineEvent as E;
-    match e {
-        E::Changed => IpcEvent::Status(engine.status().await.ok()),
-        E::JoinSas { sas } => IpcEvent::JoinSas { sas },
-        E::JoinRequest {
-            node_id,
-            hostname,
-            sas,
-        } => IpcEvent::JoinRequest {
-            node_id,
-            hostname,
-            sas,
-        },
-        // Android-only routing coordination (VpnService fd hand-off); never emitted
-        // by the desktop daemon, which opens its own TUN. Surface as a plain status
-        // refresh so the match stays exhaustive without a new IPC event.
-        E::TunSetupRequired { .. } | E::TunTeardownRequired => {
-            IpcEvent::Status(engine.status().await.ok())
-        }
-    }
 }
 
 async fn handle_request(engine: &Engine, req: IpcRequest) -> IpcResponse {

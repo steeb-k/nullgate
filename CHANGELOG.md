@@ -21,6 +21,27 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   live relay-map swap; `examples/relay_probe.rs` probes a real relay's HTTPS + QUIC endpoints and
   token enforcement.
 
+### Fixed
+- **Clicks in the app no longer get "eaten" — the GUI stops rebuilding itself constantly.** The
+  main page (and the open Administration/Diagnostics flyouts) used to be torn down and recreated
+  whenever anything in the status changed, and status updates arrived several times per second —
+  so a click often landed on a button that was destroyed mid-press and did nothing. Three layers
+  of fix, end to end:
+  - the engine only emits a change event when something **user-visible** changed (a routine
+    presence heartbeat used to emit one per member every 3 s, and an idle maintenance tick emitted
+    unconditionally; both are now gated, with a ~30 s catch-all so live-read fields like the home
+    relay can't go stale);
+  - the daemon coalesces bursts of change events into a single status push per subscriber after a
+    250 ms quiet window (join-approval events are never delayed), and a lagging subscriber no
+    longer silently stops receiving events;
+  - the GUI now builds its widget tree **once** and applies every status in place: member rows are
+    diffed by node id (title/subtitle/status dot updated on the live widgets, rows added/removed
+    only on membership change, reordering moves rows without destroying them), the Diagnostics
+    panel updates its rows in place, and the Administration flyout only rebuilds when the data *it*
+    shows changes — so Approve/Deny buttons no longer vanish under the cursor. Member rows also
+    look up fresh data at click time, so an open detail view can no longer show stale values from
+    the moment the row was built.
+
 ## [0.3.1] - 2026-07-06
 > The macOS tarball was rebuilt and re-uploaded on 2026-07-09 with the tray-icon fix below. The
 > version was deliberately not bumped, so existing macOS 0.3.1 installs will not auto-update to it.

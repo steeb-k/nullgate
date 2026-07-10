@@ -390,6 +390,9 @@ struct Inner {
     relay_fallback: AtomicBool,
     /// Last time (ms) we flushed the persisted last-seen map (throttle).
     last_seen_saved: AtomicU64,
+    /// Monotonic tick counter, so every 10th tick (~30s) still emits a
+    /// `Changed` even when nothing marked the tick dirty (see `tick`).
+    tick_seq: AtomicU64,
     /// Geolocation DB, loaded only on the originator (it resolves + propagates).
     /// Desktop-only — the geo stack isn't shipped on Android.
     #[cfg(not(target_os = "android"))]
@@ -464,6 +467,7 @@ impl Engine {
             was_member: AtomicBool::new(false),
             protocol_version: AtomicU32::new(admission::PROTOCOL_VERSION),
             last_seen_saved: AtomicU64::new(0),
+            tick_seq: AtomicU64::new(0),
             relay_settings: StdRwLock::new(relay_settings),
             relay_fallback: AtomicBool::new(false),
             #[cfg(not(target_os = "android"))]
@@ -1526,7 +1530,7 @@ async fn activate(inner: &Arc<Inner>, cfg: StoredConfig) -> Result<()> {
                     GossipMsg::Presence(p) => {
                         if p.verify(&net_id) && p.node_id != ti.my_id {
                             let mut st = ti.state.lock().await;
-                            st.presence.record_heartbeat(
+                            let changed = st.presence.record_heartbeat(
                                 p.node_id,
                                 p.hostname,
                                 p.public_ip,
@@ -1535,18 +1539,26 @@ async fn activate(inner: &Arc<Inner>, cfg: StoredConfig) -> Result<()> {
                                 p.ts,
                             );
                             drop(st);
-                            let _ = ti.events.send(EngineEvent::Changed);
+                            // Routine heartbeats only bump last_seen; emitting for
+                            // each was N events per 3s — the churn that kept the
+                            // GUI re-rendering. Only user-visible changes push.
+                            if changed {
+                                let _ = ti.events.send(EngineEvent::Changed);
+                            }
                         }
                     }
                     GossipMsg::Locations(loc) => {
                         // Trust only the originator's signed location assertions.
                         if loc.verify(&net_id, &originator_id) {
                             let mut st = ti.state.lock().await;
+                            let mut changed = false;
                             for (id, location) in loc.entries {
-                                st.presence.set_location(id, Some(location));
+                                changed |= st.presence.set_location(id, Some(location));
                             }
                             drop(st);
-                            let _ = ti.events.send(EngineEvent::Changed);
+                            if changed {
+                                let _ = ti.events.send(EngineEvent::Changed);
+                            }
                         }
                     }
                 }
@@ -1635,6 +1647,13 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
     // Rebuild roster from the document, and the forwarding table from it.
     let roster = membership::build_roster(&cfg.roster_cfg(), &doc, inner.node.blobs.blobs()).await?;
 
+    // Whether this tick changed anything the UI displays. Only then is a
+    // `Changed` event emitted at the end (plus a slow unconditional heartbeat
+    // for the few live-read status fields nothing marks dirty, e.g. home relay)
+    // — an idle tick used to emit unconditionally, which with the per-heartbeat
+    // events kept the GUI re-rendering constantly.
+    let mut dirty = false;
+
     // Self-eviction: once we've appeared in the roster, dropping out of it means
     // we were removed (single remove, network delete, or secret rotation) — leave
     // cleanly so we hold no connections and stop showing the (now dead) network.
@@ -1668,7 +1687,7 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
         tracing::debug!("closing ghost connection to non-member {}", short(&id));
         c.close(0u32.into(), b"no longer a member");
         inner.conns.write().unwrap().remove(&id);
-        inner
+        dirty |= inner
             .state
             .lock()
             .await
@@ -1693,6 +1712,9 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
                 to_dial.push(*id);
             }
         }
+        // Membership / roles / name / frozen / invites — everything status()
+        // reads from the roster.
+        dirty |= st.roster != roster;
         st.roster = roster.clone();
     }
 
@@ -1853,7 +1875,7 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
                 // Apply to our own view (gossip doesn't loop back to us).
                 let mut st = inner.state.lock().await;
                 for (id, l) in entries {
-                    st.presence.set_location(id, Some(l));
+                    dirty |= st.presence.set_location(id, Some(l));
                 }
             }
         }
@@ -1888,7 +1910,8 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
     for peer in live {
         let ci = conn_info(inner, &peer).await;
         let mut st = inner.state.lock().await;
-        st.presence
+        dirty |= st
+            .presence
             .record_connection(peer, ci.observed, ci.direct, ci.local_ip, ci.public_ip, true);
     }
 
@@ -1907,7 +1930,14 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
         save_last_seen(&inner.data_dir, &map);
     }
 
-    let _ = inner.events.send(EngineEvent::Changed);
+    // Emit on real change, plus a slow (~30s) unconditional heartbeat: status()
+    // reads a few values live that no dirty source covers (home relay from
+    // node.addr(), this device's own local/public IPs), so a pure dirty flag
+    // would let those go stale in the UI forever.
+    let seq = inner.tick_seq.fetch_add(1, Ordering::Relaxed);
+    if dirty || seq % 10 == 0 {
+        let _ = inner.events.send(EngineEvent::Changed);
+    }
     Ok(())
 }
 

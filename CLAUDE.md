@@ -157,17 +157,22 @@ added.
   (this stranded machines on the pre-0.2.0 `--minimized` job for months). The GUI is a normal single-instance window (closing it quits only the GUI). Verify on Windows:
   close the GUI → tray icon stays; the tray's *Open Nullgate* / *Restart Nullgate daemon* / *Quit
   Nullgate* all work; a notification click opens the window.
-- **Keyboard nav must survive a page rebuild (recurring Windows regression).** The GUI rebuilds
-  the whole main page on state change; doing so drops keyboard focus, and GTK then defaults it to
-  the first row ("Administration"). Symptom: tabbing through the member list, the selection jumps
-  back to "Administration" every few seconds. This regressed ~4 times by whack-a-mole (each time a
-  volatile field — online last-seen, `observed_addr` — was churning `render_signature` and forcing
-  a rebuild every tick). The durable fix in `render_all` **saves the focused `ActionRow` and
-  restores it after the rebuild** (`focused_row_title`/`focus_row_by_title` in `ipn-gui/src/
-  main.rs`) so focus survives *any* rebuild — keep it. Two rules when touching the GUI: (1) never
-  put a per-tick-volatile field in `render_signature`; (2) **check this on every build** — run the
-  Windows GUI, tab into the member list, and confirm the selection does NOT snap back to
-  "Administration" while a peer is connected. If it does, something re-broke focus preservation.
+- **The GUI updates widgets in place — never reintroduce full-page rebuilds.** The main page is a
+  build-once tree (`MainPage`/`build_main_page` in `ipn-gui/src/main.rs`); `apply_status` diffs
+  member rows by node id, restyles dots/subtitles on live widgets, and re-sorts a `gtk::ListBox`
+  (which moves rows without destroying them). History: the page used to be torn down + rebuilt on
+  any change while status pushed several times a second — clicks landed on widgets destroyed
+  mid-press ("clicking doesn't work") and keyboard focus snapped back to "Administration" (regressed
+  ~4 times). Rules when touching the GUI: (1) update in place; if a panel must rebuild (only the
+  admin flyout does), gate it on a signature of ONLY what it displays (`admin_signature`) and never
+  put per-tick-volatile fields (last-seen, `observed_addr`, `direct`, IPs) in that signature;
+  (2) keep the focus save/restore around `apply_status` (`focused_row_title`/`focus_row_by_title`);
+  (3) **check on every build**: run the Windows GUI with a peer connected, rapid-click member rows
+  (every click must land) and tab the member list (selection must NOT snap back to
+  "Administration"). Engine/daemon side of the same story: presence mutators report whether
+  user-visible state changed and `Changed` is only emitted then (plus a ~30s catch-all tick), and
+  the daemon coalesces event bursts into one status push per 250ms quiet window — don't add
+  unconditional `Changed` emits to hot paths.
 - **GTK on Windows** comes from gvsbuild at `C:\gtk`; `pkg-config` must resolve `gtk4` and
   `libadwaita-1`. On Linux, install the `-dev` packages.
 - **GTK on macOS** comes from **conda-forge**, not Homebrew (`scripts/setup-conda-macos.sh` builds

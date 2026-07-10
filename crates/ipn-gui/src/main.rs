@@ -943,11 +943,9 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
 
     let state: Rc<RefCell<Option<NetworkStatus>>> = Default::default();
     let pending: Rc<RefCell<Vec<PendingJoin>>> = Default::default();
-    // Signature of the last-rendered state. We only rebuild the page when this
-    // changes, so the frequent (every-tick) status pushes that don't change
-    // anything visible don't tear down + recreate widgets — which would steal
-    // keyboard focus / clicks. `""` forces the next render.
-    let last_sig: Rc<RefCell<String>> = Default::default();
+    // The persistent main-page widget tree; every status is applied to it in
+    // place (no teardown), so status pushes can't eat clicks or steal focus.
+    let page = build_main_page(&ui, &net, &window);
 
     {
         let ui = ui.clone();
@@ -956,7 +954,7 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
         let toast_overlay = toast_overlay.clone();
         let state = state.clone();
         let pending = pending.clone();
-        let last_sig = last_sig.clone();
+        let page = page.clone();
         let add_btn = add_btn.clone();
         glib::spawn_future_local(async move {
             while let Ok(msg) = rx.recv().await {
@@ -969,25 +967,26 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
                             .borrow_mut()
                             .retain(|p| !s.members.iter().any(|m| m.node_id == p.node_id));
                         *state.borrow_mut() = Some(s.clone());
-                        render_if_changed(&ui, &s, &net, &window, &pending, &last_sig);
+                        apply_status(&ui, &page, &s, &net, &window, &pending, &state);
                     }
                     UiMsg::Status(None) => {
                         add_btn.set_visible(true); // no network — offer create/join
                         *state.borrow_mut() = None;
-                        last_sig.borrow_mut().clear();
+                        page.reset();
                         set_service_banner(&ui, ServiceBanner::Hidden);
                         ui.join_banner.set_revealed(false);
                         render_placeholder(&ui, &empty_page(&net, &window));
                     }
                     UiMsg::Refresh => {
-                        if let Some(s) = state.borrow().as_ref() {
-                            render_if_changed(&ui, s, &net, &window, &pending, &last_sig);
+                        let st = state.borrow();
+                        if let Some(s) = st.as_ref() {
+                            apply_status(&ui, &page, s, &net, &window, &pending, &state);
                         }
                     }
                     UiMsg::DaemonDown => {
                         add_btn.set_visible(false);
                         *state.borrow_mut() = None;
-                        last_sig.borrow_mut().clear();
+                        page.reset();
                         set_service_banner(&ui, ServiceBanner::DaemonDown);
                         ui.join_banner.set_revealed(false);
                         render_placeholder(&ui, &daemon_down_page());
@@ -995,7 +994,7 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
                     UiMsg::VersionMismatch { daemon, gui } => {
                         add_btn.set_visible(false);
                         *state.borrow_mut() = None;
-                        last_sig.borrow_mut().clear();
+                        page.reset();
                         set_service_banner(&ui, ServiceBanner::Hidden);
                         ui.join_banner.set_revealed(false);
                         render_placeholder(&ui, &version_mismatch_page(daemon, gui));
@@ -1022,8 +1021,9 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
                         }
                         // The "wants to join" desktop notification is raised by the
                         // tray agent; here we just surface it in the open window.
-                        if let Some(s) = state.borrow().as_ref() {
-                            render_if_changed(&ui, s, &net, &window, &pending, &last_sig);
+                        let st = state.borrow();
+                        if let Some(s) = st.as_ref() {
+                            apply_status(&ui, &page, s, &net, &window, &pending, &state);
                         }
                     }
                     UiMsg::Relays(settings) => {
@@ -1354,59 +1354,74 @@ fn empty_page(net: &Net, window: &adw::ApplicationWindow) -> adw::StatusPage {
         .build()
 }
 
-/// A compact string capturing everything the UI displays. Used to skip rebuilds
-/// when a status push doesn't change anything visible (avoids stealing focus).
-fn render_signature(s: &NetworkStatus, pending: &[PendingJoin]) -> String {
+/// Title for a member's main-list row.
+fn member_row_title(m: &MemberView) -> String {
+    let mut title = m
+        .label
+        .clone()
+        .or_else(|| m.hostname.clone())
+        .unwrap_or_else(|| short_id(&m.node_id));
+    if m.is_self {
+        title.push_str(" (this device)");
+    }
+    title
+}
+
+/// Subtitle for a member's main-list row (host · ip · flags · path hint).
+fn member_row_subtitle(m: &MemberView) -> String {
+    let mut subtitle = String::new();
+    if m.label.is_some() {
+        if let Some(h) = &m.hostname {
+            subtitle.push_str(h);
+            subtitle.push_str(" · ");
+        }
+    }
+    subtitle.push_str(&m.virtual_ip.clone().unwrap_or_else(|| "(no IP)".into()));
+    // The access/hidden note sits next to the IP.
+    if m.hidden {
+        subtitle.push_str(" · Hidden");
+    } else if m.access_disabled {
+        subtitle.push_str(" · Access disabled");
+    }
+    // Online path hint only; "last seen" lives in the member detail flyout, and
+    // the dot color already conveys offline/long-offline at a glance.
+    if !m.is_self && m.online && !m.access_disabled {
+        match m.direct {
+            Some(true) => subtitle.push_str(" · direct"),
+            Some(false) => subtitle.push_str(" · relay"),
+            None => {}
+        }
+    }
+    subtitle
+}
+
+/// Display order for the member list (node_id → position): the engine's
+/// ranking (online → access-disabled → offline → hidden) with self pinned to
+/// the top — but only when it's a normal online device; if self has disabled
+/// access or hidden itself, it stays in its ranked spot.
+fn member_order(members: &[MemberView]) -> HashMap<String, u32> {
+    let mut ordered: Vec<&MemberView> = members.iter().collect();
+    ordered.sort_by_key(|m| !(m.is_self && !m.access_disabled && !m.hidden));
+    ordered
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (m.node_id.clone(), i as u32))
+        .collect()
+}
+
+/// Everything the admin flyout displays. The flyout keeps a rebuild-style
+/// renderer (its structure is role- and pending-dependent), so rebuilds are
+/// gated on this signature. NOTHING volatile may appear here — per-tick
+/// telemetry sneaking in is what used to recreate the Approve/Deny buttons
+/// under the user's cursor.
+fn admin_signature(s: &NetworkStatus, pending: &[PendingJoin]) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     let _ = write!(
         out,
-        "{}|{}|{}|{}|{}|{}|{}|{}|",
-        s.name,
-        s.online,
-        s.routing,
-        s.frozen,
-        s.is_originator,
-        s.self_role,
-        s.self_ip.as_deref().unwrap_or(""),
-        s.home_relay.as_deref().unwrap_or(""),
+        "{}|{}|{}|{}|{}#",
+        s.name, s.frozen, s.self_role, s.is_originator, s.peer_ticket_single_use,
     );
-    // Rare state flips (not per-tick volatile, so safe in the signature).
-    let _ = write!(out, "{}|", s.relay_fallback);
-    for m in &s.members {
-        // Volatile per-connection telemetry is deliberately kept OUT of the
-        // signature so it can't churn the page every tick (which is what steals
-        // keyboard focus — see `render_all`). Two offenders in particular:
-        //   * last-seen for ONLINE members ("Xs ago") changes every tick, so only
-        //     bucket it for OFFLINE members (where it's shown and drives the red
-        //     ">1 week" dot).
-        //   * `observed_addr` is an ip:port whose UDP port flaps as iroh re-probes
-        //     paths (frequently on Windows). It's diagnostic-only and shown in a
-        //     click-time member-detail snapshot, so leaving it out costs nothing.
-        // Focus preservation in `render_all` is the real safety net; this just
-        // avoids pointless rebuilds/flicker.
-        let last = if m.online { String::new() } else { fmt_last_seen(m.last_seen) };
-        let _ = write!(
-            out,
-            "[{}|{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}]",
-            m.node_id,
-            m.is_self,
-            m.label.as_deref().unwrap_or(""),
-            m.hostname.as_deref().unwrap_or(""),
-            m.virtual_ip.as_deref().unwrap_or(""),
-            m.local_ip.as_deref().unwrap_or(""),
-            m.direct,
-            m.online,
-            m.public_ip.as_deref().unwrap_or(""),
-            m.location.as_deref().unwrap_or(""),
-            last,
-            m.role,
-            m.access_disabled,
-            m.hidden,
-            m.note.as_deref().unwrap_or(""),
-        );
-    }
-    out.push('#');
     for p in pending {
         out.push_str(&p.node_id);
         out.push(',');
@@ -1414,125 +1429,61 @@ fn render_signature(s: &NetworkStatus, pending: &[PendingJoin]) -> String {
     out
 }
 
-/// Re-render only if the displayed data changed since the last render.
-fn render_if_changed(
-    ui: &Ui,
-    s: &NetworkStatus,
-    net: &Net,
-    window: &adw::ApplicationWindow,
-    pending: &Rc<RefCell<Vec<PendingJoin>>>,
-    last_sig: &Rc<RefCell<String>>,
-) {
-    let sig = render_signature(s, &pending.borrow());
-    if *last_sig.borrow() == sig {
-        return;
-    }
-    *last_sig.borrow_mut() = sig;
-    render_all(ui, s, net, window, pending);
+/// One member's persistent row in the main list, updated in place on status.
+struct MemberRowUi {
+    row: adw::ActionRow,
+    dot: gtk::Label,
 }
 
-/// The title of the `adw::ActionRow` that currently holds keyboard focus, if any.
-/// Used to put focus back after a rebuild. Returns `None` when focus is in a text
-/// field (we must never yank an active caret out of a name/notes entry) or isn't on
-/// a row at all.
-fn focused_row_title(window: &adw::ApplicationWindow) -> Option<String> {
-    let mut w = adw::prelude::GtkWindowExt::focus(window)?;
-    if w.is::<gtk::Text>() || w.is::<gtk::TextView>() {
-        return None;
-    }
-    loop {
-        if let Some(row) = w.downcast_ref::<adw::ActionRow>() {
-            return Some(row.title().to_string());
+/// The diagnostics flyout's persistent rows — updated in place because it's
+/// the panel most likely to be open while connection telemetry churns.
+struct DiagPanel {
+    home_relay: adw::ActionRow,
+    fallback: adw::ActionRow,
+    connections: adw::ActionRow,
+    routing: adw::ActionRow,
+}
+
+/// The main page's persistent widget tree. Built ONCE per process;
+/// [`apply_status`] mutates it in place. Widgets are never torn down on a
+/// status push — destroying widgets mid-click (button-press landing on a row
+/// that's gone before button-release) is why clicking often "didn't work".
+struct MainPage {
+    controls: adw::PreferencesGroup,
+    pm_group: adw::PreferencesGroup,
+    pm_controller_row: adw::ActionRow,
+    members_group: adw::PreferencesGroup,
+    members_list: gtk::ListBox,
+    /// Live member rows by node_id (the diff target).
+    rows: RefCell<HashMap<String, MemberRowUi>>,
+    /// node_id → display position, read by the list's sort func.
+    order: Rc<RefCell<HashMap<String, u32>>>,
+    diag: DiagPanel,
+    /// Gate for the admin flyout's rebuild (see [`admin_signature`]).
+    last_admin_sig: RefCell<String>,
+}
+
+impl MainPage {
+    /// Forget all member rows and gates. Called when the network goes away
+    /// (leave / daemon down): a later join may be a *different* network, and
+    /// stale rows must not survive into it.
+    fn reset(&self) {
+        for (_, r) in self.rows.borrow_mut().drain() {
+            self.members_list.remove(&r.row);
         }
-        w = w.parent()?;
+        self.order.borrow_mut().clear();
+        self.last_admin_sig.borrow_mut().clear();
     }
 }
 
-/// Re-grab keyboard focus on the first `adw::ActionRow` under `root` whose title
-/// matches `title`. No-op if none matches (e.g. the row's member left the network).
-fn focus_row_by_title(root: &impl IsA<gtk::Widget>, title: &str) -> bool {
-    let mut child = root.as_ref().first_child();
-    while let Some(w) = child {
-        if let Some(row) = w.downcast_ref::<adw::ActionRow>() {
-            if row.title() == title {
-                row.grab_focus();
-                return true;
-            }
-        }
-        if focus_row_by_title(&w, title) {
-            return true;
-        }
-        child = w.next_sibling();
-    }
-    false
-}
-
-/// Render the main page and the (persistent) flyout content boxes.
-///
-/// Keyboard-focus preservation is the *durable* fix for the long-recurring
-/// "selection jumps back to Administration" bug (Windows especially). A status push
-/// can arrive while the user is tabbing the member list; tearing the widget tree
-/// down and rebuilding it drops focus, and GTK then defaults focus to the first
-/// focusable row — "Administration". The `render_signature` gate below tries to
-/// avoid needless rebuilds, but it's a hand-maintained field list that keeps
-/// regressing whenever a volatile field (last-seen, observed address, …) sneaks
-/// into it. So we no longer *rely* on the signature for keyboard correctness:
-/// capture the focused row here and restore it after the rebuild, and the bug stays
-/// dead no matter what triggers a rebuild. **Keep this focus save/restore** — see
-/// the keyboard-nav note in CLAUDE.md's Gotchas.
-fn render_all(
-    ui: &Ui,
-    s: &NetworkStatus,
-    net: &Net,
-    window: &adw::ApplicationWindow,
-    pending: &Rc<RefCell<Vec<PendingJoin>>>,
-) {
-    let focused = focused_row_title(window);
-    render_main(ui, s, net, window, pending);
-    render_admin(&ui.admin_box, s, net, window, pending);
-    render_diag(&ui.diag_box, s);
-    if let Some(title) = focused {
-        focus_row_by_title(window, &title);
-    }
-}
-
-/// Build the main page: connection banners, the control group (Administration,
-/// Show join ticket, Diagnostics), and the Members list (this device included).
-fn render_main(
-    ui: &Ui,
-    s: &NetworkStatus,
-    net: &Net,
-    window: &adw::ApplicationWindow,
-    pending: &Rc<RefCell<Vec<PendingJoin>>>,
-) {
-    clear_box(&ui.main_box);
-
-    // Full-width banners are ToolbarView top bars (outside main_box), so we set them
-    // here rather than appending into the clamped content. Service state first:
-    set_service_banner(
-        ui,
-        if !s.online {
-            ServiceBanner::Offline
-        } else if !s.routing {
-            ServiceBanner::RoutingOff
-        } else {
-            ServiceBanner::Hidden
-        },
-    );
-    // Pending join requests → a Review banner (only approvers see it), replacing the
-    // old flashing chip. Review opens the admin flyout's emoji-SAS approval screen.
-    let n_pending = pending.borrow().len();
-    if s.self_role != "peer" && n_pending > 0 {
-        ui.join_banner.set_title(&join_banner_text(n_pending));
-        ui.join_banner.set_button_label(Some("Review"));
-        ui.join_banner.set_revealed(true);
-    } else {
-        ui.join_banner.set_revealed(false);
-    }
-
-    // Control group: Administration (top) → Show join ticket → Diagnostics →
-    // About. Pending join requests live inside Administration (opened via the
-    // Review banner above or by activating this row).
+/// Build the main page's static skeleton: the control rows (whose content
+/// never depends on status), the peer-management rows (visibility toggled per
+/// status), the members list (rows diffed per status), and the diagnostics
+/// panel rows. Everything here is created exactly once.
+fn build_main_page(ui: &Ui, net: &Net, window: &adw::ApplicationWindow) -> Rc<MainPage> {
+    // Control group: Administration (top) → Activity log → Diagnostics →
+    // Relay servers → About. Pending join requests live inside Administration
+    // (opened via the Review banner or by activating the row).
     let controls = adw::PreferencesGroup::new();
     {
         let row = adw::ActionRow::builder()
@@ -1590,147 +1541,277 @@ fn render_main(
         row.connect_activated(move |_| show_about(&window2));
         controls.add(&row);
     }
-    ui.main_box.append(&controls);
 
-    // Peer management — Controllers and the originator only; Peers don't see it.
-    if s.self_role != "peer" {
-        let pm = adw::PreferencesGroup::builder().title("Peer management").build();
-        {
-            let row = info_row(
-                "Show join ticket (Peer level)",
-                "Invite a device as a Peer",
-                "send-to-symbolic",
-                "Peers can use the network and view the activity log, but can't \
-                 approve devices or view join tickets.",
-            );
-            let net2 = net.clone();
-            row.connect_activated(move |_| {
-                net2.request(IpcRequest::GetTicket, |r| match r {
-                    Ok(IpcResponse::Ticket(t)) => Some(UiMsg::Ticket(t)),
-                    Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
-                    _ => None,
-                });
+    // Peer management — Controllers and the originator only; Peers don't see
+    // it. Built unconditionally, visibility toggled by `apply_status`.
+    let pm_group = adw::PreferencesGroup::builder().title("Peer management").build();
+    {
+        let row = info_row(
+            "Show join ticket (Peer level)",
+            "Invite a device as a Peer",
+            "send-to-symbolic",
+            "Peers can use the network and view the activity log, but can't \
+             approve devices or view join tickets.",
+        );
+        let net2 = net.clone();
+        row.connect_activated(move |_| {
+            net2.request(IpcRequest::GetTicket, |r| match r {
+                Ok(IpcResponse::Ticket(t)) => Some(UiMsg::Ticket(t)),
+                Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
+                _ => None,
             });
-            pm.add(&row);
-        }
-        if s.is_originator {
-            let row = info_row(
-                "Show join ticket (Controller level)",
-                "Invite a device as a Controller (single-use)",
-                "send-to-symbolic",
-                "Controllers can add and remove Peers, but can't view the originator \
-                 key, rotate the secret, or delete the network.",
-            );
-            let net2 = net.clone();
-            row.connect_activated(move |_| {
-                net2.request(IpcRequest::GetControllerTicket, |r| match r {
-                    Ok(IpcResponse::Ticket(t)) => Some(UiMsg::Ticket(t)),
-                    Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
-                    _ => None,
-                });
+        });
+        pm_group.add(&row);
+    }
+    let pm_controller_row = info_row(
+        "Show join ticket (Controller level)",
+        "Invite a device as a Controller (single-use)",
+        "send-to-symbolic",
+        "Controllers can add and remove Peers, but can't view the originator \
+         key, rotate the secret, or delete the network.",
+    );
+    {
+        let net2 = net.clone();
+        pm_controller_row.connect_activated(move |_| {
+            net2.request(IpcRequest::GetControllerTicket, |r| match r {
+                Ok(IpcResponse::Ticket(t)) => Some(UiMsg::Ticket(t)),
+                Ok(IpcResponse::Err(e)) => Some(UiMsg::Toast(e)),
+                _ => None,
             });
-            pm.add(&row);
-        }
-        ui.main_box.append(&pm);
+        });
+        pm_group.add(&pm_controller_row);
     }
 
-    // Members (this device first), each row opens a detail flyout.
-    let others = s.members.iter().filter(|m| !m.is_self).count();
-    let members = adw::PreferencesGroup::builder()
-        .title("Members")
-        .description(format!("{} device(s) total", others + 1))
-        .build();
-    // The engine already orders members (online → access-disabled → offline →
-    // hidden). Pin self to the top — but only when it's a normal online device;
-    // if self has disabled access or hidden itself, leave it in that ranked spot.
-    let mut ordered: Vec<&MemberView> = s.members.iter().collect();
-    ordered.sort_by_key(|m| !(m.is_self && !m.access_disabled && !m.hidden));
-    for m in ordered {
-        members.add(&member_row(ui, m, &s.self_role, s.is_originator, net, window));
+    // Members: our own sortable ListBox inside the PreferencesGroup (added as a
+    // non-row child it renders below the header, and `boxed-list` matches the
+    // group's own list styling). A plain group can't reorder rows in place —
+    // and re-sorting a ListBox MOVES rows without destroying them, which is
+    // exactly what lets an in-flight click survive an online/offline reorder.
+    let members_group = adw::PreferencesGroup::builder().title("Members").build();
+    let members_list = gtk::ListBox::new();
+    members_list.set_selection_mode(gtk::SelectionMode::None);
+    members_list.add_css_class("boxed-list");
+    let order: Rc<RefCell<HashMap<String, u32>>> = Default::default();
+    {
+        let order = order.clone();
+        members_list.set_sort_func(move |a, b| {
+            let o = order.borrow();
+            let ka = o.get(a.widget_name().as_str()).copied().unwrap_or(u32::MAX);
+            let kb = o.get(b.widget_name().as_str()).copied().unwrap_or(u32::MAX);
+            ka.cmp(&kb).into()
+        });
     }
-    ui.main_box.append(&members);
-}
+    members_group.add(&members_list);
 
-/// One member row for the main list (dot + name/host/ip/status + chevron).
-fn member_row(
-    ui: &Ui,
-    m: &MemberView,
-    self_role: &str,
-    is_originator: bool,
-    net: &Net,
-    window: &adw::ApplicationWindow,
-) -> adw::ActionRow {
-    let dot = status_dot(m.online, m.last_seen, m.access_disabled, m.hidden);
-
-    let mut title = m
-        .label
-        .clone()
-        .or_else(|| m.hostname.clone())
-        .unwrap_or_else(|| short_id(&m.node_id));
-    if m.is_self {
-        title.push_str(" (this device)");
-    }
-
-    let mut subtitle = String::new();
-    if m.label.is_some() {
-        if let Some(h) = &m.hostname {
-            subtitle.push_str(h);
-            subtitle.push_str(" · ");
-        }
-    }
-    subtitle.push_str(&m.virtual_ip.clone().unwrap_or_else(|| "(no IP)".into()));
-    // The access/hidden note sits next to the IP.
-    if m.hidden {
-        subtitle.push_str(" · Hidden");
-    } else if m.access_disabled {
-        subtitle.push_str(" · Access disabled");
-    }
-    // Online path hint only; "last seen" lives in the member detail flyout, and
-    // the dot color already conveys offline/long-offline at a glance.
-    if !m.is_self && m.online && !m.access_disabled {
-        match m.direct {
-            Some(true) => subtitle.push_str(" · direct"),
-            Some(false) => subtitle.push_str(" · relay"),
-            None => {}
-        }
-    }
-
-    let row = adw::ActionRow::builder()
-        .title(title)
-        .subtitle(subtitle)
-        .activatable(true)
-        .build();
-    row.add_prefix(&dot);
-    row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-    let ui2 = ui.clone();
-    let net2 = net.clone();
-    let window2 = window.clone();
-    let m2 = m.clone();
-    let self_role = self_role.to_string();
-    row.connect_activated(move |_| {
-        fill_member(&ui2, &m2, &self_role, is_originator, &net2, &window2)
-    });
-    row
-}
-
-fn render_diag(b: &gtk::Box, s: &NetworkStatus) {
-    clear_box(b);
-    let g = adw::PreferencesGroup::new();
-    g.add(&property_row("Home relay", &s.home_relay.clone().unwrap_or_else(|| "—".into())));
-    if s.relay_fallback {
-        g.add(&property_row(
+    // Diagnostics flyout rows (the panel's box lives on `Ui`).
+    let diag = {
+        let g = adw::PreferencesGroup::new();
+        let home_relay = property_row("Home relay", "—");
+        let fallback = property_row(
             "Relay fallback",
             "custom relays unreachable — temporarily using the public relays",
-        ));
+        );
+        fallback.set_visible(false);
+        let connections = property_row("Connections", "—");
+        let routing = property_row("Routing (TUN)", "—");
+        g.add(&home_relay);
+        g.add(&fallback);
+        g.add(&connections);
+        g.add(&routing);
+        ui.diag_box.append(&g);
+        DiagPanel { home_relay, fallback, connections, routing }
+    };
+
+    Rc::new(MainPage {
+        controls,
+        pm_group,
+        pm_controller_row,
+        members_group,
+        members_list,
+        rows: RefCell::new(HashMap::new()),
+        order,
+        diag,
+        last_admin_sig: RefCell::new(String::new()),
+    })
+}
+
+/// Apply a status snapshot to the persistent page, updating widgets **in
+/// place** — nothing on the main page is destroyed, so clicks and keyboard
+/// focus survive any status push. The admin flyout is the one remaining
+/// rebuild, gated on [`admin_signature`]; the focus save/restore wrapper stays
+/// as the safety net for it (and per the CLAUDE.md keyboard-nav gotcha).
+fn apply_status(
+    ui: &Ui,
+    page: &Rc<MainPage>,
+    s: &NetworkStatus,
+    net: &Net,
+    window: &adw::ApplicationWindow,
+    pending: &Rc<RefCell<Vec<PendingJoin>>>,
+    state: &Rc<RefCell<Option<NetworkStatus>>>,
+) {
+    let focused = focused_row_title(window);
+
+    // Re-attach the skeleton if a placeholder page (no network / daemon down /
+    // version mismatch) had replaced it; the Rc keeps the widgets alive while
+    // they're detached.
+    if page.controls.parent().is_none() {
+        clear_box(&ui.main_box);
+        ui.main_box.append(&page.controls);
+        ui.main_box.append(&page.pm_group);
+        ui.main_box.append(&page.members_group);
     }
+
+    // Full-width banners are ToolbarView top bars (outside main_box), updated
+    // in place. Service state first:
+    set_service_banner(
+        ui,
+        if !s.online {
+            ServiceBanner::Offline
+        } else if !s.routing {
+            ServiceBanner::RoutingOff
+        } else {
+            ServiceBanner::Hidden
+        },
+    );
+    // Pending join requests → a Review banner (only approvers see it); Review
+    // opens the admin flyout's emoji-SAS approval screen.
+    let n_pending = pending.borrow().len();
+    if s.self_role != "peer" && n_pending > 0 {
+        ui.join_banner.set_title(&join_banner_text(n_pending));
+        ui.join_banner.set_button_label(Some("Review"));
+        ui.join_banner.set_revealed(true);
+    } else {
+        ui.join_banner.set_revealed(false);
+    }
+
+    // Role-dependent visibility (rows built once).
+    page.pm_group.set_visible(s.self_role != "peer");
+    page.pm_controller_row.set_visible(s.is_originator);
+
+    // Members: diff against the live rows — update in place, add new, remove
+    // departed, then re-sort (rows move, none are destroyed).
+    *page.order.borrow_mut() = member_order(&s.members);
+    {
+        let mut rows = page.rows.borrow_mut();
+        let present: std::collections::HashSet<&str> =
+            s.members.iter().map(|m| m.node_id.as_str()).collect();
+        let list = page.members_list.clone();
+        rows.retain(|id, r| {
+            let keep = present.contains(id.as_str());
+            if !keep {
+                list.remove(&r.row);
+            }
+            keep
+        });
+        for m in &s.members {
+            match rows.get(&m.node_id) {
+                Some(r) => {
+                    r.row.set_title(&member_row_title(m));
+                    r.row.set_subtitle(&member_row_subtitle(m));
+                    apply_dot_style(&r.dot, m.online, m.last_seen, m.access_disabled, m.hidden);
+                }
+                None => {
+                    let dot = status_dot(m.online, m.last_seen, m.access_disabled, m.hidden);
+                    let row = adw::ActionRow::builder()
+                        .title(member_row_title(m))
+                        .subtitle(member_row_subtitle(m))
+                        .activatable(true)
+                        .build();
+                    // The sort func's key for this row.
+                    row.set_widget_name(&m.node_id);
+                    row.add_prefix(&dot);
+                    row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+                    // Connected ONCE, looking the member up at click time so
+                    // the flyout always opens on fresh data (the old
+                    // per-render handler captured a clone that went stale).
+                    let node_id = m.node_id.clone();
+                    let ui2 = ui.clone();
+                    let net2 = net.clone();
+                    let window2 = window.clone();
+                    let state2 = state.clone();
+                    row.connect_activated(move |_| {
+                        let st = state2.borrow();
+                        let Some(st) = st.as_ref() else { return };
+                        if let Some(m) = st.members.iter().find(|m| m.node_id == node_id) {
+                            fill_member(&ui2, m, &st.self_role, st.is_originator, &net2, &window2);
+                        }
+                    });
+                    page.members_list.append(&row);
+                    rows.insert(m.node_id.clone(), MemberRowUi { row, dot });
+                }
+            }
+        }
+    }
+    page.members_list.invalidate_sort();
+    let others = s.members.iter().filter(|m| !m.is_self).count();
+    page.members_group
+        .set_description(Some(&format!("{} device(s) total", others + 1)));
+
+    // Admin flyout: rebuild-style, but only when data IT displays changed —
+    // telemetry churn can no longer recreate Approve/Deny under the cursor.
+    let sig = admin_signature(s, &pending.borrow());
+    if *page.last_admin_sig.borrow() != sig {
+        *page.last_admin_sig.borrow_mut() = sig;
+        render_admin(&ui.admin_box, s, net, window, pending);
+    }
+
+    update_diag(&page.diag, s);
+
+    if let Some(title) = focused {
+        focus_row_by_title(window, &title);
+    }
+}
+
+/// The title of the `adw::ActionRow` that currently holds keyboard focus, if any.
+/// Used to put focus back after a rebuild. Returns `None` when focus is in a text
+/// field (we must never yank an active caret out of a name/notes entry) or isn't on
+/// a row at all.
+fn focused_row_title(window: &adw::ApplicationWindow) -> Option<String> {
+    let mut w = adw::prelude::GtkWindowExt::focus(window)?;
+    if w.is::<gtk::Text>() || w.is::<gtk::TextView>() {
+        return None;
+    }
+    loop {
+        if let Some(row) = w.downcast_ref::<adw::ActionRow>() {
+            return Some(row.title().to_string());
+        }
+        w = w.parent()?;
+    }
+}
+
+/// Re-grab keyboard focus on the first `adw::ActionRow` under `root` whose title
+/// matches `title`. No-op if none matches (e.g. the row's member left the network).
+fn focus_row_by_title(root: &impl IsA<gtk::Widget>, title: &str) -> bool {
+    let mut child = root.as_ref().first_child();
+    while let Some(w) = child {
+        if let Some(row) = w.downcast_ref::<adw::ActionRow>() {
+            if row.title() == title {
+                row.grab_focus();
+                return true;
+            }
+        }
+        if focus_row_by_title(&w, title) {
+            return true;
+        }
+        child = w.next_sibling();
+    }
+    false
+}
+
+/// Refresh the diagnostics flyout's persistent rows in place.
+fn update_diag(d: &DiagPanel, s: &NetworkStatus) {
+    d.home_relay
+        .set_subtitle(&s.home_relay.clone().unwrap_or_else(|| "—".into()));
+    d.fallback.set_visible(s.relay_fallback);
     let direct = s.members.iter().filter(|m| !m.is_self && m.online && m.direct == Some(true)).count();
     let relayed = s.members.iter().filter(|m| !m.is_self && m.online && m.direct == Some(false)).count();
-    g.add(&property_row("Connections", &format!("{direct} direct · {relayed} via relay")));
-    g.add(&property_row(
-        "Routing (TUN)",
-        if s.routing { "on — carrying traffic" } else { "off — needs the elevated daemon" },
-    ));
-    b.append(&g);
+    d.connections
+        .set_subtitle(&format!("{direct} direct · {relayed} via relay"));
+    d.routing.set_subtitle(if s.routing {
+        "on — carrying traffic"
+    } else {
+        "off — needs the elevated daemon"
+    });
 }
 
 /// Fetch the current relay settings; the response renders + opens the flyout.
@@ -2863,8 +2944,14 @@ fn now_ms() -> u64 {
 /// offline, red if offline > 1 week.
 fn status_dot(online: bool, last_seen: u64, access_disabled: bool, hidden: bool) -> gtk::Label {
     let dot = gtk::Label::new(Some("●"));
-    dot.add_css_class("status-dot");
     dot.set_valign(gtk::Align::Center);
+    apply_dot_style(&dot, online, last_seen, access_disabled, hidden);
+    dot
+}
+
+/// (Re)style a status dot in place — the persistent member rows restyle theirs
+/// on every status instead of being recreated.
+fn apply_dot_style(dot: &gtk::Label, online: bool, last_seen: u64, access_disabled: bool, hidden: bool) {
     let (class, tip) = if hidden {
         ("status-hidden", "Hidden")
     } else if access_disabled {
@@ -2876,9 +2963,9 @@ fn status_dot(online: bool, last_seen: u64, access_disabled: bool, hidden: bool)
     } else {
         ("dim-label", "Offline")
     };
-    dot.add_css_class(class);
+    // Replaces any previous state class in one go.
+    dot.set_css_classes(&["status-dot", class]);
     dot.set_tooltip_text(Some(tip));
-    dot
 }
 
 fn short_id(hex: &str) -> String {
@@ -2938,5 +3025,98 @@ mod mode_tests {
     #[test]
     fn legacy_minimized_is_gui() {
         assert_eq!(parse_mode(&args(&["--minimized"])), Mode::Gui);
+    }
+
+    fn member(id: &str, online: bool) -> MemberView {
+        MemberView {
+            node_id: id.into(),
+            hostname: Some(format!("host-{id}")),
+            label: None,
+            note: None,
+            virtual_ip: Some("10.99.0.7".into()),
+            local_ip: None,
+            public_ip: None,
+            location: None,
+            observed_addr: None,
+            direct: None,
+            online,
+            last_seen: 0,
+            is_self: false,
+            is_originator_device: false,
+            role: "peer".into(),
+            access_disabled: false,
+            hidden: false,
+        }
+    }
+
+    fn status(members: Vec<MemberView>) -> NetworkStatus {
+        NetworkStatus {
+            name: "home".into(),
+            subnet: "10.99.0.0/24".into(),
+            frozen: false,
+            self_node_id: "self".into(),
+            self_ip: Some("10.99.0.1".into()),
+            is_originator: true,
+            self_role: "originator".into(),
+            peer_ticket_single_use: false,
+            routing: true,
+            online: true,
+            home_relay: Some("https://relay.example".into()),
+            relay_fallback: false,
+            members,
+        }
+    }
+
+    /// The admin flyout only rebuilds when ITS data changes — per-tick
+    /// telemetry (direct flips, IPs, last-seen, home relay) must not move
+    /// this signature, or Approve/Deny buttons get recreated under the cursor.
+    #[test]
+    fn admin_signature_ignores_telemetry() {
+        let mut s = status(vec![member("a", true)]);
+        let base = admin_signature(&s, &[]);
+        s.members[0].direct = Some(true);
+        s.members[0].public_ip = Some("1.2.3.4".into());
+        s.members[0].last_seen = 999_999;
+        s.members[0].online = false;
+        s.home_relay = None;
+        s.relay_fallback = true;
+        assert_eq!(admin_signature(&s, &[]), base);
+        // ...but its own inputs do move it.
+        s.frozen = true;
+        assert_ne!(admin_signature(&s, &[]), base);
+        let with_pending = admin_signature(
+            &status(vec![member("a", true)]),
+            &[PendingJoin { node_id: "x".into(), hostname: "h".into(), sas: vec![] }],
+        );
+        assert_ne!(with_pending, base);
+    }
+
+    /// Self pins to the top only while it's a normal, visible device.
+    #[test]
+    fn member_order_pins_normal_self() {
+        let mut me = member("me", true);
+        me.is_self = true;
+        let order = member_order(&[member("a", true), me.clone(), member("b", false)]);
+        assert_eq!(order["me"], 0);
+        // A hidden self stays in its engine-ranked spot instead.
+        me.hidden = true;
+        let order = member_order(&[member("a", true), me, member("b", false)]);
+        assert_eq!(order["a"], 0);
+    }
+
+    #[test]
+    fn member_row_text() {
+        let mut m = member("abcdef1234ffff", true);
+        assert_eq!(member_row_title(&m), "host-abcdef1234ffff");
+        assert_eq!(member_row_subtitle(&m), "10.99.0.7");
+        m.direct = Some(false);
+        assert_eq!(member_row_subtitle(&m), "10.99.0.7 · relay");
+        m.label = Some("Attic PC".into());
+        assert_eq!(member_row_title(&m), "Attic PC");
+        assert!(member_row_subtitle(&m).starts_with("host-abcdef1234ffff · "));
+        m.is_self = true;
+        assert_eq!(member_row_title(&m), "Attic PC (this device)");
+        m.hidden = true;
+        assert_eq!(member_row_subtitle(&m), "host-abcdef1234ffff · 10.99.0.7 · Hidden");
     }
 }

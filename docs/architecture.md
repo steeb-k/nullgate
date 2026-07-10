@@ -28,6 +28,16 @@ the membership list is a small signed document every member replicates.
   restart is needed. The settings are deliberately **not** distributed through the roster: every
   member configures its own (a token-protected relay would reject unconfigured members anyway,
   which would also break relay-assisted hole-punching with them).
+- **UI change events are gated and coalesced.** The engine emits a `Changed` event only when
+  something user-visible actually changed (the presence tracker's mutators report whether they
+  changed displayed state; the maintenance tick keeps a dirty flag, with an unconditional event
+  every ~30 s as a catch-all for live-read fields like the home relay). The daemon then coalesces
+  bursts into one `status()` + IPC push per subscriber after a 250 ms quiet window — join-approval
+  events are forwarded immediately and never collapsed. The GUI applies each status **in place** to
+  a build-once widget tree (member rows diffed by node id; reordering re-sorts a `gtk::ListBox`
+  without destroying rows), so a status push can never destroy a widget mid-click. Before this,
+  every heartbeat emitted an event (N members ≈ N events/3 s), every event pushed a status, and any
+  visible change rebuilt the entire page — which is what made clicks feel like they didn't work.
 - A periodic **maintenance tick** (every 3 s) reconciles the mesh: it rebuilds the roster, tears
   down connections to non-members, and dials any member we aren't yet connected to. Dialing is
   **de-duplicated and time-bounded** (`engine::spawn_dials`) — at most one in-flight `connect()`
