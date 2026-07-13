@@ -1,6 +1,7 @@
 //! Headless IPC client for `ipn-daemon` — scripting + testing without the GUI.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
@@ -104,8 +105,9 @@ enum RelayCmd {
     },
     /// Remove a custom relay server by URL.
     Remove { url: String },
-    /// Set the policy: `preferred` (fall back to the public iroh relays while
-    /// no custom relay is reachable) or `only` (never use the public relays).
+    /// Set the policy: `preferred` (your relays carry traffic, but the public
+    /// iroh relays stay in the map so peers without your relay can still reach
+    /// you) or `only` (never touch the public relays).
     Mode { mode: String },
     /// Remove all custom relays (back to the public iroh relays).
     Clear,
@@ -173,9 +175,6 @@ async fn main() -> Result<()> {
                 s.self_role,
                 s.routing
             );
-            if s.relay_fallback {
-                println!("relay: custom relays unreachable — temporarily using the public relays");
-            }
             for m in s.members {
                 if m.is_self {
                     continue;
@@ -237,7 +236,7 @@ async fn main() -> Result<()> {
 /// Relay subcommands: `show` is a plain read; the rest read the current
 /// settings from the daemon, edit them, and write the whole set back.
 async fn cmd_relay(socket: &Path, cmd: RelayCmd) -> Result<()> {
-    use ipn_ipc::{RelayPolicy, RelayServer, RelaySettings};
+    use ipn_ipc::{RelayApply, RelayPolicy, RelayServer, RelaySettings};
 
     let fetch = || async {
         match oneshot_request(socket, IpcRequest::GetRelays)
@@ -252,7 +251,8 @@ async fn cmd_relay(socket: &Path, cmd: RelayCmd) -> Result<()> {
 
     let settings: RelaySettings = match cmd {
         RelayCmd::Show => {
-            let s = fetch().await?;
+            let st = fetch().await?;
+            let s = &st.settings;
             if s.servers.is_empty() {
                 println!("no custom relays — using the public iroh relays");
             } else {
@@ -260,8 +260,9 @@ async fn cmd_relay(socket: &Path, cmd: RelayCmd) -> Result<()> {
                     "mode: {}",
                     match s.mode {
                         RelayPolicy::Preferred =>
-                            "preferred (public relays only while no custom relay is reachable)",
-                        RelayPolicy::Only => "only (never use the public relays)",
+                            "preferred (your relays carry traffic; the public relays stay available)",
+                        RelayPolicy::Only =>
+                            "only (never use the public relays — peers without your relay can't reach you)",
                     }
                 );
                 for r in &s.servers {
@@ -271,17 +272,23 @@ async fn cmd_relay(socket: &Path, cmd: RelayCmd) -> Result<()> {
                         if r.token.is_some() { "  (token set)" } else { "" }
                     );
                 }
+                println!("\nSet the same relays on every device, or none of them can reach you.");
+            }
+            // Only worth a line when there's something to say; "applied" is the
+            // steady state and would just be noise on a plain read.
+            if !matches!(st.apply, RelayApply::Applied) {
+                print_apply(&st.apply);
             }
             return Ok(());
         }
         RelayCmd::Add { url, token } => {
-            let mut s = fetch().await?;
+            let mut s = fetch().await?.settings;
             s.servers.retain(|r| r.url != url);
             s.servers.push(RelayServer { url, token });
             s
         }
         RelayCmd::Remove { url } => {
-            let mut s = fetch().await?;
+            let mut s = fetch().await?.settings;
             let before = s.servers.len();
             s.servers.retain(|r| r.url != url);
             if s.servers.len() == before {
@@ -290,7 +297,7 @@ async fn cmd_relay(socket: &Path, cmd: RelayCmd) -> Result<()> {
             s
         }
         RelayCmd::Mode { mode } => {
-            let mut s = fetch().await?;
+            let mut s = fetch().await?.settings;
             s.mode = match mode.to_lowercase().as_str() {
                 "preferred" | "prefer" => RelayPolicy::Preferred,
                 "only" => RelayPolicy::Only,
@@ -305,12 +312,38 @@ async fn cmd_relay(socket: &Path, cmd: RelayCmd) -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("can't reach daemon at {}: {e}", socket.display()))?
     {
-        IpcResponse::Ok => {
-            println!("ok — relay settings applied (no restart needed)");
-            Ok(())
-        }
+        IpcResponse::Ok => {}
         IpcResponse::Err(e) => bail!("daemon error: {e}"),
         other => bail!("unexpected daemon response: {other:?}"),
+    }
+    println!("saved");
+
+    // The daemon answers as soon as the settings are *stored*; pushing them into
+    // the live endpoint happens behind that. Wait briefly for the real verdict
+    // rather than printing "applied" and hoping — that claim is precisely what
+    // hid the wedge that made this command hang in the first place.
+    let deadline = std::time::Instant::now() + Duration::from_secs(12);
+    loop {
+        let apply = fetch().await?.apply;
+        if !matches!(apply, RelayApply::Pending) || std::time::Instant::now() >= deadline {
+            print_apply(&apply);
+            // A relay map the endpoint never picked up is a failure, not a note.
+            if matches!(apply, RelayApply::Failed { .. }) {
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Report how far the settings got in reaching the running endpoint.
+fn print_apply(apply: &ipn_ipc::RelayApply) {
+    use ipn_ipc::RelayApply;
+    match apply {
+        RelayApply::Applied => println!("applied to the running daemon — no restart needed"),
+        RelayApply::Pending => println!("still applying to the running daemon…"),
+        RelayApply::Failed { reason } => println!("NOT applied: {reason}"),
     }
 }
 

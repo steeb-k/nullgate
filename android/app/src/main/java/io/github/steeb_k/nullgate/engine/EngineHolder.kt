@@ -21,6 +21,9 @@ import uniffi.ipn_mobile.EventListener
 import uniffi.ipn_mobile.MemberView
 import uniffi.ipn_mobile.MobileEngine
 import uniffi.ipn_mobile.NetworkStatus
+import uniffi.ipn_mobile.RelayPolicy
+import uniffi.ipn_mobile.RelayServer
+import uniffi.ipn_mobile.RelayStatus
 import java.io.File
 
 /**
@@ -249,6 +252,21 @@ object EngineHolder {
         io { requireEngine().setNote(nodeId, note) }
 
     suspend fun auditLog(): List<AuditEntry> = io { requireEngine().auditLog() }
+
+    // --- custom relay servers ---------------------------------------------
+    //
+    // Per-device settings (`relays.cbor` in the app data dir), exactly like the
+    // desktop — they are NOT distributed through the roster, so the same relays
+    // and tokens have to be set on every member or the ones missing them cannot
+    // be reached.
+
+    suspend fun relayStatus(): RelayStatus = io { requireEngine().relayStatus() }
+
+    /** Returns once saved; the engine pushes it into the live endpoint behind
+     * that, so re-read [relayStatus] for the verdict rather than assuming this
+     * means "applied". */
+    suspend fun setRelaySettings(servers: List<RelayServer>, mode: RelayPolicy) =
+        io { requireEngine().setRelaySettings(servers, mode) }
 
     fun members(): List<MemberView> = _status.value?.members.orEmpty()
 

@@ -45,6 +45,8 @@ sealed interface Dialog {
     data object ControllerTicket : Dialog
     data object AuditLog : Dialog
     data object Settings : Dialog
+    /** Device-level, so it is reachable with or without a network. */
+    data object Relays : Dialog
     data object Rename : Dialog
     data object ToggleFreeze : Dialog
     data object OriginatorKey : Dialog
@@ -74,6 +76,7 @@ fun AppDialogs(
         }
         Dialog.AuditLog -> AuditLogDialog(onDismiss)
         Dialog.Settings -> SettingsDialog(status, onDismiss)
+        Dialog.Relays -> RelaysDialog(onDismiss)
         Dialog.Rename -> TextPromptDialog(
             title = "Rename network",
             initial = status?.name.orEmpty(),

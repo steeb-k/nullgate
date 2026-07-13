@@ -88,13 +88,19 @@ so it's there whether or not the window is open.
 
 **Using your own relay server:** when two devices can't connect directly, traffic is carried by a
 relay — normally the free public ones run by the iroh project. If you host your own iroh relay, open
-**Relay servers** (on the main screen, or from the "No network yet" page before you join) and add
-its address, plus its access token if it requires one. Your relay then carries the traffic whenever
-it's reachable; if it ever goes down, Nullgate quietly falls back to the public relays and returns
-to yours once it's back. If you'd rather *never* touch the public relays, switch the policy to
-**my relays only**. Set the same relays (and tokens) on **every device** in the network — a relay
-that requires a token turns away devices that don't have it. Changes apply immediately, no restart
-needed.
+**Relay servers** (on the main screen, or from the "No network yet" page before you join — on the
+phone it's in the ⋮ menu) and add its address, plus its access token if it requires one. Your relay
+then carries the traffic, while the public relays stay available as a backup, so a device that
+*doesn't* have your relay can still reach you.
+
+**Put the same relay — same address, same token — on every device.** This is the one setting that
+can cut your network in half. Each device is only configured locally; adding a relay here does not
+add it for anyone else. If a relay needs a token, it turns away devices that don't have it, and a
+device it turns away can't see the ones that use it. Either set it everywhere, or nowhere.
+
+If you'd rather *never* touch the public relays, switch the policy to **my relays only** — then
+devices without your relay genuinely cannot reach this one, which is the point. Changes are saved
+immediately and applied to the running service; the app tells you if it couldn't apply one.
 
 The background service keeps running and starts with your device. If it ever stops unexpectedly —
 or if its memory use climbs too high (a safeguard against a leak in the underlying networking
@@ -132,9 +138,12 @@ Custom relay servers work here too:
 ```sh
 nullgate-cli relay add https://relay.example.com:8443 --token <token>
 nullgate-cli relay mode only        # never use the public relays (`preferred` is the default)
-nullgate-cli relay show             # what's configured
+nullgate-cli relay show             # what's configured, and whether it's applied
 nullgate-cli relay clear            # back to the public relays
 ```
+
+Each command reports whether the change reached the running daemon, so "saved" and "applied" are
+never confused. Run the same commands on **every** device — relay settings are per-device.
 
 ## Learn more
 - [How it works](docs/architecture.md) — the design, components, and networking details.

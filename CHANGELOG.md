@@ -4,11 +4,59 @@ All notable changes to Nullgate. Format follows [Keep a Changelog](https://keepa
 Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
+
+## [0.3.3] - 2026-07-13
+> **Behaviour change.** `preferred` (the default relay policy) now keeps the public iroh relays
+> in the relay map *alongside* your custom relay, instead of replacing them. Devices that were on
+> a custom relay become reachable again to peers that lack the relay or its token — that is the
+> fix. If you want the old "never touch third-party infrastructure" behaviour, use `only`.
+
+### Fixed
+- **A self-hosted relay on some devices but not others silently cut the network in half.** Under
+  `preferred`, configuring a custom relay *removed* the public relays from the device's relay map.
+  A configured device then advertised the custom relay as its only home relay and had no transport
+  that could reach a peer homed on a public one; a peer without the token dialled the custom relay,
+  got `401`, and — hole-punching being relay-coordinated — had no direct path either. The two
+  groups went mutually invisible while the relay was up and authenticating normally. `preferred`
+  was, in effect, identical to `only`. It now keeps both sets in the map, with the path selector
+  biasing traffic onto your relay, so partial deployment is no longer fatal.
+- **`nullgate-cli relay add` hung indefinitely, and the relay only took effect after a daemon
+  restart.** `Endpoint::insert_relay`/`remove_relay` await iroh's bounded socket-actor channel,
+  which a peer stuck sending to an unreachable relay can block indefinitely — so the call blocked
+  for 20+ minutes on a live mesh, *after* writing `relays.cbor` but *before* swapping the in-memory
+  settings. Disk, path selector, endpoint map and reported settings all disagreed, and `relay show`
+  truthfully reported the stale value. Settings are now saved, applied and reported atomically and
+  return immediately; the endpoint map is updated by a background task with per-call timeouts.
+- **The relay watchdog could never have helped, and is gone.** It fired on `home_relay_status()` —
+  "can *I* reach my relay" — which was always yes. It could not observe "my peers can't reach my
+  relay", which was the actual failure. `NetworkStatus.relay_fallback` went with it.
+- **The daemon kept working on requests from clients that had gone away.** A `^C`'d or hung-up
+  client left the request running against a socket nobody would read, stranding the task. The
+  daemon now cancels an in-flight request when the client disconnects.
+- **A non-root daemon crashed instead of falling back to a writable log directory.** `resolve_log_dir`
+  accepted any candidate that `create_dir_all` returned `Ok` for — which includes an existing,
+  root-owned `/var/log/nullgate` — and then panicked inside `tracing_appender` with
+  `PermissionDenied`. It now probes writability before accepting a directory.
+
+### Added
+- **Relay settings on Android** (⋮ → *Relay servers*): add a relay with an optional access token,
+  remove one, and choose whether the public relays stay as a backup. The phone had no relay surface
+  at all before, which is the only reason it stayed reachable through the outage above. Reachable
+  before joining a network, since a token-gated relay may be what a device needs in order to join.
+- **Relay changes now report whether they were actually applied** (`RelayApply::{Applied, Pending,
+  Failed}`), rather than the CLI unconditionally printing "no restart needed". Note that iroh keeps
+  a home relay that has left the map until another relay takes over, so switching to `only` while
+  your custom relay is unreachable genuinely does need a restart — and now says so.
+- Both UIs warn that relay settings are **per-device** and must be set on every member with the
+  same URL and token. That warning is the single change most likely to prevent a repeat.
+
 ### Changed
 - **Installer/`nullgatectl` header art.** The `install.sh` bootstrap and the `nullgatectl`
   manager (Linux + macOS) now print the full-colour Nullgate logo on a colour-capable
   interactive terminal. On pipes, log files, dumb terminals, or when `NO_COLOR` is set they
   fall back to the plain block-glyph wordmark, so redirected output never gets escape codes.
+- IPC protocol → **v5**: `GetRelays` answers with a `RelayStatus` (settings + apply state) instead
+  of bare `RelaySettings`, and `NetworkStatus` drops `relay_fallback`.
 
 ## [0.3.2] - 2026-07-09
 > The macOS tarball was built after the `v0.3.2` tag and **includes the sleep/wake fix below**; the

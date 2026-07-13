@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 pub mod transport;
 
 /// Display DTOs are reused straight from the engine crate (plain serde structs).
-pub use ipn_core::{AuditEntry, MemberView, NetworkStatus, RelayPolicy, RelayServer, RelaySettings};
+pub use ipn_core::{
+    AuditEntry, MemberView, NetworkStatus, RelayApply, RelayPolicy, RelayServer, RelaySettings,
+    RelayStatus,
+};
 
 /// Render a SAS (the emoji strings carried on [`IpcEvent::JoinSas`] /
 /// [`IpcEvent::JoinRequest`]) as words, for text-only clients like the CLI.
@@ -32,7 +35,12 @@ pub use ipn_core::admission::sas_words;
 ///
 /// v4 (0.3.2): added the custom relay server requests (`GetRelays`, `SetRelays`)
 /// and the `Relays` response.
-pub const PROTO_VERSION: u32 = 4;
+///
+/// v5 (0.3.3): `Relays` now carries a [`RelayStatus`] (settings **plus** how far
+/// they got in reaching the live endpoint) rather than bare [`RelaySettings`], so
+/// clients stop claiming a write succeeded before it has. `NetworkStatus` lost
+/// `relay_fallback` along with the watchdog that set it.
+pub const PROTO_VERSION: u32 = 5;
 
 /// Where the GUI and daemon rendezvous. On Windows this path is only hashed into
 /// a named-pipe name; on Unix it's the actual socket path (fixed, not `$TMPDIR`,
@@ -115,8 +123,10 @@ pub enum IpcRequest {
     ImportOriginatorKey { code: String },
     /// Fetch this device's custom relay server configuration.
     GetRelays,
-    /// Replace this device's custom relay server configuration. Applies to the
-    /// live endpoint immediately (no daemon restart).
+    /// Replace this device's custom relay server configuration. Returns as soon
+    /// as the settings are saved; pushing them into the live endpoint continues
+    /// in the background, so poll `GetRelays` for the [`RelayApply`] state
+    /// rather than treating `Ok` as "applied".
     SetRelays { settings: RelaySettings },
     /// Upgrade this connection to receive pushed [`IpcEvent`]s.
     Subscribe,
@@ -140,8 +150,9 @@ pub enum IpcResponse {
     Recovery(String),
     /// The administration activity log (reply to `GetAuditLog`).
     AuditLog(Vec<AuditEntry>),
-    /// This device's custom relay configuration (reply to `GetRelays`).
-    Relays(RelaySettings),
+    /// This device's custom relay configuration, and how far it got in reaching
+    /// the live endpoint (reply to `GetRelays`).
+    Relays(RelayStatus),
     Ok,
     Err(String),
 }

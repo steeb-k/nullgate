@@ -51,8 +51,8 @@ fn preferred_log_dir() -> PathBuf {
 }
 
 /// Resolve a writable log directory, trying the privileged location first and
-/// falling back to `<data_dir>/logs`, then the temp dir. Always returns a dir
-/// that was successfully created.
+/// falling back to `<data_dir>/logs`, then the temp dir. Always returns a dir we
+/// could actually create *and write to*.
 fn resolve_log_dir(data_dir: &Path) -> PathBuf {
     let candidates = [
         preferred_log_dir(),
@@ -60,12 +60,32 @@ fn resolve_log_dir(data_dir: &Path) -> PathBuf {
         std::env::temp_dir().join("nullgate").join("logs"),
     ];
     for dir in candidates.iter() {
-        if fs::create_dir_all(dir).is_ok() {
+        if fs::create_dir_all(dir).is_ok() && is_writable(dir) {
             return dir.clone();
         }
     }
     // Last resort: the temp dir itself (create_dir_all of it is a no-op).
     std::env::temp_dir()
+}
+
+/// Whether we can actually create a file in `dir`.
+///
+/// `create_dir_all` returns `Ok` for a directory that already exists, whatever
+/// its permissions — so on a machine where the privileged log dir exists but is
+/// root-owned (`/var/log/nullgate`), an unprivileged daemon used to *select* it
+/// and then panic inside `tracing_appender` ("initializing rolling file appender
+/// failed: PermissionDenied") instead of falling back. Probing with a real file
+/// is the only honest test; a metadata/permissions check wouldn't account for
+/// ACLs, SELinux, or a read-only mount.
+fn is_writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".nullgate-write-probe-{}", std::process::id()));
+    match OpenOptions::new().create(true).append(true).open(&probe) {
+        Ok(_) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// Initialise tracing (rolling daily file + stderr) and install the crash hook.

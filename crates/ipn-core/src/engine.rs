@@ -198,10 +198,6 @@ pub struct NetworkStatus {
     pub online: bool,
     /// This device's home relay URL, if one is established (diagnostics).
     pub home_relay: Option<String>,
-    /// Custom relays are configured but unreachable, so the public relays are
-    /// temporarily in use (see [`crate::relays`]).
-    #[serde(default)]
-    pub relay_fallback: bool,
     pub members: Vec<MemberView>,
 }
 
@@ -381,13 +377,17 @@ struct Inner {
     protocol_version: AtomicU32,
     /// User-configured custom relay servers (see [`crate::relays`]). The live
     /// endpoint relay map is kept in sync at runtime, so edits apply without a
-    /// daemon restart.
+    /// daemon restart. This is the source of truth the moment the user saves —
+    /// pushing it into the endpoint happens behind it, in `apply_relay_map`.
     relay_settings: StdRwLock<crate::relays::RelaySettings>,
-    /// Whether the relay watchdog has added the public relays because none of
-    /// the custom relays is reachable (only under [`RelayPolicy::Preferred`]).
-    ///
-    /// [`RelayPolicy::Preferred`]: crate::relays::RelayPolicy::Preferred
-    relay_fallback: AtomicBool,
+    /// How far the last relay-settings change got in reaching the live endpoint.
+    relay_apply: StdRwLock<crate::relays::RelayApply>,
+    /// Serializes appliers so two rapid edits can't interleave their inserts and
+    /// removes into the endpoint's relay map.
+    relay_apply_lock: Mutex<()>,
+    /// Bumped on every settings change; an applier that finds it moved on was
+    /// superseded while it waited for the lock, and drops out.
+    relay_apply_gen: AtomicU64,
     /// Last time (ms) we flushed the persisted last-seen map (throttle).
     last_seen_saved: AtomicU64,
     /// Monotonic tick counter, so every 10th tick (~30s) still emits a
@@ -469,7 +469,9 @@ impl Engine {
             last_seen_saved: AtomicU64::new(0),
             tick_seq: AtomicU64::new(0),
             relay_settings: StdRwLock::new(relay_settings),
-            relay_fallback: AtomicBool::new(false),
+            relay_apply: StdRwLock::new(crate::relays::RelayApply::Applied),
+            relay_apply_lock: Mutex::new(()),
+            relay_apply_gen: AtomicU64::new(0),
             #[cfg(not(target_os = "android"))]
             geo: StdRwLock::new(None),
             #[cfg(not(target_os = "android"))]
@@ -505,12 +507,6 @@ impl Engine {
                     tokio::time::sleep(Duration::from_secs(3)).await;
                 }
             });
-        }
-
-        // Custom-relay fallback watchdog (no-op unless custom relays are set).
-        {
-            let inner = inner.clone();
-            tokio::spawn(async move { relay_watchdog(&inner).await });
         }
 
         Ok(Engine { inner })
@@ -1147,57 +1143,93 @@ impl Engine {
         self.inner.relay_settings.read().unwrap().clone()
     }
 
-    /// Replace the custom relay configuration, persist it, and apply it to the
-    /// **live** endpoint: the relay map is diffed in place and the path
-    /// selector's preferred set updated, so no daemon restart is needed. The
-    /// endpoint re-picks its home relay from the new map within a net-report
-    /// cycle (~30s); existing connections migrate rather than drop.
+    /// The relays the live endpoint currently has a connection to, and whether
+    /// each is connected. This is the only view iroh exposes into the running
+    /// relay map, and it is *not* the whole map: an endpoint homes on a single
+    /// relay (the lowest-latency one that answers) and that is the only one it
+    /// advertises to peers — see the module docs on [`crate::relays`].
+    pub fn relay_connections(&self) -> Vec<(iroh::RelayUrl, bool)> {
+        use iroh::Watcher as _;
+        self.inner
+            .node
+            .endpoint
+            .home_relay_status()
+            .get()
+            .iter()
+            .map(|s| (s.url().clone(), s.is_connected()))
+            .collect()
+    }
+
+    /// The relay configuration **and** how far it got in reaching the live
+    /// endpoint, so callers can report the truth rather than assume success.
+    pub fn relay_status(&self) -> crate::relays::RelayStatus {
+        crate::relays::RelayStatus {
+            settings: self.inner.relay_settings.read().unwrap().clone(),
+            apply: self.inner.relay_apply.read().unwrap().clone(),
+        }
+    }
+
+    /// Replace the custom relay configuration: validate, persist, and make it
+    /// this device's settings — then return. Pushing the new map into the
+    /// running endpoint happens in a background task, and its progress shows up
+    /// as [`RelayApply`](crate::relays::RelayApply) on [`relay_status`].
+    ///
+    /// It has to be that way round. `Endpoint::insert_relay`/`remove_relay` look
+    /// like setters but each awaits iroh's bounded socket-actor channel, and
+    /// that actor can be blocked *indefinitely* by an unrelated peer — see
+    /// [`apply_relay_map`]. Doing them inline made this call hang for tens of
+    /// minutes on a live mesh, and because the in-memory settings were swapped
+    /// *after* the endpoint work, a hung call left disk, path selector, relay
+    /// map and reported settings all disagreeing: the CLI blocked forever while
+    /// `relay show` truthfully reported the old value.
+    ///
+    /// [`relay_status`]: Self::relay_status
     pub async fn set_relay_settings(&self, settings: crate::relays::RelaySettings) -> Result<()> {
         use crate::relays;
 
-        // Validate fully before touching disk or the endpoint.
-        let custom = settings.relay_configs()?;
+        // Validate fully before any side effect: a bad URL or token fails here
+        // and changes nothing.
+        let desired = settings.desired_relay_configs()?;
+        let custom_urls: std::collections::BTreeSet<iroh::RelayUrl> =
+            settings.urls()?.into_iter().collect();
+
         relays::save_relay_settings(&self.inner.data_dir, &settings)?;
 
-        let endpoint = &self.inner.node.endpoint;
-        let custom_urls: std::collections::BTreeSet<iroh::RelayUrl> =
-            custom.iter().map(|c| c.url.clone()).collect();
+        // Everything the *user* can observe flips here, atomically and without
+        // awaiting anything: the selector, the in-memory settings, the reported
+        // apply state.
         self.inner.node.preferred_relays.set(custom_urls.clone());
+        let old = std::mem::replace(
+            &mut *self.inner.relay_settings.write().unwrap(),
+            settings.clone(),
+        );
+        *self.inner.relay_apply.write().unwrap() = relays::RelayApply::Pending;
+        let generation = self.inner.relay_apply_gen.fetch_add(1, Ordering::SeqCst) + 1;
 
-        // Desired steady-state map: the custom relays, or the defaults when
-        // none are configured. Fallback (if warranted) re-engages via the
-        // watchdog rather than being preserved across a settings change.
-        let desired: Vec<std::sync::Arc<iroh::RelayConfig>> = if custom.is_empty() {
-            relays::default_relay_configs()
-        } else {
-            custom.into_iter().map(std::sync::Arc::new).collect()
-        };
-        let desired_urls: std::collections::BTreeSet<iroh::RelayUrl> =
-            desired.iter().map(|c| c.url.clone()).collect();
-
-        // Insert first, then remove strays, so the map is never empty.
-        for cfg in desired {
-            endpoint.insert_relay(cfg.url.clone(), cfg).await;
-        }
-        let old_settings =
-            std::mem::replace(&mut *self.inner.relay_settings.write().unwrap(), settings);
+        // Anything we may have put in the map before and no longer want. The
+        // public defaults are always candidates for removal: under `Only` they
+        // must go, under `Preferred` they're in `desired` and so survive the
+        // difference below.
         let mut stale: std::collections::BTreeSet<iroh::RelayUrl> = relays::default_relay_configs()
             .iter()
             .map(|c| c.url.clone())
             .collect();
-        if let Ok(urls) = old_settings.urls() {
-            stale.extend(urls);
-        }
-        for url in stale.difference(&desired_urls) {
-            endpoint.remove_relay(url).await;
-        }
-        self.inner.relay_fallback.store(false, Ordering::Relaxed);
+        stale.extend(old.urls().unwrap_or_default());
+        let desired_urls: std::collections::BTreeSet<iroh::RelayUrl> =
+            desired.iter().map(|c| c.url.clone()).collect();
+        let stale: Vec<iroh::RelayUrl> = stale.difference(&desired_urls).cloned().collect();
 
         tracing::info!(
-            "relay settings updated: {} custom relay(s), mode {:?}",
-            desired_urls.len(),
-            self.inner.relay_settings.read().unwrap().mode
+            "relay settings saved: {} custom relay(s), mode {:?} — endpoint map: {} relay(s), {} to remove",
+            custom_urls.len(),
+            settings.mode,
+            desired.len(),
+            stale.len(),
         );
+
+        let inner = self.inner.clone();
+        tokio::spawn(async move { apply_relay_map(inner, generation, desired, stale).await });
+
         let _ = self.inner.events.send(EngineEvent::Changed);
         Ok(())
     }
@@ -1466,7 +1498,6 @@ impl Engine {
                 .relay_urls()
                 .next()
                 .map(|u| u.to_string()),
-            relay_fallback: self.inner.relay_fallback.load(Ordering::Relaxed),
             members,
         })
     }
@@ -2852,66 +2883,184 @@ fn first_host(subnet: Ipv4Addr) -> [u8; 4] {
     [o[0], o[1], o[2], 2]
 }
 
-/// Custom-relay fallback watchdog. Only acts when custom relays are configured
-/// with [`RelayPolicy::Preferred`]: after ~30s without a connection to any of
-/// the user's relays it *adds* the public iroh relays to the live map, and it
-/// removes them again as soon as a custom relay is connected (the endpoint
-/// re-probes every relay in the map on its ~20-26s net-report cycle, and the
-/// user's relay wins the home-relay pick once it answers again — typically it
-/// is the lowest-latency one, and the path selector prefers it regardless).
+/// Push a relay map into the **live** endpoint, off the request path.
 ///
-/// [`RelayPolicy::Preferred`]: crate::relays::RelayPolicy::Preferred
-async fn relay_watchdog(inner: &Arc<Inner>) {
-    use crate::relays::{self, RelayPolicy};
-    use iroh::Watcher as _;
+/// `Endpoint::insert_relay`/`remove_relay` are not the cheap setters they look
+/// like. Each one mutates the shared relay map synchronously and then *awaits*
+/// iroh's socket-actor channel (bounded, 256) to nudge it into re-probing. That
+/// actor can be blocked indefinitely: it awaits a per-remote `RemoteStateActor`
+/// (inbox of 16), which awaits `poll_send` on the relay transport, which returns
+/// `Pending` forever while the relay client for a path can't drain — e.g. a
+/// token-gated relay that answers `401`. One peer stuck on a dead relay path
+/// therefore backs up the whole chain and every `insert_relay` blocks with it.
+/// That is the hang that made `relay add` sit for 20+ minutes.
+///
+/// So: a timeout per call, never one for the batch. The map mutation happens on
+/// the first poll, before the blocking await — so a timed-out call has *still*
+/// updated the map, and it's only the "re-probe now" nudge that was lost. But
+/// the calls run in sequence, so without a per-call timeout the first stuck one
+/// would stop every later insert from being polled at all, and the map would be
+/// left half-written. The whole pass is idempotent, which is what lets us just
+/// retry it.
+///
+/// If every attempt times out we say so ([`RelayApply::Failed`]) instead of
+/// claiming success: the map is right, but nothing re-probed it, and the actor
+/// that would have is wedged — so a restart is the honest advice.
+///
+/// [`RelayApply::Failed`]: crate::relays::RelayApply::Failed
+async fn apply_relay_map(
+    inner: Arc<Inner>,
+    generation: u64,
+    desired: Vec<Arc<iroh::RelayConfig>>,
+    stale: Vec<iroh::RelayUrl>,
+) {
+    use crate::relays::RelayApply;
 
-    const TICK: Duration = Duration::from_secs(10);
-    const MISSES_TO_FALL_BACK: u32 = 3;
+    /// Generous next to the sub-millisecond this takes on a healthy endpoint,
+    /// but short enough that a wedged actor doesn't hold the pass for minutes.
+    const CALL_TIMEOUT: Duration = Duration::from_secs(3);
+    const ATTEMPTS: u32 = 3;
+    const RETRY_BACKOFF: Duration = Duration::from_secs(5);
 
-    let mut status = inner.node.endpoint.home_relay_status();
-    let mut misses = 0u32;
-    loop {
-        tokio::time::sleep(TICK).await;
-        let settings = inner.relay_settings.read().unwrap().clone();
-        let custom_urls: std::collections::BTreeSet<iroh::RelayUrl> = match settings.urls() {
-            Ok(urls) if !urls.is_empty() && settings.mode == RelayPolicy::Preferred => {
-                urls.into_iter().collect()
-            }
-            _ => {
-                misses = 0;
-                continue;
-            }
-        };
-        let connected_custom = status
-            .get()
-            .iter()
-            .any(|s| s.is_connected() && custom_urls.contains(s.url()));
+    // One applier at a time, so two rapid edits can't interleave.
+    let _guard = inner.relay_apply_lock.lock().await;
+    // A newer edit landed while we waited: its applier owns the endpoint now.
+    if inner.relay_apply_gen.load(Ordering::SeqCst) != generation {
+        return;
+    }
 
-        if connected_custom {
-            misses = 0;
-            if inner.relay_fallback.swap(false, Ordering::Relaxed) {
-                for cfg in relays::default_relay_configs() {
-                    if !custom_urls.contains(&cfg.url) {
-                        inner.node.endpoint.remove_relay(&cfg.url).await;
-                    }
-                }
-                tracing::info!("custom relay reachable again; leaving the public relays");
-                let _ = inner.events.send(EngineEvent::Changed);
-            }
-        } else if !inner.relay_fallback.load(Ordering::Relaxed) {
-            misses += 1;
-            if misses >= MISSES_TO_FALL_BACK {
-                for cfg in relays::default_relay_configs() {
-                    inner.node.endpoint.insert_relay(cfg.url.clone(), cfg).await;
-                }
-                inner.relay_fallback.store(true, Ordering::Relaxed);
-                tracing::warn!(
-                    "no custom relay reachable for {}s; falling back to the public relays",
-                    TICK.as_secs() * MISSES_TO_FALL_BACK as u64
-                );
-                let _ = inner.events.send(EngineEvent::Changed);
+    let ep = &inner.node.endpoint;
+    let mut last_stuck = String::new();
+    for attempt in 1..=ATTEMPTS {
+        let mut stuck: Vec<String> = Vec::new();
+
+        // Insert before removing, so the map is never momentarily empty.
+        for cfg in &desired {
+            if tokio::time::timeout(CALL_TIMEOUT, ep.insert_relay(cfg.url.clone(), cfg.clone()))
+                .await
+                .is_err()
+            {
+                stuck.push(cfg.url.to_string());
             }
         }
+        for url in &stale {
+            if tokio::time::timeout(CALL_TIMEOUT, ep.remove_relay(url))
+                .await
+                .is_err()
+            {
+                stuck.push(url.to_string());
+            }
+        }
+
+        if stuck.is_empty() {
+            tracing::info!(
+                "relay map applied to the live endpoint: {} relay(s)",
+                desired.len()
+            );
+            // Superseded mid-settle → the newer applier owns the state; say nothing.
+            if let Some(apply) = settle_home_relay(&inner, generation, &desired).await {
+                *inner.relay_apply.write().unwrap() = apply;
+                let _ = inner.events.send(EngineEvent::Changed);
+            }
+            return;
+        }
+
+        last_stuck = stuck.join(", ");
+        tracing::warn!(
+            "iroh's socket actor did not acknowledge the relay map (attempt {attempt}/{ATTEMPTS}); \
+             stuck on: {last_stuck}"
+        );
+        if inner.relay_apply_gen.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        if attempt < ATTEMPTS {
+            tokio::time::sleep(RETRY_BACKOFF).await;
+        }
+    }
+
+    let reason = format!(
+        "iroh's socket actor is blocked and never acknowledged the new relay map \
+         (stuck on: {last_stuck}); restart the daemon to apply it"
+    );
+    tracing::error!("{reason}");
+    *inner.relay_apply.write().unwrap() = RelayApply::Failed { reason };
+    let _ = inner.events.send(EngineEvent::Changed);
+}
+
+/// After the relay map is updated, wait for the endpoint's **home relay** — the
+/// single relay it advertises, and the only one peers can reach us at — to land
+/// inside the new map.
+///
+/// This exists because iroh keeps a home relay that has been removed from the
+/// map. When a net-report finds nothing reachable it *re-injects* the current
+/// home relay as the preferred one:
+///
+/// ```ignore
+/// // iroh-1.0.0/src/socket.rs, handle_net_report_report()
+/// if r.preferred_relay.is_none() && let Some(my_relay) = self.sock.my_relay() {
+///     r.preferred_relay.replace(my_relay);
+/// }
+/// ```
+///
+/// so the home relay only ever *moves*, never clears. Removing it from the map
+/// stops it being probed or dialed afresh, but an endpoint already homed on it
+/// stays there until some other relay wins a report. Concretely: switch to
+/// [`RelayPolicy::Only`] while your custom relay is unreachable, and the daemon
+/// keeps using the public relay it was already on — exactly what `Only` promises
+/// it won't. We can't force it off (iroh exposes no API for that), so we say so
+/// and tell the user to restart, rather than reporting a success we didn't get.
+///
+/// Returns `None` if a newer settings change superseded us while we waited — it
+/// owns the reported state now, and it is waiting on the lock we hold, so we must
+/// not sit out the rest of the settle window.
+///
+/// [`RelayPolicy::Only`]: crate::relays::RelayPolicy::Only
+async fn settle_home_relay(
+    inner: &Arc<Inner>,
+    generation: u64,
+    desired: &[Arc<iroh::RelayConfig>],
+) -> Option<crate::relays::RelayApply> {
+    use crate::relays::RelayApply;
+    use iroh::Watcher as _;
+
+    /// The endpoint re-probes on a ~20-26s net-report cycle, so give it two.
+    const SETTLE: Duration = Duration::from_secs(60);
+    const POLL: Duration = Duration::from_millis(500);
+
+    let desired_urls: std::collections::BTreeSet<&iroh::RelayUrl> =
+        desired.iter().map(|c| &c.url).collect();
+    let deadline = tokio::time::Instant::now() + SETTLE;
+
+    loop {
+        if inner.relay_apply_gen.load(Ordering::SeqCst) != generation {
+            return None;
+        }
+        // The home relay, if we have one. No home relay is fine: it means no
+        // relay is reachable, not that we're using one we shouldn't be.
+        let home = inner
+            .node
+            .endpoint
+            .home_relay_status()
+            .get()
+            .into_iter()
+            .find(|s| s.is_connected())
+            .map(|s| s.url().clone());
+        let Some(home) = home else {
+            return Some(RelayApply::Applied);
+        };
+        if desired_urls.contains(&home) {
+            return Some(RelayApply::Applied);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let reason = format!(
+                "still using relay {home}, which is no longer configured — iroh keeps a \
+                 home relay until another one takes over, and none of the configured \
+                 relays answered. Restart the daemon to leave it."
+            );
+            tracing::warn!("{reason}");
+            return Some(RelayApply::Failed { reason });
+        }
+        tokio::time::sleep(POLL).await;
     }
 }
 

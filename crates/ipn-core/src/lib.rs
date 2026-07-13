@@ -34,7 +34,7 @@ use std::sync::OnceLock;
 pub use engine::{AuditEntry, Engine, EngineEvent, MemberView, NetworkStatus};
 pub use network::{NetworkSecret, Ticket};
 pub use node::IrohNode;
-pub use relays::{RelayPolicy, RelayServer, RelaySettings};
+pub use relays::{RelayApply, RelayPolicy, RelayServer, RelaySettings, RelayStatus};
 pub use roster::{Config, Entry, InviteKind, Member, Op, Role, Roster};
 
 /// Process-wide override for this device's shared display name (the value other

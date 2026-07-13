@@ -213,11 +213,41 @@ where
     Ok(())
 }
 
+/// Serve one client connection, **cancelling the in-flight request if the client
+/// goes away**. Without that, a `^C`'d or hung-up client left the request running
+/// to completion against a socket nobody would ever read — a request that blocks
+/// for minutes (as `SetRelays` used to) stranded the task, and the daemon only
+/// noticed the dead socket when it finally tried to write the reply.
+///
+/// The reader gets its own task rather than being raced in the `select!` below:
+/// `read_frame` reads a length prefix and then the body, so cancelling it
+/// mid-frame would swallow bytes and desync the stream. Here it is never
+/// cancelled, and its channel closing *is* the "client hung up" signal.
 async fn handle_conn(engine: Engine, stream: transport::Stream) -> Result<()> {
     let (mut reader, writer) = tokio::io::split(stream);
     let writer = Arc::new(tokio::sync::Mutex::new(writer));
 
-    while let Some(frame) = read_frame(&mut reader).await? {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Frame>(8);
+    let reader_task = tokio::spawn(async move {
+        while let Ok(Some(frame)) = read_frame(&mut reader).await {
+            if tx.send(frame).await.is_err() {
+                break; // handler gone
+            }
+        }
+        // EOF or a read error: dropping `tx` closes `rx`, which is how the
+        // handler below learns the client is gone.
+    });
+
+    // Frames that arrived while an earlier request was still being handled.
+    let mut queued: std::collections::VecDeque<Frame> = std::collections::VecDeque::new();
+    loop {
+        let frame = match queued.pop_front() {
+            Some(f) => f,
+            None => match rx.recv().await {
+                Some(f) => f,
+                None => break,
+            },
+        };
         let Message::Request(req) = frame.body else {
             continue;
         };
@@ -226,10 +256,27 @@ async fn handle_conn(engine: Engine, stream: transport::Stream) -> Result<()> {
             let st = engine.status().await.ok();
             send_event(&writer, IpcEvent::Status(st)).await?;
             subscribe_loop(&engine, &writer).await;
-            return Ok(());
+            break;
         }
 
-        let resp = handle_request(&engine, req).await;
+        let work = handle_request(&engine, req);
+        tokio::pin!(work);
+        let resp = loop {
+            tokio::select! {
+                resp = &mut work => break Some(resp),
+                next = rx.recv() => match next {
+                    // A pipelined request; keep it for the next turn of the loop.
+                    Some(f) => queued.push_back(f),
+                    // The client hung up. Dropping `work` cancels it.
+                    None => break None,
+                },
+            }
+        };
+        let Some(resp) = resp else {
+            tracing::debug!("client disconnected mid-request; cancelled it");
+            break;
+        };
+
         let mut w = writer.lock().await;
         write_frame(
             &mut *w,
@@ -241,6 +288,8 @@ async fn handle_conn(engine: Engine, stream: transport::Stream) -> Result<()> {
         .await?;
         w.flush().await?;
     }
+
+    reader_task.abort();
     Ok(())
 }
 
@@ -444,7 +493,7 @@ async fn handle_request(engine: &Engine, req: IpcRequest) -> IpcResponse {
             Ok(()) => IpcResponse::Ok,
             Err(e) => to_err(e),
         },
-        IpcRequest::GetRelays => IpcResponse::Relays(engine.relay_settings()),
+        IpcRequest::GetRelays => IpcResponse::Relays(engine.relay_status()),
         IpcRequest::SetRelays { settings } => match engine.set_relay_settings(settings).await {
             Ok(()) => IpcResponse::Ok,
             Err(e) => to_err(e),

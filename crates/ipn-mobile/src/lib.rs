@@ -143,6 +143,96 @@ pub struct AuditEntry {
     pub action: String,
 }
 
+// --- Custom relay servers ---------------------------------------------------
+//
+// Same per-device model as the desktop: `relays.cbor` in the app data dir, not
+// distributed through the roster. The phone was the only device that *couldn't*
+// be put on the self-hosted relay (there was no mobile surface at all), which is
+// the only reason it stayed reachable through the July 2026 partition.
+
+/// One user-configured relay server.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RelayServer {
+    pub url: String,
+    pub token: Option<String>,
+}
+
+/// How custom relays combine with the public iroh relays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum RelayPolicy {
+    /// Custom relays carry the traffic, but the public relays stay in the map so
+    /// peers that don't have your relay can still reach you.
+    Preferred,
+    /// Custom relays exclusively. Peers without the relay cannot reach you.
+    Only,
+}
+
+/// How far the last relay-settings change got in reaching the live endpoint.
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum RelayApply {
+    Applied,
+    Pending,
+    Failed { reason: String },
+}
+
+/// The device's relay configuration plus its apply state.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RelayStatus {
+    pub servers: Vec<RelayServer>,
+    pub mode: RelayPolicy,
+    pub apply: RelayApply,
+}
+
+impl From<ipn_core::RelayServer> for RelayServer {
+    fn from(s: ipn_core::RelayServer) -> Self {
+        RelayServer { url: s.url, token: s.token }
+    }
+}
+
+impl From<RelayServer> for ipn_core::RelayServer {
+    fn from(s: RelayServer) -> Self {
+        ipn_core::RelayServer { url: s.url, token: s.token }
+    }
+}
+
+impl From<ipn_core::RelayPolicy> for RelayPolicy {
+    fn from(m: ipn_core::RelayPolicy) -> Self {
+        match m {
+            ipn_core::RelayPolicy::Preferred => RelayPolicy::Preferred,
+            ipn_core::RelayPolicy::Only => RelayPolicy::Only,
+        }
+    }
+}
+
+impl From<RelayPolicy> for ipn_core::RelayPolicy {
+    fn from(m: RelayPolicy) -> Self {
+        match m {
+            RelayPolicy::Preferred => ipn_core::RelayPolicy::Preferred,
+            RelayPolicy::Only => ipn_core::RelayPolicy::Only,
+        }
+    }
+}
+
+impl From<ipn_core::RelayApply> for RelayApply {
+    fn from(a: ipn_core::RelayApply) -> Self {
+        match a {
+            ipn_core::RelayApply::Applied => RelayApply::Applied,
+            ipn_core::RelayApply::Pending => RelayApply::Pending,
+            ipn_core::RelayApply::Failed { reason } => RelayApply::Failed { reason },
+        }
+    }
+}
+
+impl From<ipn_core::RelayStatus> for RelayStatus {
+    fn from(s: ipn_core::RelayStatus) -> Self {
+        RelayStatus {
+            servers: s.settings.servers.into_iter().map(Into::into).collect(),
+            mode: s.settings.mode.into(),
+            apply: s.apply.into(),
+        }
+    }
+}
+
 impl From<ipn_core::AuditEntry> for AuditEntry {
     fn from(e: ipn_core::AuditEntry) -> Self {
         AuditEntry {
@@ -419,6 +509,31 @@ impl MobileEngine {
         Ok(self
             .rt
             .block_on(async { self.inner.engine.set_note(&node_id, note).await })?)
+    }
+
+    // --- Custom relay servers ---------------------------------------------
+
+    /// This device's relay configuration and how far it got in reaching the live
+    /// endpoint.
+    pub fn relay_status(&self) -> RelayStatus {
+        self.inner.engine.relay_status().into()
+    }
+
+    /// Replace this device's relay configuration. Returns once it is saved; it
+    /// reaches the running endpoint in the background, so re-read
+    /// [`relay_status`](Self::relay_status) for the verdict rather than assuming
+    /// this call means "applied".
+    ///
+    /// Per-device, like the desktop: the same servers and tokens have to be set
+    /// on every member, or the ones without them can't be reached.
+    pub fn set_relay_settings(&self, servers: Vec<RelayServer>, mode: RelayPolicy) -> Result<()> {
+        let settings = ipn_core::RelaySettings {
+            servers: servers.into_iter().map(Into::into).collect(),
+            mode: mode.into(),
+        };
+        Ok(self
+            .rt
+            .block_on(async { self.inner.engine.set_relay_settings(settings).await })?)
     }
 
     // --- VpnService coordination ------------------------------------------

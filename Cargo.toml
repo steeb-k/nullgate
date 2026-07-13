@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/steeb-k/nullgate"
@@ -37,6 +37,7 @@ tokio = { version = "1", features = ["full"] }
 futures-lite = "2"
 async-channel = "2"
 bytes = "1"
+arc-swap = "1"
 
 # --- gui (binding versions track installed GTK 4.22 / libadwaita 1.9) ---
 gtk = { package = "gtk4", version = "0.11", features = ["v4_10"] }

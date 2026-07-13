@@ -20,6 +20,9 @@ iroh-mdns-address-lookup.workspace = true
 tokio.workspace = true
 futures-lite.workspace = true
 bytes.workspace = true
+# Lock-free reads for the path selector's preferred-relay set: it is consulted
+# on the send path, where a blocking std RwLock write would park a tokio worker.
+arc-swap.workspace = true
 
 # serialization
 serde.workspace = true

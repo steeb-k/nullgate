@@ -78,6 +78,17 @@ who can read it. Keystore-backing the tokens is possible future hardening. Relay
 **per-device** and never distributed through the roster, so adding a relay can't be used by one
 member to redirect another member's traffic.
 
+That isolation has a sharp edge worth stating plainly: **a token-gated relay makes a device
+unreachable to peers that don't have the token.** A relay rejects clients without its token (`401`),
+and an endpoint advertises only its single *home relay* — so a device homed on your relay is
+reachable there and nowhere else. A peer without the token has no relay path to it, and since
+hole-punching is relay-coordinated, usually no direct path either. Deploy a custom relay to **every**
+member with the same URL and token, or to none: half-and-half is the one configuration that cannot
+work, and it fails while the relay itself is perfectly healthy (this is not hypothetical — it
+partitioned the author's network for three days). `RelayPolicy::Preferred` keeps the public relays in
+the map alongside the custom one specifically to bound this failure; `Only` removes that safety net
+by design.
+
 ## Privilege boundary (GUI ↔ daemon)
 The GUI runs unprivileged and never holds elevation; all privileged work lives in the daemon. The
 one place the GUI reaches for privilege is its **Start/Restart service** banner button, and it does

@@ -3,40 +3,47 @@
 //! public number-0 relays.
 //!
 //! Two policies:
-//! - [`RelayPolicy::Preferred`] — the endpoint runs on the custom relays alone;
-//!   if none of them is reachable the engine's watchdog *adds* the public n0
-//!   relays as a fallback, and removes them again once a custom relay is back
-//!   (see `relay_watchdog` in [`crate::engine`]). Best of both: your relay
-//!   carries traffic whenever it's up, but a dead relay never strands you.
-//! - [`RelayPolicy::Only`] — custom relays only, never fall back. For networks
-//!   that must not touch third-party infrastructure.
+//! - [`RelayPolicy::Preferred`] — the relay map holds the custom relays **and**
+//!   the public n0 relays, with [`PreferMyRelaySelector`] biasing traffic onto
+//!   the custom ones. The device stays reachable on the public relays, so a
+//!   relay that is down — or a peer that simply hasn't been configured with it
+//!   yet — never partitions the network.
+//! - [`RelayPolicy::Only`] — custom relays alone, never contact the public
+//!   relays. For networks that must not touch third-party infrastructure.
+//!   A peer without the relay (or without its token) then cannot reach this
+//!   device at all: that is the point, and the cost.
 //!
 //! With no custom relays configured the endpoint uses the iroh defaults and the
 //! policy is irrelevant.
 //!
+//! `Preferred` used to mean "custom relays *alone*, with a watchdog that adds
+//! the public relays back if none of them answers". That watchdog could only
+//! ever observe *our* reachability to the relay, never a peer's — so a
+//! token-gated relay configured on some devices and not others made those
+//! groups mutually invisible while the relay was perfectly healthy. Keeping
+//! both sets in the map removes the failure mode instead of trying to detect
+//! it. The trade-off: the custom relay may lose the home-relay election to a
+//! lower-latency public one, so some inbound traffic can still land on a public
+//! relay. Reachability beats relay purity; `Only` remains for anyone who
+//! disagrees.
+//!
 //! The module also provides [`PreferMyRelaySelector`], a [`PathSelector`] that
 //! mirrors iroh's default biased-RTT policy but slots relay paths through one
 //! of the *user's* relays above relay paths through anything else. Direct
-//! (hole-punched) paths still always win over any relay.
+//! (hole-punched) paths still always win over any relay. Under `Preferred` the
+//! map now genuinely holds both tiers, which is the case the selector was
+//! written for.
 //!
 //! Settings are per-device (`relays.cbor` in the data dir) and are **not**
 //! distributed through the roster: every member that should use the relay has
-//! to configure it (a relay with a token rejects clients that don't have it,
-//! which would also break relay-assisted hole-punching with unconfigured
-//! peers).
+//! to configure it, with the same URL and token.
 
-use std::{
-    collections::BTreeSet,
-    path::Path,
-    sync::{Arc, RwLock},
-    time::Duration,
-};
+use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{bail, Context, Result};
+use arc_swap::ArcSwap;
 use iroh::{
-    endpoint::transports::{
-        FourTuple, PathSelection, PathSelectionContext, PathSelector,
-    },
+    endpoint::transports::{FourTuple, PathSelection, PathSelectionContext, PathSelector},
     RelayConfig, RelayUrl,
 };
 use serde::{Deserialize, Serialize};
@@ -58,12 +65,45 @@ pub struct RelayServer {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelayPolicy {
-    /// Use the custom relays; fall back to the public relays only while none
-    /// of the custom ones is reachable.
+    /// Keep the custom relays **and** the public relays in the map, preferring
+    /// the custom ones for traffic. Stays reachable to peers that don't have
+    /// the relay configured (or lack its token).
     #[default]
     Preferred,
     /// Use the custom relays exclusively — never contact the public relays.
+    /// Peers without the relay cannot reach this device.
     Only,
+}
+
+/// How far a relay-settings change has got in reaching the **live** endpoint.
+///
+/// The settings are saved and reported the moment the user asks for them, but
+/// pushing them into a running endpoint means talking to iroh's socket actor,
+/// which can stall (see [`crate::engine::Engine::set_relay_settings`]). This is
+/// how the CLI and GUI say what actually happened instead of assuming success.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayApply {
+    /// The endpoint has the new relay map and has been told to re-probe.
+    #[default]
+    Applied,
+    /// Saved; still being pushed into the endpoint.
+    Pending,
+    /// The endpoint's socket actor never acknowledged the change. The relay map
+    /// itself was still updated (iroh mutates it synchronously), but nothing
+    /// re-probed it, so a daemon restart is the reliable way to make it take
+    /// effect.
+    Failed { reason: String },
+}
+
+/// The relay configuration plus how far it has got in being applied — what
+/// `GetRelays` answers with.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayStatus {
+    #[serde(default)]
+    pub settings: RelaySettings,
+    #[serde(default)]
+    pub apply: RelayApply,
 }
 
 /// The persisted relay configuration for this device.
@@ -117,9 +157,38 @@ impl RelaySettings {
     pub fn urls(&self) -> Result<Vec<RelayUrl>> {
         Ok(self.relay_configs()?.into_iter().map(|c| c.url).collect())
     }
+
+    /// The relay map this device should be running: exactly what belongs in the
+    /// endpoint, for both startup ([`crate::node`]) and a live edit
+    /// ([`crate::engine::Engine::set_relay_settings`]).
+    ///
+    /// - no custom servers → the public defaults
+    /// - [`RelayPolicy::Only`] → the custom servers alone
+    /// - [`RelayPolicy::Preferred`] → the custom servers **plus** every public
+    ///   default that isn't already one of them
+    ///
+    /// Custom entries come first and win on a URL collision, so a custom relay
+    /// that happens to be a public one keeps its auth token.
+    pub fn desired_relay_configs(&self) -> Result<Vec<Arc<RelayConfig>>> {
+        let custom = self.relay_configs()?;
+        if custom.is_empty() {
+            return Ok(default_relay_configs());
+        }
+        let custom_urls: BTreeSet<RelayUrl> = custom.iter().map(|c| c.url.clone()).collect();
+        let mut out: Vec<Arc<RelayConfig>> = custom.into_iter().map(Arc::new).collect();
+        if self.mode == RelayPolicy::Preferred {
+            out.extend(
+                default_relay_configs()
+                    .into_iter()
+                    .filter(|c| !custom_urls.contains(&c.url)),
+            );
+        }
+        Ok(out)
+    }
 }
 
-/// The public iroh relays used as the default map and as the fallback set.
+/// The public iroh relays — the default map, and (under
+/// [`RelayPolicy::Preferred`]) the always-reachable half of a custom one.
 pub(crate) fn default_relay_configs() -> Vec<Arc<RelayConfig>> {
     iroh::endpoint::default_relay_mode().relay_map().relays()
 }
@@ -146,16 +215,21 @@ pub fn save_relay_settings(data_dir: &Path, settings: &RelaySettings) -> Result<
 /// Shared, live-updatable set of relay URLs the selector should prefer. The
 /// engine updates it when the user edits relay settings; the endpoint holds
 /// the selector (and thus this handle) for its whole lifetime.
+///
+/// [`ArcSwap`] rather than a lock: [`contains`](Self::contains) runs on the
+/// send path (the selector is consulted per datagram), and a `std::sync::RwLock`
+/// write there would park a whole tokio worker thread — the writer is
+/// `set_relay_settings`, called from inside an async fn.
 #[derive(Clone, Debug, Default)]
-pub struct PreferredRelays(Arc<RwLock<BTreeSet<RelayUrl>>>);
+pub struct PreferredRelays(Arc<ArcSwap<BTreeSet<RelayUrl>>>);
 
 impl PreferredRelays {
     pub fn set(&self, urls: BTreeSet<RelayUrl>) {
-        *self.0.write().expect("poisoned") = urls;
+        self.0.store(Arc::new(urls));
     }
 
     fn contains(&self, url: &RelayUrl) -> bool {
-        self.0.read().expect("poisoned").contains(url)
+        self.0.load().contains(url)
     }
 }
 
@@ -355,6 +429,94 @@ mod tests {
         ] {
             assert!(bad.relay_configs().is_err(), "{bad:?} should fail");
         }
+    }
+
+    /// The regression this whole rework exists for: under `Preferred` the map
+    /// must hold the public relays *as well as* the custom one, so a peer that
+    /// hasn't been given the relay (or its token) can still reach us.
+    #[test]
+    fn desired_map_matrix() {
+        let defaults: BTreeSet<RelayUrl> =
+            default_relay_configs().iter().map(|c| c.url.clone()).collect();
+        assert!(!defaults.is_empty(), "iroh should ship default relays");
+
+        let urls = |s: &RelaySettings| -> BTreeSet<RelayUrl> {
+            s.desired_relay_configs()
+                .unwrap()
+                .iter()
+                .map(|c| c.url.clone())
+                .collect()
+        };
+        let custom = |mode| RelaySettings {
+            servers: vec![RelayServer {
+                url: "https://mine.example.com:8443".into(),
+                token: Some("tok".into()),
+            }],
+            mode,
+        };
+        let mine: RelayUrl = "https://mine.example.com:8443".parse().unwrap();
+
+        // No custom relays: the defaults, whatever the mode says.
+        for mode in [RelayPolicy::Preferred, RelayPolicy::Only] {
+            let s = RelaySettings { servers: vec![], mode };
+            assert_eq!(urls(&s), defaults);
+        }
+        // Only: the custom relay alone.
+        assert_eq!(urls(&custom(RelayPolicy::Only)), [mine.clone()].into());
+        // Preferred: the custom relay *and* every default.
+        let want: BTreeSet<RelayUrl> = defaults
+            .iter()
+            .cloned()
+            .chain([mine.clone()])
+            .collect();
+        assert_eq!(urls(&custom(RelayPolicy::Preferred)), want);
+    }
+
+    /// A custom relay that *is* one of the public ones must appear once, and
+    /// keep its auth token (the custom entry wins the collision).
+    #[test]
+    fn desired_map_dedups_a_custom_url_that_is_a_default() {
+        let dup = default_relay_configs()[0].url.clone();
+        let s = RelaySettings {
+            servers: vec![RelayServer {
+                url: dup.to_string(),
+                token: Some("tok".into()),
+            }],
+            mode: RelayPolicy::Preferred,
+        };
+        let cfgs = s.desired_relay_configs().unwrap();
+        let matching: Vec<_> = cfgs.iter().filter(|c| c.url == dup).collect();
+        assert_eq!(matching.len(), 1, "the shared URL must not be listed twice");
+        assert!(
+            matching[0].auth_token.is_some(),
+            "the custom entry (with its token) must win"
+        );
+        assert_eq!(cfgs.len(), default_relay_configs().len());
+    }
+
+    /// Under the new `Preferred` the selector finally sees the mixed map it was
+    /// written for: our relay outranks a public one that is in the map with it.
+    #[test]
+    fn my_relay_wins_in_a_mixed_map() {
+        let s = RelaySettings {
+            servers: vec![RelayServer {
+                url: "https://mine.example.com".into(),
+                token: None,
+            }],
+            mode: RelayPolicy::Preferred,
+        };
+        let map = s.desired_relay_configs().unwrap();
+        assert!(map.len() > 1, "Preferred keeps the public relays too");
+
+        // The selector prefers the custom URLs only — not the defaults that
+        // share the map with them (see `node.rs`).
+        let p = preferred(&["https://mine.example.com"]);
+        let public = map.iter().find(|c| c.url.as_str() != "https://mine.example.com/").unwrap();
+        let mine_key = (path_tier(&relay_path("https://mine.example.com"), &p), biased_rtt(&relay_path("https://mine.example.com"), ms(90)));
+        let public_path = relay_path(public.url.as_str());
+        let public_key = (path_tier(&public_path, &p), biased_rtt(&public_path, ms(10)));
+        assert!(mine_key < public_key, "my relay outranks a faster public one");
+        assert!(should_switch(public_key, mine_key));
     }
 
     #[test]

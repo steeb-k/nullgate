@@ -94,17 +94,18 @@ fun AppScreen(
             TopAppBar(
                 title = { Text("Nullgate") },
                 actions = {
-                    if (status != null) {
-                        IconButton(onClick = { menuOpen = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "Menu")
-                        }
-                        NetworkMenu(
-                            expanded = menuOpen,
-                            status = status!!,
-                            onDismiss = { menuOpen = false },
-                            onAction = { dialog = it; menuOpen = false },
-                        )
+                    // Shown even with no network: relay settings are device-level,
+                    // and a token-gated relay may be what this device needs in
+                    // order to reach the network it is about to join.
+                    IconButton(onClick = { menuOpen = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "Menu")
                     }
+                    NetworkMenu(
+                        expanded = menuOpen,
+                        status = status,
+                        onDismiss = { menuOpen = false },
+                        onAction = { dialog = it; menuOpen = false },
+                    )
                 },
             )
         },
@@ -352,17 +353,29 @@ private fun MemberRow(m: MemberView, onClick: () -> Unit) {
  * (`ipn-gui/src/main.rs`). Peer: view-only tier (Activity log, Leave). Controller:
  * also Peer ticket, Settings, Rename. Originator: everything. The engine enforces
  * the same rules server-side; this just avoids offering actions it would reject.
+ *
+ * With no network yet (`status == null`) only the device-level entries show —
+ * relay servers, which may be exactly what this device needs configured *before*
+ * it can reach the network it is about to join.
  */
 @Composable
 private fun NetworkMenu(
     expanded: Boolean,
-    status: NetworkStatus,
+    status: NetworkStatus?,
     onDismiss: () -> Unit,
     onAction: (Dialog) -> Unit,
 ) {
-    val isPeer = status.selfRole == "peer"
-    val isOriginator = status.isOriginator
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        if (status == null) {
+            DropdownMenuItem(
+                text = { Text("Relay servers") },
+                onClick = { onAction(Dialog.Relays) },
+            )
+            return@DropdownMenu
+        }
+
+        val isPeer = status.selfRole == "peer"
+        val isOriginator = status.isOriginator
         // Peer-level tickets & self-device settings: Controllers and the originator only.
         if (!isPeer) {
             DropdownMenuItem(text = { Text("Join ticket") }, onClick = { onAction(Dialog.PeerTicket) })
@@ -377,6 +390,8 @@ private fun NetworkMenu(
         if (!isPeer) {
             DropdownMenuItem(text = { Text("Settings") }, onClick = { onAction(Dialog.Settings) })
         }
+        // Device-level, so every tier gets it (a Peer runs its own relay config too).
+        DropdownMenuItem(text = { Text("Relay servers") }, onClick = { onAction(Dialog.Relays) })
         // Network administration: rename is Controller+; the rest are originator-only.
         // The whole block is Controller+, so its leading divider rides on `!isPeer`.
         if (!isPeer) {

@@ -16,18 +16,41 @@ the membership list is a small signed document every member replicates.
   free public relays; a device can instead use **custom relay servers** (self-hosted iroh relays,
   `ipn-core/src/relays.rs`), configured per device in `relays.cbor` with an optional per-relay
   access token (sent as `Authorization: Bearer` on the relay handshake; the relay rejects clients
-  without it). Two policies: **preferred** — the endpoint runs on the custom relays alone, and a
-  watchdog (`engine::relay_watchdog`, 10 s tick) *adds* the public relays to the live relay map
-  after ~30 s with no custom relay connected, removing them again once one reconnects (iroh
-  re-probes every relay on its ~20-26 s net-report cycle, so recovery is automatic); or **only** —
-  never touch the public relays. A custom `PathSelector` (`relays::PreferMyRelaySelector`,
-  installed at bind via iroh's `unstable-custom-transports` feature) mirrors iroh's default
-  biased-RTT path choice but ranks a path through one of the user's relays above any other relay —
-  direct paths still always win. Settings changes apply to the **live** endpoint
-  (`Endpoint::insert_relay`/`remove_relay` + the selector's shared preferred-set), so no daemon
-  restart is needed. The settings are deliberately **not** distributed through the roster: every
-  member configures its own (a token-protected relay would reject unconfigured members anyway,
-  which would also break relay-assisted hole-punching with them).
+  without it). `RelaySettings::desired_relay_configs()` is the single source of the relay map, used
+  both at bind (`node.rs`) and on a live edit. Two policies:
+  | policy | relay map | effect |
+  |--------|-----------|--------|
+  | **preferred** (default) | custom **+** the public defaults | your relay carries the traffic, but you can still reach — and be reached by — peers that don't have it |
+  | **only** | custom alone | third-party infrastructure is never contacted; peers without the relay (or its token) cannot reach you |
+
+  A custom `PathSelector` (`relays::PreferMyRelaySelector`, installed at bind via iroh's
+  `unstable-custom-transports` feature) mirrors iroh's default biased-RTT path choice but ranks a
+  path through one of the *user's* relays (tier 1) above any other relay (tier 2); direct paths
+  (tier 0) still always win. Under `preferred` the map genuinely holds both tiers, which is the case
+  the selector exists for. The preferred-set holds the **custom URLs only**, never the defaults that
+  share the map with them.
+
+  **An endpoint advertises exactly one relay — its home relay** — picked by latency from the map
+  (`Endpoint::addr()` carries a single relay URL). So the map is what *we* can reach peers through;
+  the home relay is what peers can reach *us* through. That asymmetry is the whole reason a
+  partially-deployed token-gated relay partitions a network, and why `preferred` keeps the public
+  relays: without them a configured device has no transport that can reach a peer homed on a public
+  relay, and the peer can't reach its token-gated one either — mutually invisible, with the relay
+  perfectly healthy. (This replaced a `relay_watchdog` that watched `home_relay_status()` — i.e.
+  "can *I* reach my relay", which was always yes. It could never observe "my peers can't reach my
+  relay", so it never fired. It is gone.)
+
+  Settings changes are saved, swapped in memory, and returned **immediately**; the new map is pushed
+  into the live endpoint by a serialized background task (`engine::apply_relay_map`), whose progress
+  is reported as `RelayApply::{Applied,Pending,Failed}` on `GetRelays`. It must be off the request
+  path: `Endpoint::insert_relay`/`remove_relay` await iroh's bounded socket-actor channel, and that
+  actor can block indefinitely behind a peer stuck sending to an unreachable relay — see the
+  gotchas in `CLAUDE.md`. No daemon restart is needed, but we verify that rather than assert it
+  (`engine::settle_home_relay`), because iroh keeps a home relay that has left the map until another
+  relay takes over.
+
+  The settings are deliberately **not** distributed through the roster: every member configures its
+  own. That is a real hazard — see the security note — so both UIs warn about it.
 - **UI change events are gated and coalesced.** The engine emits a `Changed` event only when
   something user-visible actually changed (the presence tracker's mutators report whether they
   changed displayed state; the maintenance tick keeps a dirty flag, with an unconditional event

@@ -41,8 +41,9 @@ rules), `membership.rs` (roster over iroh-docs; `load_entries` also feeds the de
 access" block), `presence.rs` (gossip presence + access/hidden flags), `relays.rs` (custom relay
 servers: per-device `relays.cbor` w/ optional Bearer tokens, preferred/only policy, the
 `PreferMyRelaySelector` path selector — needs iroh's `unstable-custom-transports` feature, pinned
-in the root `Cargo.toml`; fallback watchdog lives in `engine.rs`; settings apply to the live
-endpoint via `insert_relay`/`remove_relay`, no daemon restart).
+in the root `Cargo.toml`; `desired_relay_configs()` is the single source of the relay map for both
+bind and live edits; the map is pushed to the live endpoint off the request path by
+`engine::apply_relay_map`).
 
 Roles: **Originator** = master-key possession (orthogonal to roster role); roster roles are
 **Peer** and **Controller**. Controllers add/remove Peers + issue Peer invites; only the
@@ -128,6 +129,34 @@ added.
 ## Gotchas
 - **TUN needs privilege.** Tests and headless runs set `NULLGATE_DISABLE_TUN=1`; the engine honors
   it and skips creating a real interface. Always set it in automated tests.
+- **`insert_relay`/`remove_relay` can block for *minutes*. Never `.await` them on a request path.**
+  They look like setters but each awaits iroh's bounded socket-actor channel (`mpsc::channel(256)`),
+  and that actor blocks on a per-remote `RemoteStateActor` (inbox of 16), which blocks on
+  `poll_send` into the relay transport, which returns `Pending` **forever** while a relay client
+  can't drain — e.g. a token-gated relay answering `401`. One peer stuck on a dead relay path backs
+  up the entire chain. This is what made `relay add` hang for 20+ minutes on a live mesh (and only
+  there: an *idle* endpoint has no peer traffic to wedge the actor, so it reproduces in 4 ms). Two
+  consequences: (1) the endpoint work belongs in a spawned task (`engine::apply_relay_map`) with a
+  **per-call** timeout — never one timeout for the batch, because the calls are sequential and the
+  map mutation happens on the *first poll* before the blocking await, so one stuck call would stop
+  every later insert from ever being polled and leave the map half-written; (2) the whole pass is
+  idempotent, which is what lets it simply be retried.
+- **A relay map change does not evict the home relay you're already on.** iroh advertises exactly
+  one relay (the home relay, picked by latency), and when a net-report finds nothing reachable it
+  *re-injects the current home relay* as the preferred one (`handle_net_report_report` in
+  `iroh-1.0.0/src/socket.rs`), so the home relay only ever **moves** — it never clears. Removing it
+  from the map stops it being probed or dialed afresh, but an endpoint already homed on it stays put
+  until some other relay wins a report. So switching to `RelayPolicy::Only` while your custom relay
+  is unreachable leaves the daemon on the public relay it was already using — the opposite of what
+  `Only` promises. There's no iroh API to force it off; `engine::settle_home_relay` therefore waits
+  ~60 s and reports `RelayApply::Failed` ("restart the daemon") rather than claiming a success we
+  didn't get. Don't "simplify" that away.
+- **Relay settings are per-device, and a half-deployed token-gated relay partitions the network.**
+  They are not distributed through the roster. A device homed on your relay is reachable *only*
+  there, so a peer without the token has no relay path to it and (hole-punching being
+  relay-coordinated) usually no direct one either — while the relay is perfectly healthy. This
+  actually happened, for three days. `Preferred` keeps the public relays in the map to bound it;
+  both UIs warn; don't remove the warning.
 - **The tray + notifications live in the agent, NOT the daemon or the GUI.** A system service can't
   draw UI in the user session (Windows session 0, root systemd/LaunchDaemon), so the tray can't be
   in the daemon; and tying it to the GUI made it vanish on close/crash. The persistent user-session

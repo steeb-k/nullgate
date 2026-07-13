@@ -73,20 +73,27 @@ impl IrohNode {
         // installed unconditionally — with no preferred relays it behaves like
         // iroh's default — because it can't be swapped after bind, while the
         // preferred set and the relay map can both change at runtime.
+        //
+        // The map gets the *desired* set (under `Preferred` that's the custom
+        // relays plus the public ones), but the selector's preferred set gets
+        // the **custom URLs only**: its job is to bias traffic onto the user's
+        // relays, so telling it to prefer the defaults too would be a no-op.
         let relay_settings = crate::relays::load_relay_settings(data_dir);
         let preferred_relays = crate::relays::PreferredRelays::default();
         builder = builder.path_selector(Arc::new(crate::relays::PreferMyRelaySelector::new(
             preferred_relays.clone(),
         )));
-        match relay_settings.relay_configs() {
-            Ok(configs) if !configs.is_empty() => {
-                preferred_relays.set(configs.iter().map(|c| c.url.clone()).collect());
-                builder = builder.relay_mode(RelayMode::Custom(RelayMap::from_iter(configs)));
+        match (relay_settings.urls(), relay_settings.desired_relay_configs()) {
+            (Ok(custom), Ok(desired)) if !custom.is_empty() => {
+                preferred_relays.set(custom.into_iter().collect());
+                builder = builder.relay_mode(RelayMode::Custom(RelayMap::from_iter(desired)));
             }
-            Ok(_) => {} // no custom relays; keep the N0 defaults
+            (Ok(_), Ok(_)) => {} // no custom relays; keep the N0 defaults
             // A broken relays.cbor must not brick connectivity: fall back to
             // the defaults and let the user re-save valid settings.
-            Err(e) => tracing::warn!("ignoring invalid relay settings: {e:#}"),
+            (Err(e), _) | (_, Err(e)) => {
+                tracing::warn!("ignoring invalid relay settings: {e:#}")
+            }
         }
         match iroh_mdns_address_lookup::MdnsAddressLookup::builder().build(endpoint_id) {
             Ok(mdns) => builder = builder.address_lookup(mdns),

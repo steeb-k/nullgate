@@ -26,7 +26,7 @@ use gtk::glib;
 use ipn_ipc::transport::{self, read_frame, write_frame};
 use ipn_ipc::{
     AuditEntry, Frame, IpcEvent, IpcRequest, IpcResponse, MemberView, Message, NetworkStatus,
-    RelayPolicy, RelayServer, RelaySettings,
+    RelayApply, RelayPolicy, RelayServer, RelaySettings, RelayStatus,
 };
 use tokio::runtime::Handle;
 
@@ -135,10 +135,12 @@ enum UiMsg {
     /// The administration activity log to display in its flyout.
     AuditLog(Vec<AuditEntry>),
     Toast(String),
-    /// The device's relay settings, to render in the "Relay servers" flyout.
-    Relays(RelaySettings),
-    /// A relay-settings write succeeded; re-fetch so the open panel shows the
-    /// applied state (sequenced after the write, unlike a parallel GetRelays).
+    /// The device's relay settings + apply state, to render in the "Relay
+    /// servers" flyout.
+    Relays(RelayStatus),
+    /// A relay-settings write was accepted; re-fetch so the open panel shows the
+    /// state the daemon actually reached (sequenced after the write, unlike a
+    /// parallel GetRelays).
     RelaysSaved,
     /// Re-render the current status (e.g. after a pending-join change).
     Refresh,
@@ -1026,12 +1028,15 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
                             apply_status(&ui, &page, s, &net, &window, &pending, &state);
                         }
                     }
-                    UiMsg::Relays(settings) => {
-                        render_relays(&ui.relays_box, &settings, &net, &window);
+                    UiMsg::Relays(status) => {
+                        render_relays(&ui.relays_box, &status, &net, &window);
                         ui.open("relays");
                     }
                     UiMsg::RelaysSaved => {
-                        toast_overlay.add_toast(adw::Toast::new("Relay settings applied"));
+                        // "Saved", not "applied" — the daemon is still pushing it
+                        // into the live endpoint, and the panel we re-fetch below
+                        // is what reports whether that actually landed.
+                        toast_overlay.add_toast(adw::Toast::new("Relay settings saved"));
                         open_relays(&net);
                     }
                     UiMsg::Toast(t) => toast_overlay.add_toast(adw::Toast::new(&t)),
@@ -1439,7 +1444,6 @@ struct MemberRowUi {
 /// the panel most likely to be open while connection telemetry churns.
 struct DiagPanel {
     home_relay: adw::ActionRow,
-    fallback: adw::ActionRow,
     connections: adw::ActionRow,
     routing: adw::ActionRow,
 }
@@ -1607,19 +1611,13 @@ fn build_main_page(ui: &Ui, net: &Net, window: &adw::ApplicationWindow) -> Rc<Ma
     let diag = {
         let g = adw::PreferencesGroup::new();
         let home_relay = property_row("Home relay", "—");
-        let fallback = property_row(
-            "Relay fallback",
-            "custom relays unreachable — temporarily using the public relays",
-        );
-        fallback.set_visible(false);
         let connections = property_row("Connections", "—");
         let routing = property_row("Routing (TUN)", "—");
         g.add(&home_relay);
-        g.add(&fallback);
         g.add(&connections);
         g.add(&routing);
         ui.diag_box.append(&g);
-        DiagPanel { home_relay, fallback, connections, routing }
+        DiagPanel { home_relay, connections, routing }
     };
 
     Rc::new(MainPage {
@@ -1802,7 +1800,6 @@ fn focus_row_by_title(root: &impl IsA<gtk::Widget>, title: &str) -> bool {
 fn update_diag(d: &DiagPanel, s: &NetworkStatus) {
     d.home_relay
         .set_subtitle(&s.home_relay.clone().unwrap_or_else(|| "—".into()));
-    d.fallback.set_visible(s.relay_fallback);
     let direct = s.members.iter().filter(|m| !m.is_self && m.online && m.direct == Some(true)).count();
     let relayed = s.members.iter().filter(|m| !m.is_self && m.online && m.direct == Some(false)).count();
     d.connections
@@ -1838,8 +1835,39 @@ fn set_relays(net: &Net, settings: RelaySettings) {
 /// The "Relay servers" flyout: the configured custom relays (with add/remove),
 /// and the policy for combining them with the public relays. Device-level —
 /// available with or without a network.
-fn render_relays(b: &gtk::Box, s: &RelaySettings, net: &Net, window: &adw::ApplicationWindow) {
+fn render_relays(b: &gtk::Box, st: &RelayStatus, net: &Net, window: &adw::ApplicationWindow) {
     clear_box(b);
+    let s = &st.settings;
+
+    // A relay set on *some* devices is the one configuration that cannot work:
+    // the configured ones advertise it as their home relay, and a peer that
+    // doesn't have it (or its token) has no way to reach them. Say so up front —
+    // this is the warning whose absence cost the network three days.
+    if !s.servers.is_empty() {
+        let warn = adw::Banner::builder()
+            .title("Set these same relays — same URL and token — on every device")
+            .revealed(true)
+            .build();
+        b.append(&warn);
+    }
+
+    // What the daemon actually managed to do with the last change.
+    match &st.apply {
+        RelayApply::Applied => {}
+        RelayApply::Pending => {
+            let g = adw::PreferencesGroup::new();
+            g.add(&property_row("Applying…", "Saved; still reaching the running daemon"));
+            b.append(&g);
+        }
+        RelayApply::Failed { reason } => {
+            let banner = adw::Banner::builder()
+                .title("Saved, but not applied — restart the Nullgate daemon")
+                .revealed(true)
+                .build();
+            banner.set_tooltip_text(Some(reason));
+            b.append(&banner);
+        }
+    }
 
     let list = adw::PreferencesGroup::new();
     {
@@ -1889,11 +1917,11 @@ fn render_relays(b: &gtk::Box, s: &RelaySettings, net: &Net, window: &adw::Appli
     if !s.servers.is_empty() {
         let policy = adw::PreferencesGroup::new();
         let combo = adw::ComboRow::builder()
-            .title("If my relays are unreachable")
-            .subtitle("Applies while none of the custom relays answers")
+            .title("Public iroh relays")
+            .subtitle("Keeping them means peers without your relay can still reach you")
             .model(&gtk::StringList::new(&[
-                "Fall back to the public relays",
-                "Stay offline from relays (my relays only)",
+                "Keep them as a backup (recommended)",
+                "Never use them (my relays only)",
             ]))
             .build();
         combo.set_selected(match s.mode {
@@ -3062,7 +3090,6 @@ mod mode_tests {
             routing: true,
             online: true,
             home_relay: Some("https://relay.example".into()),
-            relay_fallback: false,
             members,
         }
     }
@@ -3079,7 +3106,6 @@ mod mode_tests {
         s.members[0].last_seen = 999_999;
         s.members[0].online = false;
         s.home_relay = None;
-        s.relay_fallback = true;
         assert_eq!(admin_signature(&s, &[]), base);
         // ...but its own inputs do move it.
         s.frozen = true;
