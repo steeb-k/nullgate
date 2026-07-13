@@ -40,7 +40,10 @@ pub use ipn_core::admission::sas_words;
 /// they got in reaching the live endpoint) rather than bare [`RelaySettings`], so
 /// clients stop claiming a write succeeded before it has. `NetworkStatus` lost
 /// `relay_fallback` along with the watchdog that set it.
-pub const PROTO_VERSION: u32 = 5;
+///
+/// v6 (0.3.4): added [`IpcRequest::ProbeRelay`], so a client can check a relay
+/// (and its token) before saving it.
+pub const PROTO_VERSION: u32 = 6;
 
 /// Where the GUI and daemon rendezvous. On Windows this path is only hashed into
 /// a named-pipe name; on Unix it's the actual socket path (fixed, not `$TMPDIR`,
@@ -128,6 +131,11 @@ pub enum IpcRequest {
     /// in the background, so poll `GetRelays` for the [`RelayApply`] state
     /// rather than treating `Ok` as "applied".
     SetRelays { settings: RelaySettings },
+    /// Check one relay server — and the token, if given — by connecting to it
+    /// from a throwaway endpoint. `Ok` means the relay accepted these
+    /// credentials. Takes seconds, and never touches the live endpoint. Lets a
+    /// client refuse to save a token the relay would reject.
+    ProbeRelay { url: String, token: Option<String> },
     /// Upgrade this connection to receive pushed [`IpcEvent`]s.
     Subscribe,
 }

@@ -1,5 +1,6 @@
 //! Headless IPC client for `ipn-daemon` — scripting + testing without the GUI.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -95,13 +96,12 @@ enum Cmd {
 enum RelayCmd {
     /// Show the configured relay servers and policy.
     Show,
-    /// Add a custom relay server (or update its token if already present).
+    /// Add a custom relay server (or update its token if already present). The
+    /// access token, if the relay has one, is asked for — never passed as an
+    /// argument.
     Add {
         /// `https://host[:port]` of the relay.
         url: String,
-        /// Access token, sent as `Authorization: Bearer <token>`.
-        #[arg(long)]
-        token: Option<String>,
     },
     /// Remove a custom relay server by URL.
     Remove { url: String },
@@ -281,8 +281,9 @@ async fn cmd_relay(socket: &Path, cmd: RelayCmd) -> Result<()> {
             }
             return Ok(());
         }
-        RelayCmd::Add { url, token } => {
+        RelayCmd::Add { url } => {
             let mut s = fetch().await?.settings;
+            let token = ask_for_token(socket, &url).await?;
             s.servers.retain(|r| r.url != url);
             s.servers.push(RelayServer { url, token });
             s
@@ -335,6 +336,66 @@ async fn cmd_relay(socket: &Path, cmd: RelayCmd) -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+}
+
+/// Ask for the relay's access token, and refuse to save one the relay rejects.
+///
+/// The token is *asked for* rather than taken as an argument because argv is not
+/// private: every other user of the machine can read it out of `ps`, and the
+/// shell writes the whole command line to its history file. So it is read with
+/// no echo, from the terminal — and only ever leaves this process over the local
+/// IPC socket. A blank answer means the relay has no token.
+///
+/// A token the relay won't accept is worse than no relay at all: the device
+/// homes on a relay it cannot use, peers that lack the token have no relay path
+/// to it, and — hole-punching being relay-coordinated — usually no direct one
+/// either. That is the partition described in `CLAUDE.md`, and it is silent. So
+/// the token is checked against the relay before it is saved, and a rejection
+/// asks again rather than writing it and hoping.
+async fn ask_for_token(socket: &Path, url: &str) -> Result<Option<String>> {
+    // With stdin piped there is no terminal to hide the token from, and nobody
+    // to re-ask: read the line as it comes, and fail rather than loop.
+    let interactive = std::io::stdin().is_terminal();
+    loop {
+        let token = read_token(url, interactive)?;
+        if token.is_empty() {
+            return Ok(None);
+        }
+
+        println!("Checking the token against {url}…");
+        let probe = IpcRequest::ProbeRelay {
+            url: url.to_string(),
+            token: Some(token.clone()),
+        };
+        match oneshot_request(socket, probe)
+            .await
+            .map_err(|e| anyhow::anyhow!("can't reach daemon at {}: {e}", socket.display()))?
+        {
+            IpcResponse::Ok => {
+                println!("The relay accepted the token.");
+                return Ok(Some(token));
+            }
+            IpcResponse::Err(e) if interactive => {
+                println!("{e}\nTry again, or press Ctrl-C to cancel.");
+            }
+            IpcResponse::Err(e) => bail!("{e}"),
+            other => bail!("unexpected daemon response: {other:?}"),
+        }
+    }
+}
+
+/// Read the token without echoing it. `rpassword` reads the terminal directly
+/// (`/dev/tty` / `CONIN$`), which a piped stdin doesn't have — hence the split.
+fn read_token(url: &str, interactive: bool) -> Result<String> {
+    let prompt = format!("Access token for {url} (leave blank if it has none): ");
+    let raw = if interactive {
+        rpassword::prompt_password(&prompt)?
+    } else {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        line
+    };
+    Ok(raw.trim().to_string())
 }
 
 /// Report how far the settings got in reaching the running endpoint.

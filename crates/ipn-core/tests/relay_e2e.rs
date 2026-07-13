@@ -345,6 +345,52 @@ async fn a_custom_relay_on_one_device_does_not_partition_it_from_a_peer_without_
     Ok(())
 }
 
+/// The check behind the CLI's token prompt: a relay that accepts us must probe
+/// OK, and one we cannot reach must fail — within the timeout, not by hanging.
+///
+/// A *reachable* relay is a real public one: an in-process test relay serves a
+/// self-signed cert, and `probe_relay` builds an ordinary endpoint (no
+/// `insecure_skip_verify`, which is behind iroh's `test-utils` feature), exactly
+/// as the daemon does. The half this cannot cover — that a relay refuses a
+/// *wrong* token — needs a real token-gated relay, and
+/// `examples/relay_probe.rs` phase 4 is what proves it there.
+#[tokio::test]
+#[ignore = "opens real iroh endpoints (incl. the public n0 relays); run with --ignored"]
+async fn probe_accepts_a_reachable_relay_and_rejects_an_unreachable_one() -> Result<()> {
+    let public = public_relays()
+        .into_iter()
+        .next()
+        .context("no public relay to probe")?;
+    ipn_core::relays::probe_relay(
+        &RelayServer { url: public.to_string(), token: None },
+        Duration::from_secs(20),
+    )
+    .await
+    .context("a public relay with no token must probe OK")?;
+
+    // Discard port: nothing answers, which is what a wrong host — or a relay
+    // that hangs up on a bad token — looks like from here.
+    let started = std::time::Instant::now();
+    let err = ipn_core::relays::probe_relay(
+        &RelayServer { url: "https://127.0.0.1:9".into(), token: Some("nope".into()) },
+        Duration::from_secs(5),
+    )
+    .await
+    .expect_err("an unreachable relay must not probe OK");
+    ensure!(
+        started.elapsed() < Duration::from_secs(15),
+        "the probe must give up on its own timeout, not hang: took {:?}",
+        started.elapsed()
+    );
+    // The caller re-prompts on this, so it has to say what the user can act on.
+    let msg = format!("{err:#}");
+    ensure!(
+        msg.contains("token") && msg.contains("127.0.0.1:9"),
+        "the failure must name the relay and implicate the token: {msg}"
+    );
+    Ok(())
+}
+
 /// The hang. Under a live mesh — where iroh's socket actor is busy with real
 /// peer traffic — `set_relay_settings` must return promptly and the map must
 /// actually change. This used to block for 20+ minutes inside `insert_relay`,

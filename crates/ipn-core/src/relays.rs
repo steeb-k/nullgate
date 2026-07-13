@@ -208,6 +208,64 @@ pub fn save_relay_settings(data_dir: &Path, settings: &RelaySettings) -> Result<
     Ok(())
 }
 
+/// Check that a relay server accepts us **with these credentials**, before the
+/// setting is saved and pushed into the live endpoint.
+///
+/// A relay does not answer "is this token good?" over plain HTTP: the token is
+/// read during the websocket upgrade and the access check runs *after* it, so a
+/// rejected client gets a `101` like everyone else and is dropped inside the
+/// stream. The only way to ask the question is to be a relay client — bind an
+/// endpoint whose relay map holds nothing but this relay and see whether it
+/// comes online (`examples/relay_probe.rs` proves both halves of this against a
+/// real token-gated relay, including that a token-less client is refused).
+///
+/// This binds its **own** endpoint, so it never touches the running engine's —
+/// it cannot wedge the live socket actor the way an `insert_relay` against a
+/// relay that answers `401` does (see the gotchas in `CLAUDE.md`).
+///
+/// A wrong token and an unreachable relay are indistinguishable from out here —
+/// both are simply "never came online" — so the error says both.
+pub async fn probe_relay(server: &RelayServer, timeout: Duration) -> Result<()> {
+    // Reuse the real parse/validate path: a malformed URL or a token that can't
+    // ride in an HTTP header fails here, with no socket opened.
+    let settings = RelaySettings {
+        servers: vec![server.clone()],
+        mode: RelayPolicy::Only,
+    };
+    let cfg = settings
+        .relay_configs()?
+        .into_iter()
+        .next()
+        .context("no relay to probe")?;
+
+    // Minimal preset: no discovery services, and a map of exactly one relay, so
+    // coming online can only mean *this* relay accepted us.
+    let ep = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .relay_mode(iroh::RelayMode::Custom(iroh::RelayMap::from(cfg)))
+        .bind()
+        .await
+        .context("bind a probe endpoint")?;
+    let online = tokio::time::timeout(timeout, ep.online()).await.is_ok();
+    ep.close().await;
+
+    if !online {
+        let secs = timeout.as_secs();
+        if server.token.is_some() {
+            bail!(
+                "{} did not accept this token within {secs}s — the token may be wrong, \
+                 or the relay unreachable",
+                server.url
+            );
+        }
+        bail!(
+            "no relay connection to {} within {secs}s — it may be unreachable, \
+             or it may require an access token",
+            server.url
+        );
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Path selection
 // ---------------------------------------------------------------------------
@@ -533,5 +591,27 @@ mod tests {
         save_relay_settings(&dir, &s).unwrap();
         assert_eq!(load_relay_settings(&dir), s);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The probe rejects input it could never connect with *before* it binds an
+    /// endpoint — the caller (the CLI's token prompt) re-asks on failure, and
+    /// making it wait out a timeout to be told the token has a space in it would
+    /// be a poor way to spend 15 seconds. The connecting half is e2e-only.
+    #[tokio::test]
+    async fn probe_rejects_unusable_input_without_dialing() {
+        let started = std::time::Instant::now();
+        for bad in [
+            RelayServer { url: "not a url".into(), token: Some("tok".into()) },
+            RelayServer {
+                url: "https://relay.example.com".into(),
+                token: Some("has space".into()),
+            },
+        ] {
+            assert!(probe_relay(&bad, Duration::from_secs(15)).await.is_err());
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the pre-flight checks must fail without opening a socket"
+        );
     }
 }

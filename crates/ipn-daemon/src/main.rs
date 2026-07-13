@@ -382,6 +382,10 @@ async fn send_event(
     Ok(())
 }
 
+/// How long a relay probe waits for the relay to accept it. Generous: a relay
+/// that is up but slow to answer must not be reported as a bad token.
+const PROBE_RELAY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 async fn handle_request(engine: &Engine, req: IpcRequest) -> IpcResponse {
     use std::net::Ipv4Addr;
     let to_err = |e: anyhow::Error| IpcResponse::Err(format!("{e:#}"));
@@ -498,6 +502,17 @@ async fn handle_request(engine: &Engine, req: IpcRequest) -> IpcResponse {
             Ok(()) => IpcResponse::Ok,
             Err(e) => to_err(e),
         },
+        // Safe to await on the request path, unlike the relay calls next door:
+        // the probe binds its own endpoint (bounded by its own timeout) and takes
+        // no engine lock, so a relay that hangs up on it stalls nothing but this
+        // one connection — which the client is deliberately waiting on anyway.
+        IpcRequest::ProbeRelay { url, token } => {
+            let server = ipn_core::relays::RelayServer { url, token };
+            match ipn_core::relays::probe_relay(&server, PROBE_RELAY_TIMEOUT).await {
+                Ok(()) => IpcResponse::Ok,
+                Err(e) => to_err(e),
+            }
+        }
         IpcRequest::Subscribe => IpcResponse::Ok,
     }
 }

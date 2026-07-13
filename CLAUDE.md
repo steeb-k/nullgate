@@ -43,7 +43,9 @@ servers: per-device `relays.cbor` w/ optional Bearer tokens, preferred/only poli
 `PreferMyRelaySelector` path selector — needs iroh's `unstable-custom-transports` feature, pinned
 in the root `Cargo.toml`; `desired_relay_configs()` is the single source of the relay map for both
 bind and live edits; the map is pushed to the live endpoint off the request path by
-`engine::apply_relay_map`).
+`engine::apply_relay_map`; `probe_relay()` validates a relay + token from a *throwaway* endpoint
+before saving — never the live one, and it is the only way to test a token, which is checked after
+the websocket upgrade, not on it).
 
 Roles: **Originator** = master-key possession (orthogonal to roster role); roster roles are
 **Peer** and **Controller**. Controllers add/remove Peers + issue Peer invites; only the

@@ -49,6 +49,15 @@ the membership list is a small signed document every member replicates.
   (`engine::settle_home_relay`), because iroh keeps a home relay that has left the map until another
   relay takes over.
 
+  A relay (and its token, if any) can be **checked before it is saved**: `relays::probe_relay()`
+  binds a throwaway endpoint whose map holds nothing but that relay and waits for it to come online,
+  which is the only way to ask the question — the token rides on the websocket upgrade and the
+  relay's access check runs *after* it, so a rejected client gets the same `101` as anyone else and
+  is dropped inside the stream. It never touches the running endpoint, so it can't wedge the socket
+  actor. Exposed as `IpcRequest::ProbeRelay`; `nullgate-cli relay add` uses it to refuse a token the
+  relay won't take. A wrong token and an unreachable relay are indistinguishable from outside, and
+  the error says so.
+
   The settings are deliberately **not** distributed through the roster: every member configures its
   own. That is a real hazard — see the security note — so both UIs warn about it.
 - **UI change events are gated and coalesced.** The engine emits a `Changed` event only when

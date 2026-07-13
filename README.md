@@ -110,13 +110,6 @@ or restart) under `%ProgramData%\Nullgate\logs` on Windows, `/var/log/nullgate` 
 back within a couple of minutes of one of these quick restarts won't spam everyone with a "came
 online" notification.
 
-When you put a Mac to sleep it leaves the network first, and rejoins when you wake it back up. This
-matters more than it sounds: macOS quietly wakes itself every few minutes to run background
-maintenance, even on battery and even with "wake for network access" turned off. Without this, each
-of those invisible wakes would look to everyone else like your laptop rejoining the network — a
-notification every few minutes, all night. (Windows and Linux don't do this yet; a sleeping device
-there still goes quiet, just via a connection timeout rather than a clean goodbye.)
-
 ### Headless / CLI
 No GUI? Drive the same daemon with `nullgate-cli` — GTK isn't
 needed. The verification code is shown as **words** instead of emojis, so you can read it aloud or
@@ -136,11 +129,17 @@ To add a device to a network: run `nullgate-cli watch` on an existing member, `n
 Custom relay servers work here too:
 
 ```sh
-nullgate-cli relay add https://relay.example.com:8443 --token <token>
+nullgate-cli relay add https://relay.example.com:8443
 nullgate-cli relay mode only        # never use the public relays (`preferred` is the default)
 nullgate-cli relay show             # what's configured, and whether it's applied
 nullgate-cli relay clear            # back to the public relays
 ```
+
+`relay add` **asks** for the access token rather than taking it on the command line, so it never
+lands in your shell history or in the list of running processes that everyone else on the machine
+can read. Type it in (nothing is echoed), or press Enter if your relay doesn't use one. If you do
+give a token, Nullgate tries it against the relay before saving it, and asks again if the relay
+won't take it — a token the relay rejects would quietly cut this device off from the network.
 
 Each command reports whether the change reached the running daemon, so "saved" and "applied" are
 never confused. Run the same commands on **every** device — relay settings are per-device.

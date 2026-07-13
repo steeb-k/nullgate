@@ -16,3 +16,4 @@ ipn-ipc = { path = "../ipn-ipc", features = ["transport"] }
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true
+rpassword.workspace = true

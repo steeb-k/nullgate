@@ -85,6 +85,9 @@ tracing-appender = "0.2"
 thiserror = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+# No-echo prompt: relay access tokens are asked for, never passed as arguments
+# (argv is world-readable on this machine — `ps`, and the shell's history file).
+rpassword = "7"
 
 [profile.release]
 opt-level = "z"

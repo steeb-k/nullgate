@@ -5,6 +5,21 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 
+### Changed
+- **`nullgate-cli relay add` no longer takes `--token`; it asks for the token.** Passing a secret as
+  an argument put it in the shell's history file and in every other local user's view of `ps` — a
+  leak to exactly the readers that root ownership of the data dir is meant to exclude. It is now
+  read with echo off (from the terminal, or from stdin when piped, so scripting still works), and a
+  blank answer means the relay has no token.
+
+### Added
+- **A relay token is checked against the relay before it is saved.** `relay add` connects to the
+  relay with the token from a throwaway endpoint (`relays::probe_relay`, exposed as
+  `IpcRequest::ProbeRelay`; IPC protocol → v6) and asks again if the relay won't accept it. Saving a
+  token the relay rejects is not a small mistake: the device ends up homed on a relay it cannot use,
+  and peers lose both the relay path and — hole-punching being relay-coordinated — the direct one.
+  The probe binds its own endpoint, so it cannot wedge the live one.
+
 ## [0.3.3] - 2026-07-13
 > **Behaviour change.** `preferred` (the default relay policy) now keeps the public iroh relays
 > in the relay map *alongside* your custom relay, instead of replacing them. Devices that were on
