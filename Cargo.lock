@@ -3135,6 +3135,8 @@ dependencies = [
  "libadwaita",
  "libc",
  "qrcode",
+ "serde",
+ "serde_json",
  "tauri-winrt-notification",
  "tokio",
  "tracing",

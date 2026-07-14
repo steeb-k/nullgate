@@ -38,6 +38,10 @@ devices find and authenticate each other directly (built on [iroh](https://www.i
   visible to everyone on the network.
 - **Per-device privacy switches.** On your own device you can **disable remote access** (you can
   still reach others, but no one can reach you) or **hide from the member list**.
+- **Action buttons.** Give a device a button — "RDP", "SSH", "Web" — in the colour of your
+  choosing, and it appears on that device's row and in the tray menu. Clicking it runs the command
+  you picked, with the device's address filled in for you, optionally in a terminal window. Set up
+  per machine, so the command can be whatever suits the computer you're sitting at.
 - **Sleeps when your laptop does.** A device that goes to sleep leaves the network on the way down
   and rejoins when you wake it, so it won't keep announcing itself while it's shut in your bag.
 - **You stay in control.** Remove a device, freeze the network so no one new can join, or
@@ -85,6 +89,27 @@ icon (or **Open Nullgate**) to bring the window back; notifications open it too.
 has **Restart Nullgate daemon** if the background service ever needs a nudge, and **Quit Nullgate**
 to disconnect and close it entirely. The tray runs from a tiny helper that starts with your login,
 so it's there whether or not the window is open.
+
+**Giving a device an action button:** open a device from the member list and choose **Action
+button**. Give it a short label ("RDP"), pick one of eight colours, and type the command to run —
+for example `mstsc /v:{ip}` on Windows, or `ssh me@{ip}` elsewhere. `{ip}` is filled in with that
+device's Nullgate address when you click; `{name}`, `{hostname}` and `{node_id}` work too.
+
+Tick **Open in a terminal window** for anything that needs a console — `ssh`, a script, a
+command whose output you want to read. Without it the command runs on its own, with no window,
+which is what a graphical program like Remote Desktop wants. On Windows the terminal is a normal
+console window; on Linux it's whichever terminal you have installed (or `$TERMINAL`); on macOS it's
+Terminal.app. Either way the window belongs to the command, and closes when the command finishes.
+
+The button then appears on that device's row, and in the tray menu as "*device* (*label*)", so you
+can reach the machine without opening the window at all. The command runs as a program with its
+arguments — not through a shell — so pipes and `&&` don't apply; put double quotes around anything
+containing spaces. It stays clickable when the device is offline (just dimmed), since only you know
+whether your command needs the other end awake.
+
+Action buttons are **set up per machine and never shared**: the command that reaches a device from
+your Windows desktop isn't the one that reaches it from your Mac, so each computer keeps its own.
+They live in a plain `actions.json` in Nullgate's config folder if you'd rather edit them by hand.
 
 **Using your own relay server:** when two devices can't connect directly, traffic is carried by a
 relay — normally the free public ones run by the iroh project. If you host your own iroh relay, open

@@ -1,5 +1,7 @@
-//! System tray integration for the **tray agent** (`--agent`). Three actions:
-//! **Open Nullgate**, **Restart Nullgate daemon**, and **Quit Nullgate**.
+//! System tray integration for the **tray agent** (`--agent`). Three fixed actions:
+//! **Open Nullgate**, **Restart Nullgate daemon**, and **Quit Nullgate** — plus a
+//! dynamic section above them holding one entry per device that has an optional
+//! action configured (see `actions.rs`).
 //!
 //! On Windows/macOS we use the `tray-icon` crate. On Linux that crate's backend
 //! pulls in GTK3 + libappindicator, which clashes with this GTK4 app, so Linux
@@ -9,7 +11,22 @@
 //! The tray lives in the lightweight user-session agent, not the GUI, so it
 //! survives the GUI window being closed or crashing. Each action is delivered to
 //! the agent over a dedicated `async-channel`; the agent decides what to do
-//! (launch the GUI, restart the privileged daemon, or disconnect + quit).
+//! (launch the GUI, restart the privileged daemon, disconnect + quit, or spawn a
+//! device's command).
+//!
+//! The device section is *pushed*, not pulled: the agent sends a fresh list on an
+//! `async-channel` whenever the member list or the actions file changes, and each
+//! backend rebuilds its menu from it. Neither backend can hand out a live menu
+//! handle across threads, so this is the seam.
+
+/// One entry in the tray's per-device section.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TrayItem {
+    /// Which member to run the action for; echoed back on [`TrayActions::run_action`].
+    pub node_id: String,
+    /// What the entry reads — "workshop-pc (RDP)".
+    pub text: String,
+}
 
 /// Where the tray sends each menu action. The agent owns the receiving ends.
 #[derive(Clone)]
@@ -20,6 +37,8 @@ pub struct TrayActions {
     pub restart_daemon: async_channel::Sender<()>,
     /// Disconnect from the network and quit the agent.
     pub quit: async_channel::Sender<()>,
+    /// Run one device's action button, by NodeId.
+    pub run_action: async_channel::Sender<String>,
 }
 
 // Tray icon (the only one): the "gate" mark, used as-is on every theme. The 64px
@@ -28,32 +47,62 @@ const TRAY_PNG: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../img/nullgate-tray-icon-64.png"));
 
 #[cfg(any(windows, target_os = "macos"))]
-pub fn install(actions: TrayActions) {
+pub fn install(actions: TrayActions, items_rx: async_channel::Receiver<Vec<TrayItem>>) {
+    use std::collections::HashMap;
+
     use gtk::glib;
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
     use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
     // Make native popups (the tray context menu) honor the app's color scheme.
     #[cfg(windows)]
     set_preferred_app_mode(adw::StyleManager::default().is_dark());
 
-    let open = MenuItem::new("Open Nullgate", true, None);
-    let restart = MenuItem::new("Restart Nullgate daemon", true, None);
-    let quit = MenuItem::new("Quit Nullgate", true, None);
-    let menu = Menu::new();
-    let _ = menu.append(&open);
-    let _ = menu.append(&restart);
-    let _ = menu.append(&PredefinedMenuItem::separator());
-    let _ = menu.append(&quit);
-    let open_id = open.id().clone();
-    let restart_id = restart.id().clone();
-    let quit_id = quit.id().clone();
+    /// The whole menu, rebuilt from scratch whenever the device section changes.
+    /// Rebuilding mints new `MenuId`s, so the ids the event poll matches on are
+    /// returned alongside it rather than captured once.
+    struct Ids {
+        open: MenuId,
+        restart: MenuId,
+        quit: MenuId,
+        /// Menu id → NodeId, for the device section.
+        devices: HashMap<MenuId, String>,
+    }
 
+    fn build_menu(items: &[TrayItem]) -> (Menu, Ids) {
+        let menu = Menu::new();
+        let mut devices = HashMap::new();
+        // Device actions come first, in their own section above the fixed items.
+        for item in items {
+            let mi = MenuItem::new(&item.text, true, None);
+            devices.insert(mi.id().clone(), item.node_id.clone());
+            let _ = menu.append(&mi);
+        }
+        if !items.is_empty() {
+            let _ = menu.append(&PredefinedMenuItem::separator());
+        }
+        let open = MenuItem::new("Open Nullgate", true, None);
+        let restart = MenuItem::new("Restart Nullgate daemon", true, None);
+        let quit = MenuItem::new("Quit Nullgate", true, None);
+        let _ = menu.append(&open);
+        let _ = menu.append(&restart);
+        let _ = menu.append(&PredefinedMenuItem::separator());
+        let _ = menu.append(&quit);
+        let ids = Ids {
+            open: open.id().clone(),
+            restart: restart.id().clone(),
+            quit: quit.id().clone(),
+            devices,
+        };
+        (menu, ids)
+    }
+
+    let (menu, mut ids) = build_menu(&[]);
     let mut builder = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("Nullgate");
     if let Some(icon) = load_tray_icon() {
         builder = builder.with_icon(icon);
     }
-    let _icon = match builder.build() {
+    let icon = match builder.build() {
         Ok(i) => i,
         Err(e) => {
             tracing::warn!("tray unavailable: {e}");
@@ -63,9 +112,25 @@ pub fn install(actions: TrayActions) {
     tracing::info!("system tray installed");
 
     // tray-icon delivers events on global channels; poll them on the GTK loop. The
-    // icon is moved into the closure so it stays alive.
+    // icon is moved into the closure so it stays alive — and so the menu can be
+    // swapped when the device section changes.
+    let mut shown: Vec<TrayItem> = Vec::new();
     glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
-        let _keep = &_icon;
+        // Coalesce: only the newest list matters, and rebuilding the menu while its
+        // popup is open would be wasted work anyway.
+        let mut latest = None;
+        while let Ok(items) = items_rx.try_recv() {
+            latest = Some(items);
+        }
+        if let Some(items) = latest {
+            if items != shown {
+                let (menu, new_ids) = build_menu(&items);
+                icon.set_menu(Some(Box::new(menu)));
+                ids = new_ids;
+                shown = items;
+            }
+        }
+
         let mut open_window = false;
         let mut restart_daemon = false;
         let mut quit = false;
@@ -83,12 +148,14 @@ pub fn install(actions: TrayActions) {
             }
         }
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
-            if ev.id == open_id {
+            if ev.id == ids.open {
                 open_window = true;
-            } else if ev.id == restart_id {
+            } else if ev.id == ids.restart {
                 restart_daemon = true;
-            } else if ev.id == quit_id {
+            } else if ev.id == ids.quit {
                 quit = true;
+            } else if let Some(node_id) = ids.devices.get(&ev.id) {
+                let _ = actions.run_action.try_send(node_id.clone());
             }
         }
         if open_window {
@@ -159,16 +226,19 @@ fn set_preferred_app_mode(dark: bool) {
 mod linux {
     use gtk::glib;
 
-    use super::TrayActions;
+    use super::{TrayActions, TrayItem};
 
     enum TrayCmd {
         Open,
         RestartDaemon,
         Quit,
+        RunAction(String),
     }
 
     struct IpnTray {
         icons: Vec<ksni::Icon>,
+        /// The dynamic per-device section; replaced wholesale via `Handle::update`.
+        items: Vec<TrayItem>,
         tx: async_channel::Sender<TrayCmd>,
     }
 
@@ -194,7 +264,26 @@ mod linux {
         fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
             use ksni::menu::StandardItem;
             use ksni::MenuItem;
-            vec![
+
+            let mut out: Vec<MenuItem<Self>> = Vec::new();
+            // Device actions first, in their own section above the fixed items.
+            for item in &self.items {
+                let node_id = item.node_id.clone();
+                out.push(
+                    StandardItem {
+                        label: item.text.clone(),
+                        activate: Box::new(move |t: &mut Self| {
+                            let _ = t.tx.try_send(TrayCmd::RunAction(node_id.clone()));
+                        }),
+                        ..Default::default()
+                    }
+                    .into(),
+                );
+            }
+            if !self.items.is_empty() {
+                out.push(MenuItem::Separator);
+            }
+            out.push(
                 StandardItem {
                     label: "Open Nullgate".into(),
                     activate: Box::new(|t: &mut Self| {
@@ -203,6 +292,8 @@ mod linux {
                     ..Default::default()
                 }
                 .into(),
+            );
+            out.push(
                 StandardItem {
                     label: "Restart Nullgate daemon".into(),
                     activate: Box::new(|t: &mut Self| {
@@ -211,7 +302,9 @@ mod linux {
                     ..Default::default()
                 }
                 .into(),
-                MenuItem::Separator,
+            );
+            out.push(MenuItem::Separator);
+            out.push(
                 StandardItem {
                     label: "Quit Nullgate".into(),
                     activate: Box::new(|t: &mut Self| {
@@ -220,7 +313,8 @@ mod linux {
                     ..Default::default()
                 }
                 .into(),
-            ]
+            );
+            out
         }
     }
 
@@ -252,7 +346,7 @@ mod linux {
             .collect()
     }
 
-    pub fn install(actions: TrayActions) {
+    pub fn install(actions: TrayActions, items_rx: async_channel::Receiver<Vec<TrayItem>>) {
         let icons = load_icons();
         if icons.is_empty() {
             tracing::warn!("tray icon failed to decode; tray disabled");
@@ -272,11 +366,14 @@ mod linux {
                     TrayCmd::Quit => {
                         let _ = actions.quit.try_send(());
                     }
+                    TrayCmd::RunAction(node_id) => {
+                        let _ = actions.run_action.try_send(node_id);
+                    }
                 }
             }
         });
 
-        let tray = IpnTray { icons, tx };
+        let tray = IpnTray { icons, items: Vec::new(), tx };
         let spawn = std::thread::Builder::new().name("ipn-tray".into()).spawn(move || {
             use ksni::TrayMethods;
             let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -288,8 +385,18 @@ mod linux {
             };
             rt.block_on(async move {
                 match tray.spawn().await {
-                    Ok(_handle) => {
+                    Ok(handle) => {
                         tracing::info!("system tray installed (ksni)");
+                        // The handle is the only way to mutate a spawned ksni tray, and
+                        // it lives on this thread — so the device section is fed in over
+                        // the channel rather than touched from the GTK loop.
+                        while let Ok(items) = items_rx.recv().await {
+                            handle
+                                .update(|tray: &mut IpnTray| {
+                                    tray.items = items;
+                                })
+                                .await;
+                        }
                         std::future::pending::<()>().await;
                     }
                     Err(e) => tracing::warn!("tray unavailable: {e}"),
@@ -306,6 +413,6 @@ mod linux {
 pub use linux::install;
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
-pub fn install(_actions: TrayActions) {
+pub fn install(_actions: TrayActions, _items_rx: async_channel::Receiver<Vec<TrayItem>>) {
     tracing::info!("tray not enabled on this platform build");
 }

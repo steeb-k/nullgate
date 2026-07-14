@@ -16,7 +16,7 @@
 //! slide-in **flyout** — an `adw::OverlaySplitView` sidebar that overlays the
 //! content (the window stays visible behind it), so it reads as a sub-menu.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -30,10 +30,13 @@ use ipn_ipc::{
 };
 use tokio::runtime::Handle;
 
+mod actions;
 mod agent;
 mod notify;
 mod service_ctl;
 mod tray;
+
+use actions::{ActionColor, Actions, DeviceAction};
 
 pub(crate) const APP_ID: &str = "io.github.steeb_k.Nullgate";
 
@@ -385,6 +388,63 @@ fn load_css() {
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
+    load_action_palette();
+}
+
+/// Install (and keep current) the CSS for the action-button palette.
+///
+/// This is the app's only *dynamic* stylesheet, and it has to be: the user picks one
+/// color and both themes are derived from it, but GTK4 CSS has no `@media` query and
+/// libadwaita only auto-swaps its own named colors — ours aren't among them. So the
+/// eight rules are regenerated whenever the light/dark scheme flips. A `notify::dark`
+/// handler (not a one-shot read at startup) is what makes a live theme switch, or a
+/// sunset-triggered system change, recolor the buttons instead of stranding the
+/// light-mode fills on a dark window.
+fn load_action_palette() {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
+    let provider = gtk::CssProvider::new();
+    let style = adw::StyleManager::default();
+    provider.load_from_data(&action_palette_css(style.is_dark()));
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+    style.connect_dark_notify(move |style| {
+        provider.load_from_data(&action_palette_css(style.is_dark()));
+    });
+}
+
+/// The eight `.ng-action-<color>` button rules and `.ng-swatch-<color>` picker rules
+/// for one theme.
+///
+/// The button is a **vivid 1px border** with a tinted interior derived from that same
+/// vivid color; the swatch is the vivid color flat, because that is the thing the user
+/// is actually choosing. `background-image: none` strips libadwaita's own button
+/// gradient — without it the fill shows through as a muddy overlay rather than the
+/// color that was picked.
+fn action_palette_css(dark: bool) -> String {
+    use std::fmt::Write as _;
+    let fg = ActionColor::text(dark);
+    let mut css = String::new();
+    for c in ActionColor::ALL {
+        let _ = write!(
+            css,
+            ".ng-action-{id} {{ background-image: none; background-color: {fill}; \
+               border: 1px solid {vivid}; color: {fg}; }}\n\
+             .ng-action-{id}:hover {{ background-color: {hover}; }}\n\
+             .ng-action-{id}:active {{ background-color: {active}; }}\n\
+             .ng-swatch-{id} {{ background-image: none; background-color: {vivid}; }}\n",
+            id = c.id(),
+            vivid = c.vivid(),
+            fill = c.fill(dark),
+            hover = c.fill_hover(dark),
+            active = c.fill_active(dark),
+        );
+    }
+    css
 }
 
 /// Path of the small file remembering the window size (best-effort).
@@ -644,6 +704,24 @@ struct Ui {
     /// The Notes row of the currently-open member flyout, so saving can refresh its
     /// preview subtitle without rebuilding the flyout.
     notes_row: Rc<RefCell<Option<adw::ActionRow>>>,
+    /// This machine's optional per-device actions, loaded from the user's config
+    /// dir. Local to this device by design — see [`actions`].
+    device_actions: Rc<RefCell<Actions>>,
+    /// Which member the open action-button editor is editing.
+    action_target: Rc<RefCell<Option<String>>>,
+    action_label: adw::EntryRow,
+    action_cmd: adw::EntryRow,
+    action_terminal: gtk::CheckButton,
+    /// The color swatches, in [`ActionColor::ALL`] order, and the picked index.
+    action_swatches: Rc<Vec<gtk::ToggleButton>>,
+    action_color: Rc<Cell<usize>>,
+    /// Repaints the editor's live preview button from the current label + color.
+    /// (The button itself is reached only through here.)
+    action_repaint: Rc<dyn Fn()>,
+    action_remove: gtk::Button,
+    /// The "Action button" row of the open member flyout, so saving can refresh
+    /// its subtitle without rebuilding the flyout.
+    action_row: Rc<RefCell<Option<adw::ActionRow>>>,
     /// Panels drilled through, so Back steps back one level instead of closing.
     nav_stack: Rc<RefCell<Vec<String>>>,
 }
@@ -899,12 +977,239 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
         notes_view.add_controller(focus);
     }
 
+    // Action-button editor: label, color, command, terminal flag for ONE member. Built
+    // once (like the notes panel) and re-targeted on open, so the widgets outlive any
+    // status push that lands while the user is typing.
+    let device_actions: Rc<RefCell<Actions>> = Rc::new(RefCell::new(Actions::load()));
+    let action_target: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let action_row: Rc<RefCell<Option<adw::ActionRow>>> = Rc::new(RefCell::new(None));
+    let action_color: Rc<Cell<usize>> = Rc::new(Cell::new(0));
+    let action_label = adw::EntryRow::builder().title("Button label").build();
+    let action_cmd = adw::EntryRow::builder().title("Command").build();
+    let action_terminal = gtk::CheckButton::builder().valign(gtk::Align::Center).build();
+    // A sample of the button, not a button: it takes no clicks, so it also never
+    // shows the hand cursor `.ng-action` carries.
+    let action_preview = gtk::Button::builder()
+        .valign(gtk::Align::Center)
+        .can_target(false)
+        .can_focus(false)
+        .build();
+    let action_remove = gtk::Button::with_label("Remove button");
+    let action_swatches: Rc<Vec<gtk::ToggleButton>> = Rc::new(
+        ActionColor::ALL
+            .iter()
+            .map(|c| {
+                let b = gtk::ToggleButton::builder().tooltip_text(c.display()).build();
+                // The swatch shows the VIVID color flat — that's what's being chosen.
+                // (Not `.ng-action-*`, which is the tinted-interior button style.)
+                b.set_css_classes(&["ng-swatch", &format!("ng-swatch-{}", c.id())]);
+                b.set_cursor_from_name(Some("pointer"));
+                b
+            })
+            .collect(),
+    );
+    // Keep the preview honest as the user types/picks — it's the only place the
+    // chosen color and label are seen together before saving. Held in `Ui` as well,
+    // so re-targeting the editor at another member repaints it even when neither the
+    // label text nor the swatch's own state changed (same label, different color).
+    let action_repaint: Rc<dyn Fn()> = {
+        let action_label = action_label.clone();
+        let action_preview = action_preview.clone();
+        let action_color = action_color.clone();
+        Rc::new(move || {
+            let text = action_label.text();
+            let text = if text.trim().is_empty() { "Label".to_string() } else { text.to_string() };
+            style_action_button(&action_preview, &text, ActionColor::ALL[action_color.get()], true);
+        })
+    };
+    let action_panel = {
+        let repaint_preview = action_repaint.clone();
+        {
+            let repaint = repaint_preview.clone();
+            action_label.connect_changed(move |_| repaint());
+        }
+        // Radio behavior by hand: ToggleButton groups would make the *widgets* own the
+        // choice, and the choice has to survive re-targeting the panel at another member.
+        for (i, sw) in action_swatches.iter().enumerate() {
+            let swatches = action_swatches.clone();
+            let action_color = action_color.clone();
+            let repaint = repaint_preview.clone();
+            sw.connect_toggled(move |b| {
+                if !b.is_active() {
+                    // Refuse to leave nothing selected: re-check the one just clicked.
+                    if action_color.get() == i {
+                        b.set_active(true);
+                    }
+                    return;
+                }
+                action_color.set(i);
+                for (j, other) in swatches.iter().enumerate() {
+                    if j != i {
+                        other.set_active(false);
+                    }
+                }
+                repaint();
+            });
+        }
+
+        let body = padded_box();
+        let g = adw::PreferencesGroup::new();
+        g.add(&action_label);
+        g.add(&action_cmd);
+        // Terminal toggle. The whole row activates the checkbox, so the (small) box
+        // isn't the only hit target.
+        let term_row = adw::ActionRow::builder()
+            .title("Open in a terminal window")
+            .subtitle("For commands that need a console, like ssh")
+            .activatable(true)
+            .build();
+        term_row.add_suffix(&action_terminal);
+        term_row.set_activatable_widget(Some(&action_terminal));
+        g.add(&term_row);
+        body.append(&g);
+
+        // Pango markup, so every literal must be entity-safe — an unescaped "&&"
+        // (which this text wants to talk about) aborts the whole label.
+        let help = gtk::Label::builder()
+            .label(format!(
+                "Runs as a new process, with no shell — so pipes and <tt>&amp;&amp;</tt> don't \
+                 apply. Double quotes group arguments. Placeholders: {}.\n\nExample: \
+                 <tt>mstsc /v:{{ip}}</tt>, or <tt>ssh me@{{ip}}</tt> with a terminal.",
+                actions::PLACEHOLDERS
+            ))
+            .use_markup(true)
+            .wrap(true)
+            .xalign(0.0)
+            .css_classes(["dim-label"])
+            .build();
+        body.append(&help);
+
+        let colors = adw::PreferencesGroup::builder().title("Color").build();
+        let swatch_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        swatch_box.set_halign(gtk::Align::Center);
+        swatch_box.set_margin_top(6);
+        swatch_box.set_margin_bottom(6);
+        for sw in action_swatches.iter() {
+            swatch_box.append(sw);
+        }
+        colors.add(&swatch_box);
+        body.append(&colors);
+
+        let preview_group = adw::PreferencesGroup::new();
+        let preview_row = adw::ActionRow::builder().title("Preview").build();
+        preview_row.add_css_class("property");
+        preview_row.add_suffix(&action_preview);
+        preview_group.add(&preview_row);
+        body.append(&preview_group);
+
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        buttons.set_halign(gtk::Align::Center);
+        buttons.set_margin_top(6);
+        let save = gtk::Button::with_label("Save");
+        save.set_css_classes(&["suggested-action", "pill"]);
+        action_remove.set_css_classes(&["destructive-action", "pill"]);
+        buttons.append(&action_remove);
+        buttons.append(&save);
+        body.append(&buttons);
+
+        let panel = adw::ToolbarView::new();
+        {
+            let hb = adw::HeaderBar::new();
+            hb.set_show_start_title_buttons(false);
+            hb.set_show_end_title_buttons(false);
+            hb.set_title_widget(Some(&adw::WindowTitle::new("Action button", "")));
+            let back = gtk::Button::builder()
+                .icon_name("go-previous-symbolic")
+                .tooltip_text("Back")
+                .css_classes(["flat", "circular"])
+                .build();
+            let go_back = go_back.clone();
+            back.connect_clicked(move |_| go_back());
+            hb.pack_end(&back);
+            panel.add_top_bar(&hb);
+        }
+        panel.set_content(Some(&adw::Clamp::builder().maximum_size(520).child(&body).build()));
+
+        // Save / Remove both write the file, refresh the member row's button via the
+        // usual status re-render, and step back to the member flyout.
+        {
+            let net2 = net.clone();
+            let device_actions = device_actions.clone();
+            let action_target = action_target.clone();
+            let action_row = action_row.clone();
+            let action_label = action_label.clone();
+            let action_cmd = action_cmd.clone();
+            let action_color = action_color.clone();
+            let action_terminal = action_terminal.clone();
+            let go_back = go_back.clone();
+            save.connect_clicked(move |_| {
+                let Some(node_id) = action_target.borrow().clone() else {
+                    return;
+                };
+                let label = action_label.text().trim().to_string();
+                let command = action_cmd.text().trim().to_string();
+                if label.is_empty() {
+                    net2.toast("Give the button a label.");
+                    return;
+                }
+                if actions::tokenize(&command).is_empty() {
+                    net2.toast("Give the button a command to run.");
+                    return;
+                }
+                let action = DeviceAction {
+                    label,
+                    color: ActionColor::ALL[action_color.get()],
+                    command,
+                    terminal: action_terminal.is_active(),
+                };
+                let mut cfg = device_actions.borrow_mut();
+                cfg.set(&node_id, action.clone());
+                if let Err(e) = cfg.save() {
+                    net2.toast(format!("Couldn't save the action: {e}"));
+                    return;
+                }
+                drop(cfg);
+                if let Some(row) = action_row.borrow().as_ref() {
+                    row.set_subtitle(&action_summary(Some(&action)));
+                }
+                net2.refresh();
+                go_back();
+            });
+        }
+        {
+            let net2 = net.clone();
+            let device_actions = device_actions.clone();
+            let action_target = action_target.clone();
+            let action_row = action_row.clone();
+            let go_back = go_back.clone();
+            action_remove.connect_clicked(move |_| {
+                let Some(node_id) = action_target.borrow().clone() else {
+                    return;
+                };
+                let mut cfg = device_actions.borrow_mut();
+                cfg.remove(&node_id);
+                if let Err(e) = cfg.save() {
+                    net2.toast(format!("Couldn't save the action: {e}"));
+                    return;
+                }
+                drop(cfg);
+                if let Some(row) = action_row.borrow().as_ref() {
+                    row.set_subtitle(&action_summary(None));
+                }
+                net2.refresh();
+                go_back();
+            });
+        }
+        panel
+    };
+
     stack.add_named(&admin_panel, Some("admin"));
     stack.add_named(&diag_panel, Some("diagnostics"));
     stack.add_named(&ticket_panel, Some("ticket"));
     stack.add_named(&member_panel, Some("member"));
     stack.add_named(&audit_panel, Some("audit"));
     stack.add_named(&notes_panel, Some("notes"));
+    stack.add_named(&action_panel, Some("action"));
     stack.add_named(&relays_panel, Some("relays"));
     split.set_sidebar(Some(&stack));
 
@@ -929,6 +1234,16 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
         notes_target,
         notes_cache,
         notes_row,
+        device_actions,
+        action_target,
+        action_label,
+        action_cmd,
+        action_terminal,
+        action_swatches,
+        action_color,
+        action_repaint,
+        action_remove,
+        action_row,
         nav_stack,
     };
 
@@ -1424,6 +1739,74 @@ fn member_row_subtitle(m: &MemberView) -> String {
     subtitle
 }
 
+// ---------------------------------------------------------------------------
+// Per-device action buttons (see the `actions` module)
+// ---------------------------------------------------------------------------
+
+/// Paint a member row's action button: the user's label, the fill for their
+/// chosen color, and — when the device is offline — a dim wash.
+///
+/// The dim is a hint, not a barrier: the button stays clickable because Nullgate
+/// can't know whether a given command needs the peer up (a wake-on-LAN doesn't).
+fn style_action_button(btn: &gtk::Button, label: &str, color: ActionColor, online: bool) {
+    btn.set_label(label);
+    let fill = format!("ng-action-{}", color.id());
+    if online {
+        btn.set_css_classes(&["ng-action", &fill]);
+    } else {
+        btn.set_css_classes(&["ng-action", &fill, "ng-action-dim"]);
+    }
+}
+
+/// The member row's action button: shown only when that device has an action.
+fn update_action_button(btn: &gtk::Button, action: Option<&DeviceAction>, online: bool) {
+    match action {
+        Some(a) => {
+            style_action_button(btn, &a.label, a.color, online);
+            btn.set_tooltip_text(Some(&a.command));
+            btn.set_visible(true);
+        }
+        None => btn.set_visible(false),
+    }
+}
+
+/// Subtitle of the member flyout's "Action button" row.
+fn action_summary(action: Option<&DeviceAction>) -> String {
+    match action {
+        Some(a) if a.terminal => format!("{} · {} · in a terminal", a.label, a.command),
+        Some(a) => format!("{} · {}", a.label, a.command),
+        None => "None".to_string(),
+    }
+}
+
+/// Point the (build-once) action-button editor at one member and reveal it.
+fn open_action_editor(ui: &Ui, node_id: &str) {
+    let existing = ui.device_actions.borrow().get(node_id).cloned();
+    *ui.action_target.borrow_mut() = Some(node_id.to_string());
+    let action = existing.clone().unwrap_or_else(|| DeviceAction {
+        label: String::new(),
+        color: ActionColor::default(),
+        command: String::new(),
+        terminal: false,
+    });
+    ui.action_label.set_text(&action.label);
+    ui.action_cmd.set_text(&action.command);
+    ui.action_terminal.set_active(action.terminal);
+
+    // Set the picked index BEFORE touching the swatches: deactivating a swatch fires
+    // its handler, which consults this to refuse leaving nothing selected.
+    let picked = ActionColor::ALL.iter().position(|c| *c == action.color).unwrap_or(0);
+    ui.action_color.set(picked);
+    for (i, sw) in ui.action_swatches.iter().enumerate() {
+        sw.set_active(i == picked);
+    }
+    (ui.action_repaint)();
+
+    // Nothing to remove until there's something saved.
+    ui.action_remove.set_sensitive(existing.is_some());
+    ui.open("action");
+}
+
 /// Display order for the member list (node_id → position): the engine's
 /// ranking (online → access-disabled → offline → hidden) with self pinned to
 /// the top — but only when it's a normal online device; if self has disabled
@@ -1462,6 +1845,10 @@ fn admin_signature(s: &NetworkStatus, pending: &[PendingJoin]) -> String {
 struct MemberRowUi {
     row: adw::ActionRow,
     dot: gtk::Label,
+    /// The action button (left of the chevron). Created with every row and
+    /// simply hidden when the device has no action — creating it lazily would mean
+    /// adding a widget to a live row, and the main page never grows widgets.
+    action: gtk::Button,
 }
 
 /// The diagnostics flyout's persistent rows — updated in place because it's
@@ -1715,6 +2102,7 @@ fn apply_status(
     *page.order.borrow_mut() = member_order(&s.members);
     {
         let mut rows = page.rows.borrow_mut();
+        let cfg = ui.device_actions.borrow();
         let present: std::collections::HashSet<&str> =
             s.members.iter().map(|m| m.node_id.as_str()).collect();
         let list = page.members_list.clone();
@@ -1731,6 +2119,7 @@ fn apply_status(
                     r.row.set_title(&member_row_title(m));
                     r.row.set_subtitle(&member_row_subtitle(m));
                     apply_dot_style(&r.dot, m.online, m.last_seen, m.access_disabled, m.hidden);
+                    update_action_button(&r.action, cfg.get(&m.node_id), m.online);
                 }
                 None => {
                     let dot = status_dot(m.online, m.last_seen, m.access_disabled, m.hidden);
@@ -1742,6 +2131,18 @@ fn apply_status(
                     // The sort func's key for this row.
                     row.set_widget_name(&m.node_id);
                     row.add_prefix(&dot);
+                    // Suffixes pack left-to-right, so the action button lands between
+                    // the subtitle and the chevron.
+                    let action_btn = gtk::Button::builder()
+                        .valign(gtk::Align::Center)
+                        .visible(false)
+                        .build();
+                    action_btn.add_css_class("ng-action");
+                    // The row itself is activatable, so the hand is what tells "runs
+                    // your command" apart from "opens the device". Set on the widget:
+                    // GTK4 CSS has no `cursor` property.
+                    action_btn.set_cursor_from_name(Some("pointer"));
+                    row.add_suffix(&action_btn);
                     row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
                     // Connected ONCE, looking the member up at click time so
                     // the flyout always opens on fresh data (the old
@@ -1758,8 +2159,35 @@ fn apply_status(
                             fill_member(&ui2, m, &st.self_role, st.is_originator, &net2, &window2);
                         }
                     });
+                    // Same discipline for the button: the member AND the action are
+                    // looked up at click time, so an edit or a status push that lands
+                    // between renders can't be run stale. Clicking it does not open the
+                    // member flyout — the button consumes the click.
+                    {
+                        let node_id = m.node_id.clone();
+                        let ui2 = ui.clone();
+                        let net2 = net.clone();
+                        let state2 = state.clone();
+                        action_btn.connect_clicked(move |_| {
+                            let st = state2.borrow();
+                            let Some(st) = st.as_ref() else { return };
+                            let Some(m) = st.members.iter().find(|m| m.node_id == node_id) else {
+                                return;
+                            };
+                            let action = ui2.device_actions.borrow().get(&node_id).cloned();
+                            let Some(action) = action else { return };
+                            match actions::run(&action, m) {
+                                Ok(()) => net2.toast(format!("Running “{}”…", action.label)),
+                                Err(e) => net2.toast(e.to_string()),
+                            }
+                        });
+                    }
+                    update_action_button(&action_btn, cfg.get(&m.node_id), m.online);
                     page.members_list.append(&row);
-                    rows.insert(m.node_id.clone(), MemberRowUi { row, dot });
+                    rows.insert(
+                        m.node_id.clone(),
+                        MemberRowUi { row, dot, action: action_btn },
+                    );
                 }
             }
         }
@@ -2494,6 +2922,21 @@ fn fill_member(
             ui2.open("notes");
         });
         g.add(&notes_row);
+    }
+
+    // Action button — a command THIS machine runs against the member (a button on
+    // its row + a tray entry). Local to this device, and offered for every member,
+    // self included: "open my own web UI" is as reasonable as "RDP into that box".
+    {
+        let existing = ui.device_actions.borrow().get(&m.node_id).cloned();
+        let row = action_row("Action button", &action_summary(existing.as_ref()));
+        row.add_prefix(&gtk::Image::from_icon_name("system-run-symbolic"));
+        // Remembered so a save refreshes this subtitle without rebuilding the flyout.
+        *ui.action_row.borrow_mut() = Some(row.clone());
+        let ui2 = ui.clone();
+        let node_id = m.node_id.clone();
+        row.connect_activated(move |_| open_action_editor(&ui2, &node_id));
+        g.add(&row);
     }
 
     // Friendly name — set by THIS client for another member (local; not shared).

@@ -23,6 +23,10 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 directories.workspace = true
+# Per-device action buttons: a hand-editable JSON file in the user's config dir
+# (see src/actions.rs for why this one lives here and not in the daemon).
+serde.workspace = true
+serde_json.workspace = true
 
 # System tray: tray-icon on Windows/macOS; ksni (StatusNotifier, no GTK3) on Linux.
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]

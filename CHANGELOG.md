@@ -13,6 +13,40 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   blank answer means the relay has no token.
 
 ### Added
+- **Per-device action buttons.** A device can be given a labelled, coloured button — "RDP", "SSH",
+  "Web" — that runs a command of your choosing. It appears on that device's row in the member list
+  (left of the chevron) and in a new section at the top of the tray menu, read as "*device*
+  (*label*)", so a machine can be reached without opening the window. Configured from **Action
+  button** in the member panel: a label, one of eight colours, a command, and a **Open in a terminal
+  window** checkbox. `{ip}`, `{name}`, `{hostname}` and `{node_id}` are substituted at click time.
+  The command is spawned as a program with arguments — **no shell**, so a config file can't smuggle
+  in a pipeline — with double quotes grouping arguments and backslashes left alone, so Windows paths
+  survive. An offline device keeps a working (dimmed) button, because nothing here can know whether
+  a given command needs the peer awake.
+
+  **Open in a terminal window** is what makes `ssh` (or any console program) usable: without it the
+  command is detached with no streams, which is right for a graphical program like `mstsc` and
+  useless for one that wants a console. With it, Windows gives the child its own console
+  (`CREATE_NEW_CONSOLE`, and deliberately *no* stdio redirection — redirect it and the console
+  appears but the program is talking to `NUL`), Linux launches the first terminal emulator it finds
+  (or `$TERMINAL`), and macOS opens Terminal.app.
+
+  The palette is eight **vivid** colours, and that vivid colour is the only thing chosen: the button
+  draws it as a 1px border and derives its interior from it — tinted toward white in light mode,
+  sunk toward black in dark mode — with the text colour following the **theme** (black on light,
+  white on dark) rather than the hue. Deriving both from one value is what stops yellow being the
+  one button that doesn't match, and unit tests hold every fill (rest/hover/pressed, both themes) to
+  WCAG AA and every border to a visible contrast against the card behind it. Yellow is a gold rather
+  than a lemon for exactly that second reason: a pure vivid yellow border is ~1.5:1 on a white card,
+  i.e. not there.
+
+  Actions are stored **per machine**, in the user's own config directory (`actions.json`), and are
+  the one piece of per-member state the daemon knows nothing about. Two reasons: the command that
+  reaches a device is a property of the machine you're sitting at (`mstsc` on Windows, `xfreerdp` on
+  Linux), so the roster would push a Windows command line onto a Mac; and unlike a note or a
+  nickname it is an *executable command line*, which has no business in a root-owned store that
+  every local user's IPC socket can write and another user's GUI would later spawn. No IPC or
+  protocol change.
 - **A relay is checked against the relay server before it is saved.** Both the CLI and the GUI
   connect to the relay with the credentials given, from a throwaway endpoint (`relays::probe_relay`,
   exposed as `IpcRequest::ProbeRelay`; IPC protocol → v6). `relay add` asks for the token again if

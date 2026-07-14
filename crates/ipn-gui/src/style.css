@@ -51,3 +51,45 @@ headerbar {
   border-radius: 12px;
   padding: 6px;
 }
+
+/* Per-device action button: a small colored button on the member row, left of the
+ * chevron. Only the shape lives here — the vivid 1px border and the tinted interior
+ * are generated at runtime (`.ng-action-<color>`, see action_palette_css), because
+ * the interior is derived per theme and GTK CSS can't branch on the theme itself.
+ * NOTE: no `border` here. The color classes own it; setting `border: none` at this
+ * level would win on specificity ties and flatten every button back to a blob. */
+.ng-action {
+  min-height: 22px;
+  min-width: 0;
+  padding: 2px 11px;
+  border-radius: 6px;
+  box-shadow: none;
+  text-shadow: none;
+  font-size: 0.85em;
+  font-weight: bold;
+}
+/* The hand cursor is NOT set here. GTK4 CSS has no `cursor` property (it's a
+ * web-CSS habit; the parser rejects it outright) — it's a widget property, set with
+ * `set_cursor_from_name("pointer")` where the button is built. */
+
+/* The action's row button when its device is offline. The command still runs (a
+ * wake-on-LAN wouldn't need the peer up), so this is a hint, not a barrier. */
+.ng-action.ng-action-dim {
+  opacity: 0.45;
+}
+
+/* Color swatches in the action editor: each is the flat vivid color the user is
+ * picking (`.ng-swatch-<color>`, generated at runtime). Circular, so they don't read
+ * as eight tiny action buttons; the chosen one is ringed rather than tinted, so the
+ * ring reads against every color in the palette. */
+.ng-swatch {
+  min-height: 28px;
+  min-width: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  box-shadow: none;
+}
+.ng-swatch:checked {
+  box-shadow: 0 0 0 2px @window_bg_color, 0 0 0 4px @accent_color;
+}

@@ -214,6 +214,53 @@ Neither is implemented. `NULLGATE_DISABLE_POWER_EVENTS=1` turns the whole thing 
 - `ipn-mobile` — the **Android** facade: a UniFFI `cdylib` (`ipn_mobile`) that runs `ipn-core`
   **in-process** behind a `MobileEngine` object + `EventListener` callback. No daemon, no IPC.
 
+### Per-device action buttons (the one thing the daemon doesn't know)
+A member can be given a labelled, coloured button that runs a command — `mstsc /v:{ip}`, `ssh
+me@{ip}` — shown on its row in the member list and in the tray menu. It is implemented entirely in
+`ipn-gui` (`src/actions.rs`), with **no engine, IPC, or protocol involvement**, which makes it the
+only piece of per-member state that doesn't come from the daemon. Both departures from the usual
+layering are deliberate:
+
+- **It is local to the machine, not to the network.** The command that reaches a device is a
+  property of the computer you're sitting at, so distributing it through the signed roster would
+  push a Windows command line onto a Mac. Nicknames and notes are local too — but they are stored
+  by the *daemon* (`nicknames.cbor`, `notes.cbor`) and delivered in `MemberView`, which is exactly
+  what this does not do.
+- **It is an executable command line.** The daemon runs as SYSTEM/root and its IPC socket is
+  reachable by every local user. Storing exec strings there — to be spawned later by whichever
+  user's GUI reads them back — would turn an inert local IPC surface into a cross-user
+  code-execution path. A note is text; this is not. So it lives in the *user's own* config
+  directory (`actions.json`, alongside the window-size file), writable only by the user whose GUI
+  will run it, and never crosses the IPC boundary. See `docs/security.md`.
+
+Commands are spawned directly (`std::process::Command`), never through `cmd.exe`/`sh -c`: the line
+is split on whitespace with double quotes grouping and **no backslash escapes** (so `C:\Program
+Files\…` survives), and each resulting token is placeholder-expanded individually — expanding
+*after* the split is what stops a device named `Media Box` from silently becoming two arguments.
+
+A button may ask to **run in a terminal window**, which is the difference between `ssh` working and
+not. The default spawn is detached with `Stdio::null()` on all three streams — correct for a
+graphical program, useless for one that wants a console — so the terminal path is separate per
+platform:
+
+| | how |
+|---|---|
+| **Windows** | `CREATE_NEW_CONSOLE`, and **no stdio redirection at all**. That second half is load-bearing: a GUI-subsystem process has no standard handles, so Rust omits `STARTF_USESTDHANDLES` and Windows wires the child's streams to the fresh console. Pass `Stdio::null()` and the console window still appears — but the program is talking to `NUL`, so it looks hung. |
+| **Linux/BSD** | the first terminal emulator found on `PATH` (or `$TERMINAL`), from a table that records *each one's* "the rest is the command" flag — `-e` is not universal, and `gnome-terminal -e` takes a single string and would drop every argument after the program. |
+| **macOS** | Terminal.app takes a *file*, not an argv, so a throwaway `.command` script is written with each token POSIX-single-quoted and handed to `open -a Terminal`. This is the one place a shell is involved; the quoting is ours, built from the already-split argv, so a token containing `;` or `$(…)` stays one literal argument. |
+
+The GUI and the tray agent are separate processes, so the agent re-reads `actions.json` on a 1 s
+mtime poll (cheaper than a filesystem-watcher dependency) and rebuilds the tray's device section;
+member *names* for those entries come from the status stream it already subscribes to.
+
+The eight colours are the app's only **dynamic** stylesheet. The palette is one **vivid** hex per
+colour and nothing else: the button draws that vivid as its 1px border and derives the interior from
+it (tinted toward white in light mode, toward black in dark), while the text colour follows the
+*theme* rather than the hue. Deriving it all from a single value is what keeps the hues consistent —
+picking fills and text per hue is what previously left yellow as the one button that didn't match.
+Since both themes are derived, and GTK4 CSS has no `@media` query while libadwaita only auto-swaps
+its own named colours, the rules are regenerated on `AdwStyleManager::notify::dark`.
+
 ### Why the daemon/GUI split
 Creating the virtual network interface needs elevated privilege; a GUI does not. Splitting them
 means the privileged work is isolated in a tiny background service while the app you click runs

@@ -104,6 +104,37 @@ so through the OS's own audited elevation prompt (UAC / polkit / the macOS auth 
 any stored credential — the user authenticates each time. The button only starts the platform
 service that's already installed; it can't run arbitrary commands.
 
+## Per-device actions run code, so they are never stored by the daemon
+An optional per-device action (README: *one-click actions*) is a command line the **GUI** spawns as
+the logged-in user. That makes it the one piece of per-member state deliberately kept out of the
+daemon, even though the daemon already stores two other local-only per-member fields (nicknames,
+notes).
+
+The reason is the direction of trust. The daemon runs as SYSTEM/root, and its IPC endpoint is
+reachable by local users of the machine. A nickname or a note is inert data: the worst a local user
+can do by writing one is make somebody's member list read oddly. An action is an **executable
+command line**, and it is executed later, by a *different* user's GUI, as that user. Storing it in
+the daemon would therefore convert an inert local IPC surface into a cross-user code-execution path
+that does not exist today — a plain local privilege-escalation primitive.
+
+So actions live in the user's own config directory (`actions.json`, next to the GUI's window-state
+file), writable only by the user whose GUI will run them, and never traverse the IPC boundary or the
+roster. A user editing that file can only cause their own session to run a command they themselves
+wrote — which they could already do without Nullgate.
+
+Two supporting properties:
+- **No shell.** The command is split into argv and spawned directly (`std::process::Command`), never
+  via `cmd.exe /C` or `sh -c`, so the file cannot smuggle in a pipeline, a redirect, or a chained
+  command. The single exception is the **macOS** "open in a terminal window" path, where Terminal.app
+  can only be handed a file: a throwaway script is written with every token POSIX-single-quoted. The
+  quoting is *ours*, applied to the already-split argv, so a token containing `;` or `$(…)` becomes
+  one literal argument — the config file still cannot reach through it and start a second command.
+- **Nothing from the network reaches it.** The placeholders substituted into the command (`{ip}`,
+  `{name}`, `{hostname}`, `{node_id}`) are expanded per-token *after* the split, so a peer-supplied
+  value — and `hostname` **is** peer-supplied and self-asserted (see below) — cannot introduce a new
+  argument, let alone a new command. It lands in exactly the one argv slot the user put it in. This
+  holds on the macOS path too, since the quoting is applied after expansion.
+
 ## Device name is self-asserted (NodeId is the anchor)
 The display name members see (the desktop OS hostname; on Android an auto-derived
 `"<Manufacturer> <Model> (<suffix>)"`) is written by the client into its own roster `Add` and

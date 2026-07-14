@@ -22,7 +22,7 @@ Rust workspace; each crate has one job. A feature usually flows through these la
 | `ipn-ipc` | Wire protocol (`IpcRequest`/`IpcResponse`/`IpcEvent`) + transport (named pipe / unix socket). Depends on `ipn-core` only for display DTOs. | expose a new engine action/event to clients |
 | `ipn-daemon` | Privileged process: owns the engine + TUN, serves IPC. Windows service + foreground modes. | route a new request to the engine |
 | `ipn-cli` | Headless IPC client (testing/scripting). | add a command for the new action |
-| `ipn-gui` | **Nullgate** — the GTK4 + libadwaita app (binary `nullgate`), unprivileged IPC client. The product name in UI/docs is "Nullgate"; `ipn-gui` stays as the codebase codename. The **same binary** also runs as the headless **tray agent** (`nullgate --agent`, `agent.rs`): it owns the tray + notifications and launches the GUI on demand. | surface the feature in the UI (window) or the tray/notifications (agent) |
+| `ipn-gui` | **Nullgate** — the GTK4 + libadwaita app (binary `nullgate`), unprivileged IPC client. The product name in UI/docs is "Nullgate"; `ipn-gui` stays as the codebase codename. The **same binary** also runs as the headless **tray agent** (`nullgate --agent`, `agent.rs`): it owns the tray + notifications and launches the GUI on demand. Also owns **optional per-device actions** (`actions.rs`) — the one feature with no engine/IPC layer at all (see the gotcha). | surface the feature in the UI (window) or the tray/notifications (agent) |
 | `ipn-mobile` | UniFFI facade (`cdylib` `ipn_mobile`) wrapping `ipn-core` in-process for **Android** — no daemon/IPC. Exposes `MobileEngine` + an `EventListener` callback; the engine drives the `VpnService` TUN via fd injection. | expose an engine action/event to the Android app |
 
 The **Android app** lives in `android/` (Kotlin/Compose over `ipn-mobile`; binary product name
@@ -217,6 +217,35 @@ added.
   cross-checked against the public `IOPM.h`). (2) The sleep callback **must finish the disconnect
   before it acknowledges** the event, or powerd freezes the machine mid-teardown. The `notify.rs`
   online-debounce cannot substitute for any of this: a laptop asleep for hours clears any debounce.
+- **Per-device action buttons live in the GUI, NOT the daemon — on purpose.** `ipn-gui/src/
+  actions.rs` stores them in the *user's* config dir (`actions.json`), and they never touch
+  `ipn-core`/`ipn-ipc`. This looks like a violation of the engine-first workflow, and the obvious
+  "fix" — a `SetAction` IPC request + an `actions.cbor` in the daemon, mirroring the existing
+  `nicknames.cbor`/`notes.cbor` — is a **security regression**, so don't. A nickname is inert data;
+  an action is an *executable command line*, spawned later by whichever user's GUI reads it back. The
+  daemon runs as SYSTEM/root and its IPC socket is reachable by any local user, so putting exec
+  strings behind it turns an inert local surface into a cross-user code-execution path. Keep them
+  per-user, and keep the spawn shell-free (direct `Command`, quotes group, backslashes literal,
+  placeholders expanded **per-token after** the split so a peer-supplied `hostname` can't become a
+  second argument). Consequence: no CLI command for this feature (the daemon has no such state), and
+  the tray agent — a different process from the GUI that edits the file — re-reads it on a 1s mtime
+  poll.
+- **Two traps inside `actions.rs` that look like tidying-up.** (1) The Windows "open in a terminal
+  window" path sets `CREATE_NEW_CONSOLE` and **deliberately leaves stdio alone**. Adding the
+  `Stdio::null()` calls the detached path uses (for symmetry — they look missing) makes Rust set
+  `STARTF_USESTDHANDLES`, and the child then gets its console window *and* streams pointing at `NUL`:
+  a terminal you can type into that never answers. A GUI-subsystem process has no std handles, which
+  is exactly why omitting them lets Windows wire the child to the new console. (2) The 8 colors are
+  the app's only *dynamic* CSS provider (regenerated on `StyleManager::notify::dark`), because GTK4
+  CSS has no `@media` and libadwaita only auto-swaps its own named colors. The palette is **one vivid
+  hex per color** (`ActionColor::vivid`), and everything else is *derived* from it: the 1px border is
+  the vivid itself, the interior is it tinted toward white (light) or black (dark), and the text
+  color follows the **theme, not the hue**. Don't reintroduce a per-hue text color or hand-pick the
+  fills — a per-hue text color is what made yellow the one button that didn't match. Tests hold every
+  fill (rest/hover/pressed × both themes) to WCAG AA and every border to a visible contrast against
+  the card; they are what caught that a *pure* vivid yellow border is ~1.5:1 on a white card, which
+  is why Yellow is a gold. Note `.ng-action` in `style.css` deliberately sets **no `border`** — the
+  generated color classes own it, and a `border: none` there would flatten every button.
 - **GTK on Windows** comes from gvsbuild at `C:\gtk`; `pkg-config` must resolve `gtk4` and
   `libadwaita-1`. On Linux, install the `-dev` packages.
 - **GTK on macOS** comes from **conda-forge**, not Homebrew (`scripts/setup-conda-macos.sh` builds
