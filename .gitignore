@@ -16,8 +16,10 @@
 /artifact-signing-metadata.json
 # Generated during the MSI build from LICENSE.
 /wix/license.rtf
-# Built installers (also covered by /dist, /target).
+# Built installers (also covered by /dist, /target). The release APK is copied to
+# the repo root under its upload name (docs/releasing.md step 3).
 *.msi
+*.apk
 
 # Local hands-on test plan (kept untracked; updated as issues are resolved).
 /MANUAL-TESTING.md
