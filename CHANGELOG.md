@@ -5,6 +5,8 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-13
+
 ### Fixed
 - **A GUI/daemon version mismatch reported itself as "The Nullgate service isn't running".** The
   service was running perfectly well; it just spoke a different IPC protocol version — so the one
@@ -21,17 +23,6 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   `windows.css`'s `headerbar { min-height: 0 }`, which collapses the bar to its tallest child — the
   two-line title had been the only thing giving it height, so a single-line title sat flush against
   the top of the frame.
-
-### Changed
-- **The app version no longer sits under the title in the header bar.** It crowded the bar, and the
-  version is already on the About row and in the About dialog.
-
-### Changed
-- **`nullgate-cli relay add` no longer takes `--token`; it asks for the token.** Passing a secret as
-  an argument put it in the shell's history file and in every other local user's view of `ps` — a
-  leak to exactly the readers that root ownership of the data dir is meant to exclude. It is now
-  read with echo off (from the terminal, or from stdin when piped, so scripting still works), and a
-  blank answer means the relay has no token.
 
 ### Added
 - **Per-device action buttons.** A device can be given a labelled, coloured button — "RDP", "SSH",
@@ -80,6 +71,15 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 - **Test a relay you've already added**, from the ⇄ button beside it in the relay list. A relay can
   start refusing a token it used to accept (rotated, revoked, redeployed) and nothing else would
   tell you — the symptom is peers quietly losing sight of this device.
+
+### Changed
+- **`nullgate-cli relay add` no longer takes `--token`; it asks for the token.** Passing a secret as
+  an argument put it in the shell's history file and in every other local user's view of `ps` — a
+  leak to exactly the readers that root ownership of the data dir is meant to exclude. It is now
+  read with echo off (from the terminal, or from stdin when piped, so scripting still works), and a
+  blank answer means the relay has no token.
+- **The app version no longer sits under the title in the header bar.** It crowded the bar, and the
+  version is already on the About row and in the About dialog.
 
 ## [0.3.3] - 2026-07-13
 > **Behaviour change.** `preferred` (the default relay policy) now keeps the public iroh relays
