@@ -27,9 +27,14 @@ entry,
   border-radius: 8px;
 }
 
-/* Compact the title bar so the controls aren't floating in a tall Adwaita bar. */
+/* Compact the title bar so the controls aren't floating in a tall Adwaita bar — but
+ * keep a real bar height. At `min-height: 0` the bar collapses to its tallest child,
+ * which was only ever disguised by the two-line title; with the version subtitle gone,
+ * a single-line title left the bar the height of the text and pinned it to the top of
+ * the window frame. Give it a Win11-ish title-bar height and let GTK centre the title
+ * in it. */
 headerbar {
-  min-height: 0;
+  min-height: 40px;
   padding: 0;
 }
 

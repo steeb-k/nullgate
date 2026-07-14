@@ -5,6 +5,27 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 
+### Fixed
+- **A GUI/daemon version mismatch reported itself as "The Nullgate service isn't running".** The
+  service was running perfectly well; it just spoke a different IPC protocol version — so the one
+  message that could have told you to update the other half was replaced, a frame after it appeared,
+  by one that sent you to restart a service that was already up. `stream_events` returned the same
+  `Ok(())` for "the daemon is incompatible" as for "the connection dropped", and the reconnect loop
+  unconditionally announced `DaemonDown` after it. It now reports *why* the stream ended
+  (`StreamEnd`), so a mismatch — a stable condition, not a dead daemon — stays on screen, and a
+  retry that changes nothing no longer rebuilds the placeholder page every 2 s.
+- **The "Relay servers" warning banners now span the panel**, instead of sitting as narrow cards
+  inside it. They were appended into the panel's content box, which lives in a `Clamp`; like the
+  main page's service/join banners they are now top bars of the panel's `ToolbarView`.
+- **The window title is vertically centred again.** Removing the version subtitle (below) exposed
+  `windows.css`'s `headerbar { min-height: 0 }`, which collapses the bar to its tallest child — the
+  two-line title had been the only thing giving it height, so a single-line title sat flush against
+  the top of the frame.
+
+### Changed
+- **The app version no longer sits under the title in the header bar.** It crowded the bar, and the
+  version is already on the About row and in the About dialog.
+
 ### Changed
 - **`nullgate-cli relay add` no longer takes `--token`; it asks for the token.** Passing a secret as
   an argument put it in the shell's history file and in every other local user's view of `ps` — a

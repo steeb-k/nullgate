@@ -244,20 +244,75 @@ impl Net {
     }
 
     /// Long-lived subscription to daemon events, reconnecting if it restarts.
+    ///
+    /// The reconnect is what makes reporting subtle. A version mismatch is a *stable*
+    /// condition — the daemon is answering, it just speaks another protocol — so the
+    /// loop must not follow it with `DaemonDown`, and must not re-announce it on every
+    /// 2 s retry. Both used to happen: `stream_events` returned the same `Ok(())` for
+    /// "mismatch" as for "connection dropped", so the mismatch screen was overwritten
+    /// by "the service isn't running" a frame after it appeared, and a genuine upgrade
+    /// looked like a dead service.
     fn subscribe_loop(&self) {
         let socket = self.socket.clone();
         let tx = self.tx.clone();
         self.handle.spawn(async move {
+            // The condition the UI is currently showing, so a retry that changes
+            // nothing says nothing (a placeholder rebuilt twice a second is both
+            // wasted work and a widget yanked out from under any click).
+            let mut showing: Option<StreamEnd> = None;
             loop {
-                let _ = stream_events(&socket, &tx).await;
-                let _ = tx.send(UiMsg::DaemonDown).await;
+                // An IO error means we never got a usable connection: unreachable.
+                let end = stream_events(&socket, &tx)
+                    .await
+                    .unwrap_or(StreamEnd::Disconnected { was_live: false });
+
+                // A session that *was* live has just gone away, so whatever the UI
+                // was told before is stale — let the new condition through.
+                if matches!(end, StreamEnd::Disconnected { was_live: true }) {
+                    showing = None;
+                }
+                if showing.as_ref() != Some(&end) {
+                    let msg = match end {
+                        StreamEnd::Disconnected { .. } => UiMsg::DaemonDown,
+                        StreamEnd::VersionMismatch { daemon } => UiMsg::VersionMismatch {
+                            daemon,
+                            gui: ipn_ipc::PROTO_VERSION,
+                        },
+                        StreamEnd::UpdateApplied => UiMsg::UpdateApplied,
+                    };
+                    let _ = tx.send(msg).await;
+                    showing = Some(end);
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         });
     }
 }
 
-async fn stream_events(socket: &std::path::Path, tx: &async_channel::Sender<UiMsg>) -> std::io::Result<()> {
+/// Why the daemon event stream ended. It exists so the reconnect loop can tell a
+/// dropped daemon apart from one that is alive and merely incompatible — the two used
+/// to be the same `Ok(())`, which is how a version mismatch came to be reported as
+/// "The Nullgate service isn't running".
+#[derive(PartialEq, Eq)]
+enum StreamEnd {
+    /// The connection closed, or never opened. `was_live` distinguishes "we were
+    /// subscribed and the daemon went away" from "we still can't reach it", which is
+    /// what lets the loop re-announce the former without spamming the latter.
+    Disconnected { was_live: bool },
+    /// The daemon answered the handshake with a different IPC protocol version. It is
+    /// running — reporting it as down sends the user to fix the wrong thing.
+    VersionMismatch { daemon: u32 },
+    /// The daemon came back on a newer app version: an auto-update was applied and
+    /// this GUI is the stale half. Never constructed on Windows, where the installer
+    /// restarts the GUI externally instead of it relaunching itself.
+    #[cfg_attr(windows, allow(dead_code))]
+    UpdateApplied,
+}
+
+async fn stream_events(
+    socket: &std::path::Path,
+    tx: &async_channel::Sender<UiMsg>,
+) -> std::io::Result<StreamEnd> {
     let stream = transport::connect(socket).await?;
     let (mut reader, mut writer) = tokio::io::split(stream);
 
@@ -275,7 +330,7 @@ async fn stream_events(socket: &std::path::Path, tx: &async_channel::Sender<UiMs
     .await?;
     loop {
         let Some(frame) = read_frame(&mut reader).await? else {
-            return Ok(());
+            return Ok(StreamEnd::Disconnected { was_live: false });
         };
         if let Message::Response(IpcResponse::Hello {
             version,
@@ -283,13 +338,7 @@ async fn stream_events(socket: &std::path::Path, tx: &async_channel::Sender<UiMs
         }) = frame.body
         {
             if version != ipn_ipc::PROTO_VERSION {
-                let _ = tx
-                    .send(UiMsg::VersionMismatch {
-                        daemon: version,
-                        gui: ipn_ipc::PROTO_VERSION,
-                    })
-                    .await;
-                return Ok(());
+                return Ok(StreamEnd::VersionMismatch { daemon: version });
             }
             // After an auto-update the daemon restarts on a newer app version while
             // this GUI is still the old binary; relaunch ourselves to match (the
@@ -298,8 +347,7 @@ async fn stream_events(socket: &std::path::Path, tx: &async_channel::Sender<UiMs
             // it's restarted externally instead (see `restart_self`/`register_restart`).
             #[cfg(not(windows))]
             if !app_version.is_empty() && app_version != env!("CARGO_PKG_VERSION") {
-                let _ = tx.send(UiMsg::UpdateApplied).await;
-                return Ok(());
+                return Ok(StreamEnd::UpdateApplied);
             }
             #[cfg(windows)]
             let _ = &app_version;
@@ -307,15 +355,26 @@ async fn stream_events(socket: &std::path::Path, tx: &async_channel::Sender<UiMs
         }
     }
 
-    write_frame(
+    let subscribed = write_frame(
         &mut writer,
         &Frame {
             id: 1,
             body: Message::Request(IpcRequest::Subscribe),
         },
     )
-    .await?;
-    while let Some(frame) = read_frame(&mut reader).await? {
+    .await;
+    if subscribed.is_err() {
+        return Ok(StreamEnd::Disconnected { was_live: false });
+    }
+
+    // Subscribed: the UI is now showing live state, so *any* ending from here — a
+    // clean EOF or a broken pipe — is the daemon going away underneath it, and has to
+    // be reported even if the UI was already told "down" before this session began.
+    // Hence no `?`: propagating the error would reach the caller as a bare `Err`,
+    // indistinguishable from "never connected", and a daemon killed mid-session would
+    // leave a stale member list on screen.
+    // (An `Err` ends the loop exactly like a clean `Ok(None)` — that is the point.)
+    while let Ok(Some(frame)) = read_frame(&mut reader).await {
         if let Message::Event(ev) = frame.body {
             let msg = match ev {
                 IpcEvent::Status(s) => UiMsg::Status(s),
@@ -333,7 +392,7 @@ async fn stream_events(socket: &std::path::Path, tx: &async_channel::Sender<UiMs
             let _ = tx.send(msg).await;
         }
     }
-    Ok(())
+    Ok(StreamEnd::Disconnected { was_live: true })
 }
 
 /// Install the app stylesheet: a base "frameless" look on every platform, plus a
@@ -696,6 +755,10 @@ struct Ui {
     member_box: gtk::Box,
     audit_box: gtk::Box,
     relays_box: gtk::Box,
+    /// Full-width banners of the "Relay servers" panel (its ToolbarView's top bars):
+    /// the "set the same relays everywhere" warning, and "saved but not applied".
+    relay_warn_banner: adw::Banner,
+    relay_apply_banner: adw::Banner,
     member_title: adw::WindowTitle,
     notes_view: gtk::TextView,
     notes_target: Rc<RefCell<Option<String>>>,
@@ -781,10 +844,9 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
     // --- main header (static branding; carries the window controls) ---
     // "Nullgate" is the product name for this GUI client (codename ipn-gui).
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new(
-        "Nullgate",
-        &format!("v{}", env!("CARGO_PKG_VERSION")),
-    )));
+    // Title only — no version subtitle. It crowded the header bar, and the version is
+    // already on the About row (and in the About dialog).
+    header.set_title_widget(Some(&adw::WindowTitle::new("Nullgate", "")));
 
     // "+" create/join — only shown when not in a network (toggled below).
     let add_btn = gtk::MenuButton::builder()
@@ -896,6 +958,15 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
     let (member_panel, member_title) = make_panel("Member", &member_box);
     let (audit_panel, _) = make_panel("Activity log", &audit_box);
     let (relays_panel, _) = make_panel("Relay servers", &relays_box);
+    // The relay panel's alert banners are TOP BARS of its ToolbarView, not children of
+    // its content box — the box lives inside a Clamp, so a banner appended there is
+    // narrower than the view and reads as a floating card. Same reason (and same
+    // shape) as the main page's service/join banners; being top bars also means
+    // `render_relays`'s `clear_box` can't tear them down.
+    let relay_warn_banner = adw::Banner::builder().revealed(false).build();
+    let relay_apply_banner = adw::Banner::builder().revealed(false).build();
+    relays_panel.add_top_bar(&relay_warn_banner);
+    relays_panel.add_top_bar(&relay_apply_banner);
 
     // Notes panel: an editable text area presented as a rounded card that fills
     // the flyout below the header (with margins so it doesn't bleed to the edges)
@@ -1229,6 +1300,8 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
         member_box,
         audit_box,
         relays_box,
+        relay_warn_banner,
+        relay_apply_banner,
         member_title,
         notes_view,
         notes_target,
@@ -1368,7 +1441,7 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
                         }
                     }
                     UiMsg::Relays(status) => {
-                        render_relays(&ui.relays_box, &status, &net, &window);
+                        render_relays(&ui, &status, &net, &window);
                         ui.open("relays");
                     }
                     UiMsg::RelaysSaved => {
@@ -2287,7 +2360,8 @@ fn set_relays(net: &Net, settings: RelaySettings) {
 /// The "Relay servers" flyout: the configured custom relays (with add/remove),
 /// and the policy for combining them with the public relays. Device-level —
 /// available with or without a network.
-fn render_relays(b: &gtk::Box, st: &RelayStatus, net: &Net, window: &adw::ApplicationWindow) {
+fn render_relays(ui: &Ui, st: &RelayStatus, net: &Net, window: &adw::ApplicationWindow) {
+    let b = &ui.relays_box;
     clear_box(b);
     let s = &st.settings;
 
@@ -2295,29 +2369,29 @@ fn render_relays(b: &gtk::Box, st: &RelayStatus, net: &Net, window: &adw::Applic
     // the configured ones advertise it as their home relay, and a peer that
     // doesn't have it (or its token) has no way to reach them. Say so up front —
     // this is the warning whose absence cost the network three days.
-    if !s.servers.is_empty() {
-        let warn = adw::Banner::builder()
-            .title("Set these same relays — same URL and token — on every device")
-            .revealed(true)
-            .build();
-        b.append(&warn);
-    }
+    //
+    // Both banners are the panel's top bars (see `build_ui`), so they span the view
+    // and are only revealed/hidden here — never appended into the clamped content.
+    ui.relay_warn_banner
+        .set_title("Set these same relays — same URL and token — on every device");
+    ui.relay_warn_banner.set_revealed(!s.servers.is_empty());
 
     // What the daemon actually managed to do with the last change.
+    ui.relay_apply_banner.set_revealed(false);
     match &st.apply {
         RelayApply::Applied => {}
+        // Not an alert — a transient "still working on it", so it stays an inline row
+        // rather than a full-width banner.
         RelayApply::Pending => {
             let g = adw::PreferencesGroup::new();
             g.add(&property_row("Applying…", "Saved; still reaching the running daemon"));
             b.append(&g);
         }
         RelayApply::Failed { reason } => {
-            let banner = adw::Banner::builder()
-                .title("Saved, but not applied — restart the Nullgate daemon")
-                .revealed(true)
-                .build();
-            banner.set_tooltip_text(Some(reason));
-            b.append(&banner);
+            ui.relay_apply_banner
+                .set_title("Saved, but not applied — restart the Nullgate daemon");
+            ui.relay_apply_banner.set_tooltip_text(Some(reason));
+            ui.relay_apply_banner.set_revealed(true);
         }
     }
 
