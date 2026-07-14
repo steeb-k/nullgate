@@ -28,9 +28,7 @@ still produces `dist\nullgate-windows-x86_64.zip` as a byproduct, handy for loca
 
 ## Build
 ```powershell
-# Stop the service first if it's installed (it locks target\release\nullgate-daemon.exe):
-sc.exe stop NullgateDaemon
-
+# The NullgateDaemon service can keep running — see Gotchas.
 az login                                  # authenticate the signing session
 pwsh -File scripts\build-msi.ps1          # -> target\wix\nullgate-<ver>-windows-x86_64.msi
 signtool verify /pa target\wix\nullgate-<ver>-windows-x86_64.msi   # optional check
@@ -84,7 +82,9 @@ demand. On Linux/macOS the agent (and any open GUI) self-relaunch on the daemon'
 instead (`ipn-gui` `relaunch_agent` / `restart_self`), where updater and agent share the session.
 
 ## Gotchas
-- A **running `NullgateDaemon` service locks** `nullgate-daemon.exe` — stop it (`sc.exe stop NullgateDaemon`)
-  before a release build.
+- **The `NullgateDaemon` service does not need to be stopped for a release build.** The installed
+  service runs the exe from `Program Files`, so it never holds a lock on `target\release\
+  nullgate-daemon.exe`. (Only a daemon you launched *from the build tree* — `cargo run -p
+  ipn-daemon` — would, and that one you'd stop anyway.)
 - The MSI is **x64** (`-arch x64`) so it installs under `Program Files`, not `Program Files (x86)`.
 - The `UpgradeCode` in `wix\ipn.wxs` is fixed; never change it or upgrades break.

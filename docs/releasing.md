@@ -27,7 +27,7 @@ Per-platform detail: [windows-packaging.md](windows-packaging.md),
    literals, **not** derived from `Cargo.toml`, so they're easy to forget and a stale `versionCode`
    silently blocks in-place Android updates. Commit.
 3. **Build each artifact on its own OS:**
-   - **Windows** (signed): stop the service, `az login`, then
+   - **Windows** (signed): `az login`, then
      `pwsh -File scripts\build-msi.ps1` → `target\wix\nullgate-<ver>-windows-x86_64.msi`.
    - **Linux** (WSL/Linux): `scripts/package-linux.sh` → `dist/nullgate-<ver>-linux-x86_64.tar.gz`.
    - **macOS** (on a Mac): once, create the conda-forge GTK env(s) with

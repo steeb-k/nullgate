@@ -10,9 +10,9 @@
 #     plus the Trusted Signing client tools + Windows SDK and an authenticated Azure
 #     session (az login). If the metadata is absent the build still succeeds but the
 #     exes/MSI are UNSIGNED — do NOT ship that as a release (SmartScreen will warn).
-#   * The NullgateDaemon service must be STOPPED (a running service locks
-#     target\release\nullgate-daemon.exe and the release build will fail):
-#       sc.exe stop NullgateDaemon
+#   * The NullgateDaemon service does NOT need to be stopped. The installed service
+#     runs the exe under Program Files, not the one in target\release, so it never
+#     locks the build output. (An earlier version of this note said otherwise.)
 #
 # Usage:  pwsh -File scripts\build-msi.ps1 [-GtkRoot C:\gtk] [-Version <ver>] [-SkipBuild]
 #   -> target\wix\nullgate-<version>-windows-x86_64.msi
@@ -45,7 +45,7 @@ if ($SkipBuild) {
     Write-Host "[1/6] cargo build --release" -ForegroundColor Cyan
     & cargo build --release -p ipn-gui -p ipn-daemon -p ipn-cli
     if ($LASTEXITCODE -ne 0) {
-        throw "cargo build failed. If it couldn't replace nullgate-daemon.exe, stop the service first: sc.exe stop NullgateDaemon"
+        throw "cargo build failed. If it couldn't replace nullgate-daemon.exe, something is running it FROM THE BUILD TREE (e.g. cargo run -p ipn-daemon) - stop that. The installed service runs from Program Files and does not lock it."
     }
 }
 
