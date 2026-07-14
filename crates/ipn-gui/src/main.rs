@@ -186,6 +186,30 @@ impl Net {
         });
     }
 
+    /// Fire a request and hand the response back **on the GTK thread**, so the
+    /// caller can update the widget that asked for it.
+    ///
+    /// [`request`](Self::request) maps its response on the runtime, which cannot
+    /// touch GTK objects — everything it learns has to fit through a [`UiMsg`]
+    /// and be rendered globally. That is the right shape for state the whole page
+    /// shows, and the wrong one for an answer that belongs to a single dialog or
+    /// row (a relay probe: "did *this* relay take *this* token?").
+    fn request_local<F>(&self, req: IpcRequest, done: F)
+    where
+        F: FnOnce(std::io::Result<IpcResponse>) + 'static,
+    {
+        let socket = self.socket.clone();
+        let (tx, rx) = async_channel::bounded(1);
+        self.handle.spawn(async move {
+            let _ = tx.send(transport::oneshot_request(&socket, req).await).await;
+        });
+        glib::spawn_future_local(async move {
+            if let Ok(res) = rx.recv().await {
+                done(res);
+            }
+        });
+    }
+
     /// Push a transient toast to the UI from the GTK thread (synchronous callers).
     fn toast(&self, msg: impl Into<String>) {
         let _ = self.tx.try_send(UiMsg::Toast(msg.into()));
@@ -1900,6 +1924,37 @@ fn render_relays(b: &gtk::Box, st: &RelayStatus, net: &Net, window: &adw::Applic
                 "No access token"
             })
             .build();
+
+        // Test: connect to the relay with what's saved. Worth having on a relay
+        // that is already configured — a relay can start refusing the token it
+        // used to accept (rotated, revoked, redeployed), and the way you find out
+        // is that peers quietly stop seeing this device.
+        let test = icon_button("network-transmit-receive-symbolic", "Test this relay");
+        {
+            let net2 = net.clone();
+            let server = server.clone();
+            test.connect_clicked(move |btn| {
+                let spinner = gtk::Spinner::new();
+                spinner.start();
+                btn.set_child(Some(&spinner));
+                btn.set_sensitive(false);
+
+                let btn2 = btn.clone();
+                let net3 = net2.clone();
+                let gated = server.token.is_some();
+                probe_relay(&net2, server.clone(), move |res| {
+                    btn2.set_sensitive(true);
+                    btn2.set_icon_name("network-transmit-receive-symbolic");
+                    match res {
+                        Ok(()) if gated => net3.toast("The relay accepted this token."),
+                        Ok(()) => net3.toast("The relay is reachable."),
+                        Err(e) => net3.toast(e),
+                    }
+                });
+            });
+        }
+        row.add_suffix(&test);
+
         let remove = icon_button("user-trash-symbolic", "Remove this relay");
         {
             let net2 = net.clone();
@@ -1945,49 +2000,220 @@ fn render_relays(b: &gtk::Box, st: &RelayStatus, net: &Net, window: &adw::Applic
     }
 }
 
+/// Connect to a relay with these credentials, from a throwaway endpoint in the
+/// daemon, and report whether it accepted us. Takes seconds; never touches the
+/// live endpoint. `done` runs on the GTK thread.
+fn probe_relay(
+    net: &Net,
+    server: RelayServer,
+    done: impl FnOnce(Result<(), String>) + 'static,
+) {
+    let req = IpcRequest::ProbeRelay {
+        url: server.url,
+        token: server.token,
+    };
+    net.request_local(req, move |r| {
+        done(match r {
+            Ok(IpcResponse::Ok) => Ok(()),
+            Ok(IpcResponse::Err(e)) => Err(e),
+            Ok(_) => Err("Unexpected response from the daemon.".into()),
+            Err(_) => Err("Can't reach the Nullgate daemon.".into()),
+        })
+    });
+}
+
 /// Dialog collecting a relay URL + optional access token, appended to `cur`.
+///
+/// The relay is tested before it is saved, because a relay this device can't use
+/// is not a mild misconfiguration: the device homes on it, peers that can't use
+/// it lose their relay path here, and — hole-punching being relay-coordinated —
+/// usually the direct path too. That partition is silent, and a typo in a token
+/// is enough to cause it.
+///
+/// So the dialog stays up for the test — progress and any failure are shown
+/// *inside* it, with the text still in the fields — and only closes once the
+/// relay has accepted us. That is why this is a hand-built `adw::Window` and not
+/// an `adw::MessageDialog`: a MessageDialog closes itself on any response, which
+/// would leave the check reporting into a dialog that no longer exists.
+///
+/// **Add anyway** appears once a test has failed: a wrong token and a relay
+/// that is merely down are indistinguishable from here (both are "never came
+/// online"), and someone configuring their devices before the relay is up has
+/// done nothing wrong.
 fn add_relay_dialog(window: &adw::ApplicationWindow, net: &Net, cur: &RelaySettings) {
-    let fields = gtk::Box::new(gtk::Orientation::Vertical, 8);
     let url = gtk::Entry::builder()
         .placeholder_text("https://relay.example.com:8443")
-        .activates_default(true)
         .build();
     let token = gtk::Entry::builder()
         .placeholder_text("Access token (optional)")
-        .activates_default(true)
         .build();
-    fields.append(&url);
-    fields.append(&token);
-    let dialog = adw::MessageDialog::builder()
+
+    let body = gtk::Label::new(Some(
+        "The address of your own iroh relay. If it requires an access token, paste it below. \
+         Nullgate connects to the relay to check it before saving.",
+    ));
+    body.set_wrap(true);
+    body.set_justify(gtk::Justification::Center);
+    body.add_css_class("dim-label");
+
+    // One status line, used for both the wait and the reason it failed.
+    let spinner = gtk::Spinner::new();
+    let status = gtk::Label::new(None);
+    status.set_wrap(true);
+    status.set_xalign(0.0);
+    let status_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    status_row.append(&spinner);
+    status_row.append(&status);
+    status_row.set_visible(false);
+
+    let cancel = gtk::Button::with_label("Cancel");
+    let force = gtk::Button::with_label("Add anyway");
+    force.add_css_class("destructive-action");
+    force.set_visible(false);
+    let add = gtk::Button::with_label("Add");
+    add.add_css_class("suggested-action");
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    buttons.set_halign(gtk::Align::End);
+    buttons.append(&cancel);
+    buttons.append(&force);
+    buttons.append(&add);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.set_margin_top(12);
+    content.set_margin_bottom(24);
+    content.set_margin_start(24);
+    content.set_margin_end(24);
+    content.append(&body);
+    content.append(&url);
+    content.append(&token);
+    content.append(&status_row);
+    content.append(&buttons);
+
+    let view = adw::ToolbarView::new();
+    view.add_top_bar(&adw::HeaderBar::new());
+    view.set_content(Some(&content));
+    let dialog = adw::Window::builder()
         .transient_for(window)
-        .heading("Add a relay server")
-        .body("The address of your own iroh relay. If it requires an access token, paste it below.")
-        .extra_child(&fields)
+        .modal(true)
+        .title("Add a relay server")
+        .default_width(400)
+        .content(&view)
         .build();
-    dialog.add_response("cancel", "Cancel");
-    dialog.add_response("add", "Add");
-    dialog.set_response_appearance("add", adw::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some("add"));
-    let net = net.clone();
-    let cur = cur.clone();
-    dialog.connect_response(None, move |_, resp| {
-        if resp != "add" {
-            return;
+
+    let save = {
+        let net = net.clone();
+        let cur = cur.clone();
+        let dialog = dialog.clone();
+        move |server: RelayServer| {
+            let mut next = cur.clone();
+            next.servers.retain(|r| r.url != server.url);
+            next.servers.push(server);
+            set_relays(&net, next);
+            dialog.close();
         }
-        let url = url.text().trim().to_string();
-        if url.is_empty() {
-            return;
+    };
+
+    // What the user typed, or nothing if there's no URL to test.
+    let entered = {
+        let url = url.clone();
+        let token = token.clone();
+        move || {
+            let url = url.text().trim().to_string();
+            if url.is_empty() {
+                return None;
+            }
+            let token = token.text().trim().to_string();
+            Some(RelayServer {
+                url,
+                token: if token.is_empty() { None } else { Some(token) },
+            })
         }
-        let token = token.text().trim().to_string();
-        let mut next = cur.clone();
-        next.servers.retain(|r| r.url != url);
-        next.servers.push(RelayServer {
-            url,
-            token: if token.is_empty() { None } else { Some(token) },
-        });
-        set_relays(&net, next);
+    };
+
+    cancel.connect_clicked({
+        let dialog = dialog.clone();
+        move |_| dialog.close()
     });
+    force.connect_clicked({
+        let save = save.clone();
+        let entered = entered.clone();
+        move |_| {
+            if let Some(server) = entered() {
+                save(server);
+            }
+        }
+    });
+
+    let start_test = {
+        let net = net.clone();
+        let widgets = (
+            url.clone(),
+            token.clone(),
+            add.clone(),
+            force.clone(),
+            cancel.clone(),
+            spinner.clone(),
+            status.clone(),
+            status_row.clone(),
+        );
+        move || {
+            let (url, token, add, force, cancel, spinner, status, status_row) = widgets.clone();
+            let Some(server) = entered() else { return };
+
+            // Locked down for the duration: the fields are what is being tested,
+            // and a second Add would race the first.
+            for w in [url.upcast_ref::<gtk::Widget>(), token.upcast_ref()] {
+                w.set_sensitive(false);
+            }
+            add.set_sensitive(false);
+            force.set_visible(false);
+            cancel.set_sensitive(false);
+            status.remove_css_class("error");
+            status.set_text(&format!("Testing {}…", server.url));
+            spinner.start();
+            spinner.set_visible(true);
+            status_row.set_visible(true);
+
+            let save = save.clone();
+            let probed = server.clone();
+            probe_relay(&net, server, move |res| {
+                for w in [url.upcast_ref::<gtk::Widget>(), token.upcast_ref()] {
+                    w.set_sensitive(true);
+                }
+                add.set_sensitive(true);
+                cancel.set_sensitive(true);
+                spinner.stop();
+                spinner.set_visible(false);
+                match res {
+                    Ok(()) => {
+                        status.set_text("The relay accepted this device.");
+                        save(probed);
+                    }
+                    Err(e) => {
+                        status.add_css_class("error");
+                        status.set_text(&e);
+                        // Now that they've seen why, let them overrule it.
+                        force.set_visible(true);
+                        add.set_label("Try again");
+                    }
+                }
+            });
+        }
+    };
+
+    add.connect_clicked({
+        let start_test = start_test.clone();
+        move |_| start_test()
+    });
+    for entry in [&url, &token] {
+        entry.connect_activate({
+            let start_test = start_test.clone();
+            move |_| start_test()
+        });
+    }
+
     dialog.present();
+    url.grab_focus();
 }
 
 fn render_admin(

@@ -93,6 +93,12 @@ phone it's in the ⋮ menu) and add its address, plus its access token if it req
 then carries the traffic, while the public relays stay available as a backup, so a device that
 *doesn't* have your relay can still reach you.
 
+Nullgate connects to the relay to check it — token and all — before saving it, and tells you inside
+the dialog if the relay won't have it. You can re-test a relay you've already added at any time with
+the ⇄ button beside it: a relay that used to work can start turning you away (a token gets rotated,
+the server gets redeployed), and otherwise the way you'd find out is that other devices quietly stop
+seeing this one.
+
 **Put the same relay — same address, same token — on every device.** This is the one setting that
 can cut your network in half. Each device is only configured locally; adding a relay here does not
 add it for anyone else. If a relay needs a token, it turns away devices that don't have it, and a

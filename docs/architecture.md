@@ -54,9 +54,10 @@ the membership list is a small signed document every member replicates.
   which is the only way to ask the question — the token rides on the websocket upgrade and the
   relay's access check runs *after* it, so a rejected client gets the same `101` as anyone else and
   is dropped inside the stream. It never touches the running endpoint, so it can't wedge the socket
-  actor. Exposed as `IpcRequest::ProbeRelay`; `nullgate-cli relay add` uses it to refuse a token the
-  relay won't take. A wrong token and an unreachable relay are indistinguishable from outside, and
-  the error says so.
+  actor. Exposed as `IpcRequest::ProbeRelay`, and used by both clients: `nullgate-cli relay add`
+  refuses a token the relay won't take, and the GUI tests a relay before saving it (in-dialog, with
+  an **Add anyway** escape) and again on demand from each row. A wrong token and an unreachable relay
+  are indistinguishable from outside, and the error says so.
 
   The settings are deliberately **not** distributed through the roster: every member configures its
   own. That is a real hazard — see the security note — so both UIs warn about it.

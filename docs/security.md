@@ -82,9 +82,9 @@ A token is never taken as a **command-line argument**: `nullgate-cli relay add <
 with echo off (reading the terminal directly, or stdin when it is piped). argv is not private — any
 other user of the machine can read it out of `ps`, and the shell records the whole command line in
 its history file — which would leak the token to precisely the local readers the data dir's
-ownership is meant to exclude. The token then travels only over the local IPC socket. The CLI also
-*verifies* a token against the relay before saving it (`ProbeRelay`), because storing one the relay
-rejects has the same effect as the partition described below, silently.
+ownership is meant to exclude. The token then travels only over the local IPC socket. Both clients
+also *verify* a token against the relay before saving it (`ProbeRelay`), because storing one the
+relay rejects has the same effect as the partition described below, silently.
 
 That isolation has a sharp edge worth stating plainly: **a token-gated relay makes a device
 unreachable to peers that don't have the token.** A relay rejects clients without its token (`401`),

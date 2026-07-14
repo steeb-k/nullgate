@@ -13,12 +13,18 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
   blank answer means the relay has no token.
 
 ### Added
-- **A relay token is checked against the relay before it is saved.** `relay add` connects to the
-  relay with the token from a throwaway endpoint (`relays::probe_relay`, exposed as
-  `IpcRequest::ProbeRelay`; IPC protocol → v6) and asks again if the relay won't accept it. Saving a
-  token the relay rejects is not a small mistake: the device ends up homed on a relay it cannot use,
-  and peers lose both the relay path and — hole-punching being relay-coordinated — the direct one.
-  The probe binds its own endpoint, so it cannot wedge the live one.
+- **A relay is checked against the relay server before it is saved.** Both the CLI and the GUI
+  connect to the relay with the credentials given, from a throwaway endpoint (`relays::probe_relay`,
+  exposed as `IpcRequest::ProbeRelay`; IPC protocol → v6). `relay add` asks for the token again if
+  the relay won't accept it; the GUI keeps its **Add a relay server** dialog open, reports the
+  failure in place, and offers **Try again** or **Add anyway** (a relay that is merely down looks
+  exactly like a wrong token from out here). Saving a relay this device can't use is not a small
+  mistake: it homes on that relay, and peers lose both the relay path to it and — hole-punching
+  being relay-coordinated — usually the direct one. The probe binds its own endpoint, so it cannot
+  wedge the live one.
+- **Test a relay you've already added**, from the ⇄ button beside it in the relay list. A relay can
+  start refusing a token it used to accept (rotated, revoked, redeployed) and nothing else would
+  tell you — the symptom is peers quietly losing sight of this device.
 
 ## [0.3.3] - 2026-07-13
 > **Behaviour change.** `preferred` (the default relay policy) now keeps the public iroh relays
