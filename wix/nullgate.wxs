@@ -2,17 +2,30 @@
 <!--
   Nullgate (Nullgate) MSI (WiX v4+ schema; built with WiX 5).
 
-  Installs the self-contained portable bundle (dist\nullgate-windows-x86_64: the three
+  Installs the self-contained portable bundle (dist\nullgate-windows-<arch>: the three
   exes plus the whole GTK runtime, wintun.dll and the updater script) into
   "Program Files\Nullgate", registers + starts the LocalSystem "NullgateDaemon" service,
   registers the "NullgateUpdate" scheduled task (daily auto-update), and drops
   Start-menu + desktop shortcuts to the GUI.
+
+  One .wxs builds both the x86_64 and the ARM64 MSI. Everything here is
+  architecture-neutral except the Util extension's custom-action binary, which ships
+  one DLL per architecture — hence $(UtilCA), passed in by scripts\build-msi.ps1
+  (Wix4UtilCA_X64 / Wix4UtilCA_A64). ProgramFiles64Folder and System64Folder both
+  resolve to the *native* directories on ARM64, which is what we want: the daemon is a
+  native ARM64 service, not an emulated one.
+
+  The UpgradeCode is deliberately shared between the two architectures, so installing
+  the ARM64 MSI on a machine running the x86_64 build (which Windows on ARM will
+  happily run under emulation) is a major upgrade that replaces it, rather than a
+  second product sitting alongside the first.
 
   Build (see scripts\build-msi.ps1) — needs the UI + Util extensions and -arch x64
   so it installs to Program Files (not Program Files (x86)):
     wix build -arch x64 wix\nullgate.wxs ^
       -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext ^
       -d DistDir=dist\nullgate-windows-x86_64 -d Version=<ver> -d LicenseRtf=<path> ^
+      -d UtilCA=Wix4UtilCA_X64 ^
       -o target\wix\nullgate-<ver>-windows-x86_64.msi
 
   Version is single-sourced from Cargo.toml (passed as $(Version) by build-msi.ps1).
@@ -54,7 +67,7 @@
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Nullgate" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
     <Property Id="WixShellExecTarget" Value="[#nullgate.exe]" />
-    <CustomAction Id="LaunchApplication" BinaryRef="Wix4UtilCA_X64"
+    <CustomAction Id="LaunchApplication" BinaryRef="$(UtilCA)"
                   DllEntry="WixShellExec" Impersonate="yes" Return="ignore" />
     <UI>
       <!-- DialogRef resolves the dialog symbol from the UI extension so the
@@ -211,14 +224,14 @@
          removal, so the task survives version bumps). Deferred + no-impersonate
          => runs in the elevated install context. Return="ignore" so a task
          failure never blocks the install/uninstall. -->
-    <CustomAction Id="RegisterUpdateTask" BinaryRef="Wix4UtilCA_X64"
+    <CustomAction Id="RegisterUpdateTask" BinaryRef="$(UtilCA)"
                   DllEntry="WixQuietExec64" Execute="deferred"
                   Impersonate="no" Return="ignore" />
     <SetProperty Id="RegisterUpdateTask" Sequence="execute" Before="RegisterUpdateTask"
                  Condition="NOT REMOVE"
                  Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File &quot;[#UpdateScript]&quot; -RegisterTask" />
 
-    <CustomAction Id="UnregisterUpdateTask" BinaryRef="Wix4UtilCA_X64"
+    <CustomAction Id="UnregisterUpdateTask" BinaryRef="$(UtilCA)"
                   DllEntry="WixQuietExec64" Execute="deferred"
                   Impersonate="no" Return="ignore" />
     <SetProperty Id="UnregisterUpdateTask" Sequence="execute" Before="UnregisterUpdateTask"

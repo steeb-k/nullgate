@@ -34,8 +34,27 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $Repo      = if ($env:NULLGATE_BINARIES_REPO) { $env:NULLGATE_BINARIES_REPO } else { 'steeb-k/nullgate' }
-$AssetGlob = '*windows-x86_64.msi'
 $TaskName  = 'NullgateUpdate'
+
+# Which MSI to pull. Keyed off the OS architecture, NOT the installed build's: a
+# Windows-on-ARM machine that installed the x86_64 MSI (which it will happily run under
+# emulation) should migrate to the native ARM64 build, and the shared UpgradeCode makes
+# that a normal major upgrade. That migration is the point — under emulation the wintun
+# *kernel driver* cannot load, so routing is dead even though the app looks fine.
+#
+# RuntimeInformation reports the OS architecture even from an emulated process, which
+# PROCESSOR_ARCHITECTURE does not; the env vars are only a fallback.
+function Get-OsArch {
+    try {
+        $a = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+        if ($a) { return $a }
+    } catch { }
+    if ($env:PROCESSOR_ARCHITEW6432) { return $env:PROCESSOR_ARCHITEW6432 }
+    return $env:PROCESSOR_ARCHITECTURE
+}
+
+$OsArch = Get-OsArch
+$AssetGlob = if ($OsArch -match 'Arm64') { '*windows-arm64.msi' } else { '*windows-x86_64.msi' }
 $BinDir    = $PSScriptRoot
 $DaemonExe = Join-Path $BinDir 'nullgate-daemon.exe'
 $GuiExe    = Join-Path $BinDir 'nullgate.exe'
@@ -154,7 +173,7 @@ function Invoke-Update {
         Write-Log "nullgate-daemon.exe not found next to the updater; nothing to do"
         return
     }
-    Write-Log "checking $Repo for a newer release (installed: $installed)"
+    Write-Log "checking $Repo for a newer release (installed: $installed, os: $OsArch, asset: $AssetGlob)"
 
     $headers = @{ 'User-Agent' = 'nullgate-update'; 'Accept' = 'application/vnd.github+json' }
     $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers $headers
@@ -170,7 +189,14 @@ function Invoke-Update {
     if ($CheckOnly) { return }
 
     $asset = $rel.assets | Where-Object { $_.name -like $AssetGlob } | Select-Object -First 1
-    if (-not $asset) { Write-Log "release $tag has no $AssetGlob asset"; return }
+    if (-not $asset) {
+        # Deliberately no fallback to another architecture's MSI. On ARM64 the x86_64
+        # build installs and runs, so a fallback would look like it worked — but its
+        # wintun kernel driver cannot load on an ARM64 kernel, so routing would be
+        # silently dead. Better to stay on the working build and say nothing happened.
+        Write-Log "release $tag has no $AssetGlob asset; staying on $installed"
+        return
+    }
 
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("nullgate-{0}.msi" -f $latest)
     Write-Log "downloading $($asset.name)"

@@ -74,9 +74,11 @@ pwsh -File scripts/run-android.ps1            # build APK + install + launch (em
 #   or: cd android && ./gradlew :app:assembleDebug   ; see docs/android-packaging.md
 ```
 Packaging + releases: see `docs/releasing.md` (+ `windows-/linux-/macos-/android-packaging.md`). From
-0.1.0 we ship real installers with auto-update: a **code-signed Windows MSI** (`scripts/
-build-msi.ps1`, Azure Trusted Signing), a **Linux** system-service tarball (`scripts/
-package-linux.sh` + `packaging/linux/nullgatectl`), and a **macOS** universal `.app` tarball
+0.1.0 we ship real installers with auto-update: **code-signed Windows MSIs** for x86_64 **and
+ARM64** (`scripts/build-msi.ps1 [-Arch arm64]`, Azure Trusted Signing — ARM64 is cross-built on the
+x86_64 box; ship both or neither, as the updater won't cross architectures), a **Linux**
+system-service tarball (`scripts/package-linux.sh` + `packaging/linux/nullgatectl`), and a **macOS**
+universal `.app` tarball
 (`scripts/setup-conda-macos.sh` once to build the conda-forge GTK env, then
 `scripts/package-macos.sh`, built on a Mac). Releases are `gh release` uploads to the **public**
 `steeb-k/nullgate` repo; the in-product updaters + `install.sh` read its
@@ -248,6 +250,28 @@ added.
   generated color classes own it, and a `border: none` there would flatten every button.
 - **GTK on Windows** comes from gvsbuild at `C:\gtk`; `pkg-config` must resolve `gtk4` and
   `libadwaita-1`. On Linux, install the `-dev` packages.
+- **The Windows ARM64 build is two ABIs in one bundle, and that is not a mistake to tidy up.**
+  gvsbuild is x64-only and vcpkg's `gtk` port explicitly excludes arm64-windows, so the only
+  prebuilt GTK4 + libadwaita for Windows on ARM is **MSYS2's CLANGARM64** — which is mingw-ABI.
+  So the **GUI** builds for `aarch64-pc-windows-gnullvm` while the **daemon + CLI** (no GTK
+  dependency at all) stay on `aarch64-pc-windows-msvc`. Nothing is compromised by this: they are
+  separate processes that only meet over a named pipe, so no ABI boundary is ever crossed inside a
+  process. Everything cross-compiles from the x86_64 box (`scripts/build-arm64.ps1`,
+  `fetch-gtk-msys2.ps1`, `build-msi.ps1 -Arch arm64`). Four traps: (1) `ring` needs `clang` on
+  `PATH` for either aarch64 target — the only dep that does; (2) `winresource` passes no `--target`
+  to `windres` for aarch64, so an unprefixed `windres` emits an **x64** object and the link dies
+  with "machine type x64 conflicts with arm64" — `ipn-gui/build.rs` pins
+  `aarch64-w64-mingw32-windres` when the *target* is aarch64; (3) MSYS2's `bin\` is a shared prefix
+  for the whole dependency closure, not a curated GTK tree, so a blanket `*.dll` copy ships
+  `libpython3.14.dll` — the bundler copies only the **import closure** of our binaries plus the
+  pixbuf loaders (which GTK `dlopen`s rather than imports); (4) the ARM64 tree's GTK helper tools
+  can't run on the build host, so the schemas/pixbuf caches are generated with the **x86_64 build of
+  the same MSYS2 packages** (`fetch-gtk-msys2.ps1 -Env ucrt64`) — the bundler asserts the two loader
+  sets match first. Since none of it can be launched here, `scripts/verify-bundle.ps1` reads every
+  PE header to prove the bundle is single-architecture with no unresolvable imports; it runs on
+  both arches. **Why bother at all:** under x64 emulation the app runs but `wintun`'s *kernel
+  driver* can't load on an ARM64 kernel, so routing is silently dead — hence also why the updater
+  picks its MSI by **OS** arch and never falls back across architectures.
 - **GTK on macOS** comes from **conda-forge**, not Homebrew (`scripts/setup-conda-macos.sh` builds
   `.conda-gtk/{arm64,x86}`) — conda-forge's dylibs carry `minos 11.0` so the shipped `.app` runs on
   macOS 11+, whereas Homebrew stamps the build host's OS (e.g. `minos 26` on a macOS 26 box). Needs a

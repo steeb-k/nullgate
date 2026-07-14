@@ -28,7 +28,12 @@ Per-platform detail: [windows-packaging.md](windows-packaging.md),
    silently blocks in-place Android updates. Commit.
 3. **Build each artifact on its own OS:**
    - **Windows** (signed): `az login`, then
-     `pwsh -File scripts\build-msi.ps1` → `target\wix\nullgate-<ver>-windows-x86_64.msi`.
+     `pwsh -File scripts\build-msi.ps1` → `target\wix\nullgate-<ver>-windows-x86_64.msi`, and
+     `pwsh -File scripts\build-msi.ps1 -Arch arm64` → `…-windows-arm64.msi`. Both are built on
+     the x86_64 box (ARM64 is fully cross-compiled); see `windows-packaging.md` for its one-time
+     toolchain setup. **Ship both or neither** — the updater picks its asset by OS architecture
+     and will not fall back across architectures, so a release with only the x86_64 MSI silently
+     strands every ARM64 install on its current version.
    - **Linux** (WSL/Linux): `scripts/package-linux.sh` → `dist/nullgate-<ver>-linux-x86_64.tar.gz`.
    - **macOS** (on a Mac): once, create the conda-forge GTK env(s) with
      `scripts/setup-conda-macos.sh --universal` (needs `micromamba`/`mamba`/`conda` on PATH);
@@ -45,15 +50,17 @@ Per-platform detail: [windows-packaging.md](windows-packaging.md),
    ```sh
    gh release create v<ver> --repo steeb-k/nullgate \
      --title "v<ver>" --notes-file release-notes.md \
-     target/wix/nullgate-<ver>-windows-x86_64.msi
+     target/wix/nullgate-<ver>-windows-x86_64.msi \
+     target/wix/nullgate-<ver>-windows-arm64.msi
    gh release upload v<ver> --repo steeb-k/nullgate dist/nullgate-<ver>-linux-x86_64.tar.gz
    gh release upload v<ver> --repo steeb-k/nullgate dist/nullgate-<ver>-macos-universal.tar.gz
    gh release upload v<ver> --repo steeb-k/nullgate nullgate-<ver>-android.apk
    ```
    Asset names must stay `nullgate-<ver>-<platform>.<ext>` — the desktop updaters glob on
-   `windows-x86_64.msi`, `linux-x86_64.tar.gz`, and `macos-(universal|<arch>).tar.gz`; the Android
-   build is a single universal `nullgate-<ver>-android.apk` (Obtainium auto-selects the lone `.apk`
-   asset — see the Android note below).
+   `windows-x86_64.msi`, `windows-arm64.msi`, `linux-x86_64.tar.gz`, and
+   `macos-(universal|<arch>).tar.gz`; the Android build is a single universal
+   `nullgate-<ver>-android.apk` (Obtainium auto-selects the lone `.apk` asset — see the Android
+   note below).
 
 ## Smoke-check before announcing
 - **Windows:** install the MSI on a clean machine; confirm the app opens, the `NullgateDaemon` service

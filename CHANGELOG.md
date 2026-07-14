@@ -5,6 +5,35 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-14
+
+### Added
+- **Windows on ARM: a native ARM64 build and installer**
+  (`nullgate-<ver>-windows-arm64.msi`). Windows on ARM already ran the x86_64 build under
+  emulation, but only in the sense that the app opened: `wintun.dll` is backed by a **kernel
+  driver**, an ARM64 kernel will not load an x64 one, and an emulated x64 process cannot load
+  the ARM64 DLL instead — so routing, the entire point of the product, silently did not work.
+  Both MSIs share an `UpgradeCode`, so an ARM64 machine running the emulated x86_64 build
+  migrates to the native one as a normal major upgrade.
+
+  The build is fully cross-compiled from an x86_64 host. It is split across two ABIs, because
+  GTK leaves no choice: gvsbuild is x64-only and vcpkg's `gtk` port excludes arm64-windows, so
+  the only prebuilt GTK4 + libadwaita for Windows on ARM is MSYS2's CLANGARM64 — which is
+  mingw-ABI. The GUI therefore targets `aarch64-pc-windows-gnullvm` while the daemon and CLI
+  (which have no GTK dependency) stay on `aarch64-pc-windows-msvc`. They are separate processes
+  that only meet over a named pipe, so no ABI boundary is ever crossed inside a process.
+  New: `scripts/fetch-gtk-msys2.ps1` (resolves and unpacks the MSYS2 dependency closure with no
+  MSYS2 install), `scripts/build-arm64.ps1`, `scripts/verify-bundle.ps1`.
+
+### Changed
+- **The Windows updater now picks its MSI by OS architecture**, not by the installed build's, so
+  an ARM64 machine on the emulated x86_64 build moves itself onto the native one. It will not
+  fall back across architectures: if a release has no MSI for the machine, it stays put rather
+  than install a build whose routing cannot work.
+- `bundle-gtk-windows.ps1` and `build-msi.ps1` take `-Arch x86_64|arm64`; every bundle is now
+  checked (`verify-bundle.ps1`) for stray foreign-architecture binaries and unresolvable DLL
+  imports, which is how an ARM64 bundle gets validated on a machine that cannot run it.
+
 ## [0.4.0] - 2026-07-13
 
 ### Fixed

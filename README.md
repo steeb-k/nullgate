@@ -51,11 +51,13 @@ devices find and authenticate each other directly (built on [iroh](https://www.i
 
 ## Get it
 
-**Windows** — download `nullgate-<version>-windows-x86_64.msi` from the
+**Windows** — download the `.msi` for your PC from the
 [Releases](https://github.com/steeb-k/nullgate/releases) page and run it (it's
-code-signed). It installs the app plus the background networking service and keeps itself
-updated. Launch **Nullgate** from the Start menu — the desktop app is called
-**Nullgate**.
+code-signed). Most PCs want `nullgate-<version>-windows-x86_64.msi`; if yours has a
+Snapdragon or other ARM chip, take `nullgate-<version>-windows-arm64.msi` instead
+(Settings → System → About → *System type* tells you which). It installs the app plus the
+background networking service and keeps itself updated. Launch **Nullgate** from the Start
+menu — the desktop app is called **Nullgate**.
 
 **Linux & macOS** — one line in a terminal:
 

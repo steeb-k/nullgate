@@ -19,6 +19,18 @@ fn embed_windows_resource() {
     res.set("OriginalFilename", "nullgate.exe");
     res.set("InternalName", "nullgate.exe");
 
+    // Cross-compiling to ARM64 (aarch64-pc-windows-gnullvm, the target the MSYS2
+    // GTK stack forces on us): winresource deliberately passes no `--target` to
+    // windres for aarch64, so an unprefixed windres happily emits an *x64* object
+    // and the link then dies with "machine type x64 conflicts with arm64". The
+    // aarch64-prefixed driver from llvm-mingw infers the right target from its own
+    // name. Host builds are unaffected — this only fires when the TARGET is aarch64.
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if target_arch == "aarch64" && target_env == "gnu" {
+        res.set_windres_path("aarch64-w64-mingw32-windres");
+    }
+
     let ico = concat!(env!("CARGO_MANIFEST_DIR"), "/../../img/nullgate-icon.ico");
     if std::path::Path::new(ico).exists() {
         res.set_icon(ico);
