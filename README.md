@@ -143,6 +143,13 @@ or restart) under `%ProgramData%\Nullgate\logs` on Windows, `/var/log/nullgate` 
 back within a couple of minutes of one of these quick restarts won't spam everyone with a "came
 online" notification.
 
+**On the phone**, Nullgate eases off its background housekeeping when the app isn't on screen — it
+checks in far less often with the screen off — so it stays connected without draining the battery,
+then picks the pace back up the moment you open it. It also follows your network: switch between
+Wi‑Fi and mobile data, or turn another VPN on and then off, and Nullgate reconnects on its own. When
+another VPN takes over, Nullgate steps aside (it can't route while another VPN owns the connection)
+and comes back automatically once that VPN is switched off — you shouldn't need to toggle anything.
+
 ### Headless / CLI
 No GUI? Drive the same daemon with `nullgate-cli` — GTK isn't
 needed. The verification code is shown as **words** instead of emojis, so you can read it aloud or

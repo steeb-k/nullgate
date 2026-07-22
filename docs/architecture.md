@@ -71,12 +71,30 @@ the membership list is a small signed document every member replicates.
   without destroying rows), so a status push can never destroy a widget mid-click. Before this,
   every heartbeat emitted an event (N members ≈ N events/3 s), every event pushed a status, and any
   visible change rebuilt the entire page — which is what made clicks feel like they didn't work.
-- A periodic **maintenance tick** (every 3 s) reconciles the mesh: it rebuilds the roster, tears
+- A periodic **maintenance tick** reconciles the mesh: it rebuilds the roster, tears
   down connections to non-members, and dials any member we aren't yet connected to. Dialing is
   **de-duplicated and time-bounded** (`engine::spawn_dials`) — at most one in-flight `connect()`
   per peer, each capped by `DIAL_TIMEOUT`, with the slot freed on completion/timeout. This matters
   because an unreachable member is retried on every tick indefinitely; without the guard those
-  attempts (and their iroh connection/path state) accumulated without bound.
+  attempts (and their iroh connection/path state) accumulated without bound. On top of that, a
+  **per-peer dial backoff** (`engine::dial_backoff_filter`) spaces out retries to a *persistently*
+  unreachable member — `min(DIAL_TIMEOUT · 2ⁿ, 5 min)` — cleared the instant it reconnects or we
+  hear its presence heartbeat, so it saves work without ever giving up on a peer.
+- **Cadence adapts to whether anyone's looking (`Pace`).** Desktop always runs the tick at 3 s
+  (`TICK_INTERACTIVE_MS`). The Android facade drops it to 60 s (`TICK_BACKGROUND_MS`) and throttles
+  the presence heartbeat to 60 s (`PRESENCE_BROADCAST_BG_MS`) whenever the app is backgrounded or
+  the screen is off, via `Engine::set_pace` — the single biggest idle-battery lever on the phone,
+  since everything else (conntrack sweep, connection-info polls, the ~30 s catch-all event) rides
+  the same tick. A slow Background tick still reacts promptly: a `tokio::sync::Notify` wakes it
+  early on a pace change, a roster-doc change, or a network-change hint. Online status is unaffected
+  by the heartbeat throttle — a peer is "online" iff a live mesh connection exists, not from
+  heartbeats.
+- **The per-tick roster rebuild is event-driven.** Rebuilding the roster from the doc is a redb +
+  blob read; running it every tick was a real idle cost on every platform. It now rebuilds only when
+  the roster document actually changed — an `iroh_docs::api::Doc::subscribe` live-sync event sets a
+  dirty flag and wakes the tick — or when a 30 s catch-all (`ROSTER_REBUILD_CATCHALL_MS`) elapses;
+  otherwise the tick reuses the cached roster. The forwarding table, derived only from the roster,
+  is rebuilt only alongside it.
 - **One connection per peer, deterministically.** When both ends dial each other at once (common
   right after any drop, since both tick every 3 s) two connections briefly exist. A tie-break
   (`engine::resolve_duplicate`) makes *both* sides keep the **same** one — the connection initiated
@@ -327,3 +345,26 @@ known it emits `EngineEvent::TunSetupRequired`; the app stands up the `VpnServic
 outbound/inbound pump as desktop. It's a **split tunnel** — only the `10.99.0.0/24` is routed — so
 the phone's normal traffic (and iroh's own relay/peer traffic to public IPs) bypasses it, which is
 also why no `VpnService.protect()` is needed. See `docs/android-packaging.md`.
+
+**Connectivity changes must be fed in from Kotlin.** iroh's own network monitor is a no-op on
+Android (netlink route monitoring is restricted; `netwatch`'s Android backend is a documented stub),
+so an endpoint bound before a network switch otherwise keeps stale sockets, paths, relay connections
+and DNS state indefinitely — the "can't see any peers until I toggle Always-on VPN" bug, where only
+a full process restart (which rebinds the endpoint) recovered. The app therefore runs a
+`NetworkMonitor` (`ConnectivityManager` default-network + non-VPN-internet callbacks, debounced) and
+calls `MobileEngine::network_changed` → `Engine::network_changed`, which hands iroh the hint
+(`Endpoint::network_change` — the API that exists precisely for platforms that can't self-detect)
+**and** fires a one-shot recovery burst (re-seed the roster doc to *all* members, re-join gossip,
+clear dial backoff) in case iroh's own interface-state compare swallowed the hint. It also reports
+the underlying non-VPN network to the `VpnService` so metering/transport stay correct across
+Wi-Fi↔cellular.
+
+**Foreground/visibility and foreign-VPN handling live in the service + `EngineHolder`.** Screen
+on/off (a `BroadcastReceiver`) and `MainActivity` resume/pause drive `Engine::set_pace`
+(interactive only while visible; see `Pace` above) and gate the mDNS multicast lock to the
+foreground (a held lock forces the Wi-Fi chip to receive all multicast — real background cost). When
+another VPN takes over, Android calls `onRevoke`; rather than sit connected with a dead data plane
+(pure battery burn, and a misleading online dot to peers), the app **quiesces** (`set_online(false)`)
+and auto-resumes from the `NetworkMonitor` once the foreign VPN is gone — gated on a "user wants
+online" flag so a deliberate offline is never overridden. Because these are executable-command-free,
+per-user concerns they stay in the GUI/service layer, not the engine.

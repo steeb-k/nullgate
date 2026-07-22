@@ -5,6 +5,31 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-22
+
+### Changed
+- **Android battery: the engine now idles far more cheaply when the app isn't on-screen.**
+  The maintenance loop and presence heartbeat ran at a fixed 3-second cadence around the clock;
+  on Android they now drop to a 60-second cadence whenever the app is backgrounded or the screen
+  is off (`Pace::Background`), and return to the interactive cadence when it comes back to the
+  foreground. The per-tick roster rebuild (a redb + blob read that ran every 3s on every
+  platform) is now event-driven — it rebuilds only when the roster document actually changes
+  (via iroh-docs live-sync events), with a 30s catch-all — and persistently unreachable members
+  are redialed on an exponential backoff (capped at 5 min) instead of a flat ~20s forever. The
+  app also holds the Wi-Fi multicast lock only while in the foreground, and re-posts its
+  foreground notification only when the text actually changes. A peer's online status is
+  unchanged by any of this (it is derived from the live connection, not the heartbeat).
+
+### Fixed
+- **Android: peers become visible again on their own after another VPN releases the network.**
+  Switching to a different VPN and back used to leave the member list empty until Always-on VPN
+  was toggled off and on. iroh's own network monitor is a no-op on Android, so the endpoint kept
+  stale sockets after any network change; the app now watches connectivity
+  (`ConnectivityManager`) and hands iroh the change hint (`Endpoint::network_change`) plus a
+  recovery burst that re-seeds and redials every member. When a foreign VPN takes over, Nullgate
+  now quiesces (drops the mesh and tunnel) instead of burning battery on a dead data plane, and
+  resumes automatically once the other VPN is gone.
+
 ## [0.4.1] - 2026-07-14
 
 ### Added

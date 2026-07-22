@@ -31,7 +31,7 @@ pub mod tun_device;
 
 use std::sync::OnceLock;
 
-pub use engine::{AuditEntry, Engine, EngineEvent, MemberView, NetworkStatus};
+pub use engine::{AuditEntry, Engine, EngineEvent, MemberView, NetworkStatus, Pace};
 pub use network::{NetworkSecret, Ticket};
 pub use node::IrohNode;
 pub use relays::{RelayApply, RelayPolicy, RelayServer, RelaySettings, RelayStatus};

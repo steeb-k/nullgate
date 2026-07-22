@@ -11,11 +11,58 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ipn_core::engine::{Engine, EngineEvent};
+use ipn_core::Pace;
 
 fn scratch(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join("ipn-e2e").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     dir
+}
+
+/// Auto-approve every join request that reaches `e`.
+fn auto_approve(e: &Engine) {
+    let mut ev = e.subscribe();
+    let e2 = e.clone();
+    tokio::spawn(async move {
+        while let Ok(event) = ev.recv().await {
+            if let EngineEvent::JoinRequest { node_id, .. } = event {
+                let _ = e2.approve_join(&node_id).await;
+            }
+        }
+    });
+}
+
+async fn sees(e: &Engine, node_id: &str) -> bool {
+    e.status()
+        .await
+        .map(|s| s.members.iter().any(|m| m.node_id == node_id))
+        .unwrap_or(false)
+}
+
+/// Bring up a connected 2-node network (originator A + member B) and return both.
+async fn connected_pair(tag: &str) -> (Engine, Engine) {
+    let a = Engine::start(scratch(&format!("{tag}-a"))).await.unwrap();
+    let b = Engine::start(scratch(&format!("{tag}-b"))).await.unwrap();
+    auto_approve(&a);
+    let ticket = a
+        .create_network("home".into(), Ipv4Addr::new(10, 99, 0, 0))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), b.join_network(&ticket))
+        .await
+        .expect("join timed out")
+        .expect("join failed");
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if a.live_connection_count() >= 1 && b.live_connection_count() >= 1 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .expect("pair did not connect");
+    (a, b)
 }
 
 #[tokio::test]
@@ -130,4 +177,75 @@ async fn create_join_and_see_each_other() {
         sa.members.iter().find(|m| m.is_self).and_then(|m| m.label.clone()).is_none(),
         "a local nickname must not propagate to the nicknamed device"
     );
+}
+
+/// The network-change hint (Android's connectivity signal) must be safe to call and
+/// must leave the mesh connected — it rebinds iroh and fires a recovery burst, and
+/// on a healthy path that recovers/keeps the connection rather than tearing it down.
+/// (We can't synthetically pull the OS network here, so this asserts the observable
+/// contract: `network_changed()` is non-destructive and the pair stays connected.)
+#[tokio::test]
+#[ignore = "opens real iroh endpoints; run with --ignored"]
+async fn network_changed_keeps_the_mesh_connected() {
+    std::env::set_var("NULLGATE_DISABLE_TUN", "1");
+    std::env::set_var("NULLGATE_SECRETS_FILE_ONLY", "1");
+
+    let (a, b) = connected_pair("netchg").await;
+    let b_id = b.self_node_id_hex();
+
+    // Fire the hint repeatedly (as rapid Wi-Fi/cellular flaps would).
+    for _ in 0..3 {
+        a.network_changed().await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // Within a few ticks A must still (or again) hold a live connection to B and see
+    // it in the roster — the burst re-seeds/redials, it doesn't drop membership.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if a.live_connection_count() >= 1 && sees(&a, &b_id).await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .expect("mesh did not stay connected across network_changed()");
+}
+
+/// Self-eviction must still be prompt in `Pace::Background`: a removed device drops
+/// to zero connections and stops seeing the network well inside the 60s Background
+/// tick — proving the roster-doc live-sync event wakes the slow loop early (a pure
+/// 60s cadence could not meet this window).
+#[tokio::test]
+#[ignore = "opens real iroh endpoints; run with --ignored"]
+async fn background_pace_still_evicts_removed_device_promptly() {
+    std::env::set_var("NULLGATE_DISABLE_TUN", "1");
+    std::env::set_var("NULLGATE_SECRETS_FILE_ONLY", "1");
+
+    let (a, b) = connected_pair("bgpace").await;
+    let b_id = b.self_node_id_hex();
+
+    // Both devices go to the battery-saving cadence, as a backgrounded phone would.
+    a.set_pace(Pace::Background);
+    b.set_pace(Pace::Background);
+
+    // A removes B.
+    a.remove_member(&b_id).await.unwrap();
+
+    // B must self-evict (zero connections, network forgotten) well under 60s — only
+    // possible because the doc live-sync event wakes B's slow tick immediately.
+    tokio::time::timeout(Duration::from_secs(50), async {
+        loop {
+            if b.live_connection_count() == 0 && !b.has_network().await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .expect("removed device did not self-evict promptly under Background pace");
+
+    // And A no longer sees B.
+    assert!(!sees(&a, &b_id).await, "A should have dropped B from the roster");
 }

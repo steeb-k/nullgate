@@ -219,6 +219,31 @@ added.
   cross-checked against the public `IOPM.h`). (2) The sleep callback **must finish the disconnect
   before it acknowledges** the event, or powerd freezes the machine mid-teardown. The `notify.rs`
   online-debounce cannot substitute for any of this: a laptop asleep for hours clears any debounce.
+- **On Android, iroh gets no network-change signal and no cheap idle — both are fed from Kotlin.**
+  (1) iroh's `netwatch` network monitor is a **no-op on Android** (netlink is restricted), so an
+  endpoint bound before a Wi-Fi↔cellular switch or a foreign-VPN takeover keeps stale sockets/paths/
+  relay conns forever — the "can't see peers until I toggle Always-on VPN" bug (only a process
+  restart, which rebinds the endpoint, recovered). The fix is *not* to recreate `IrohNode`: iroh has
+  `Endpoint::network_change()` for exactly this. `Engine::network_changed()` calls it **and** fires a
+  one-shot recovery burst (`force_recover`: reseed the doc to *all* members, re-join gossip, clear
+  dial backoff) because iroh silently drops the hint when its re-read interface state compares equal
+  — keep both halves. The signal comes from `NetworkMonitor.kt` (`ConnectivityManager`), the only
+  source Android exposes. (2) The engine's maintenance tick + presence heartbeat are 3 s on
+  desktop but **60 s in `Pace::Background`** (`Engine::set_pace`), switched by the app on screen/
+  visibility; a `tick_notify` `Notify` wakes the slow loop early on a roster-doc live-sync event
+  (the per-tick redb+blob roster rebuild is now event-gated, 30 s catch-all) or a network-change
+  hint, so self-eviction stays prompt (the `delete_e2e`/`background_pace` tests guard this). Don't
+  reintroduce an unconditional per-tick rebuild or a fixed 3 s cadence on mobile, and don't wake the
+  tick on *every* heartbeat (that defeats Background) — only when it clears a real dial backoff. A
+  peer's online dot is connection-derived, so throttling the heartbeat never changes visibility.
+- **On Android, `onRevoke` (another VPN took over) quiesces, it doesn't sit connected.** While a
+  foreign VPN owns routing our data plane is dead, so `EngineHolder.onVpnRevoked()` does
+  `set_online(false)` (drops mesh + tunnel — a battery win and an honest offline dot) and auto-resumes
+  from `NetworkMonitor` once the foreign VPN is gone, gated on a `userWantsOnline` flag so a
+  deliberate offline is never overridden. The mDNS **multicast lock is foreground-only** (a held lock
+  makes the Wi-Fi chip receive all multicast) and the foreground notification is re-posted only on a
+  real text change. These are per-user, exec-free concerns — they stay in the service/`EngineHolder`,
+  never the engine.
 - **Per-device action buttons live in the GUI, NOT the daemon — on purpose.** `ipn-gui/src/
   actions.rs` stores them in the *user's* config dir (`actions.json`), and they never touch
   `ipn-core`/`ipn-ipc`. This looks like a violation of the engine-first workflow, and the obvious

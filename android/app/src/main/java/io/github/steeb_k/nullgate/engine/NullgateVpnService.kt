@@ -4,8 +4,10 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.net.wifi.WifiManager
@@ -18,7 +20,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import uniffi.ipn_mobile.NetworkStatus
 
@@ -38,6 +42,8 @@ class NullgateVpnService : VpnService() {
 
     private var started = false
     private var multicastLock: WifiManager.MulticastLock? = null
+    private var networkMonitor: NetworkMonitor? = null
+    private var screenReceiver: BroadcastReceiver? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     override fun onCreate() {
@@ -68,15 +74,63 @@ class NullgateVpnService : VpnService() {
         if (started) return
         started = true
         startForegroundCompat(buildNotification("Starting…"))
-        acquireMulticastLock()
         EngineHolder.start(applicationContext)
+        registerScreenReceiver()
+        startNetworkMonitor()
 
-        // Keep the notification subtitle live from the engine status.
+        // Notification: re-post only when the rendered line actually changes. It used
+        // to re-post on every status emission (≥ every ~30s) even when unchanged.
         scope.launch {
-            EngineHolder.status.collectLatest { st ->
-                notificationManager().notify(NOTIF_ID, buildNotification(stateText(st)))
+            EngineHolder.status
+                .map { stateText(it) }
+                .distinctUntilChanged()
+                .collect { text ->
+                    notificationManager().notify(NOTIF_ID, buildNotification(text))
+                }
+        }
+
+        // Hold the mDNS multicast lock only while the app is in the foreground: a held
+        // lock forces the Wi-Fi chip to receive all multicast — a real background
+        // battery cost for a feature (LAN discovery) that only matters when in use.
+        scope.launch {
+            EngineHolder.foreground.collect { fg ->
+                if (fg) acquireMulticastLock() else releaseMulticastLock()
             }
         }
+    }
+
+    /** Watch connectivity so the engine can recover after a network switch (and set
+     * our VpnService's underlying network for correct metering/transport). */
+    private fun startNetworkMonitor() {
+        if (networkMonitor != null) return
+        networkMonitor = NetworkMonitor(
+            applicationContext,
+            onNetworkChanged = { EngineHolder.onNetworkChanged(applicationContext) },
+            onUnderlyingNetwork = { net ->
+                runCatching { setUnderlyingNetworks(net?.let { arrayOf(it) }) }
+            },
+        ).also { it.start() }
+    }
+
+    /** Screen on/off drives the engine's pace (the other half of "foreground"). */
+    private fun registerScreenReceiver() {
+        if (screenReceiver != null) return
+        val r = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    Intent.ACTION_SCREEN_ON -> EngineHolder.setScreenInteractive(true)
+                    Intent.ACTION_SCREEN_OFF -> EngineHolder.setScreenInteractive(false)
+                }
+            }
+        }
+        registerReceiver(
+            r,
+            IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_SCREEN_OFF)
+            },
+        )
+        screenReceiver = r
     }
 
     /** Build the VPN interface for our virtual IP and hand its fd to the engine.
@@ -106,11 +160,17 @@ class NullgateVpnService : VpnService() {
     /** The system or user revoked the VPN (e.g. another VPN took over). */
     override fun onRevoke() {
         Log.i(TAG, "VPN revoked by system/user")
-        stopRouting()
+        // Quiesce fully while the foreign VPN owns routing (drops the mesh + tunnel,
+        // saving battery). EngineHolder auto-resumes once connectivity returns.
+        EngineHolder.onVpnRevoked()
         super.onRevoke()
     }
 
     override fun onDestroy() {
+        screenReceiver?.let { runCatching { unregisterReceiver(it) } }
+        screenReceiver = null
+        networkMonitor?.stop()
+        networkMonitor = null
         releaseMulticastLock()
         scope.cancel()
         EngineHolder.stop()

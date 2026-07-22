@@ -62,6 +62,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Foreground: run the engine at its interactive cadence (see EngineHolder).
+        EngineHolder.setActivityResumed(true)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        EngineHolder.setActivityResumed(false)
+    }
+
     private fun scanTicket(onResult: (String?) -> Unit) {
         pendingScan = onResult
         val opts = ScanOptions()

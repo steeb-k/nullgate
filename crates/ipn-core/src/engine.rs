@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::Duration;
 
@@ -31,7 +31,7 @@ use iroh_gossip::proto::TopicId;
 use rand::RngCore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
 
 use crate::admission;
 use crate::membership;
@@ -94,6 +94,49 @@ const GOSSIP_JOIN_RETRY_MS: u64 = 15_000;
 /// state every tick (see the daemon memory-growth investigation). Generous enough
 /// for a slow relay+holepunch path on a healthy network.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Maintenance-loop cadence in [`Pace::Interactive`] — the historical 3s tick that
+/// desktop uses always and the Android app uses while it's in the foreground.
+const TICK_INTERACTIVE_MS: u64 = 3_000;
+
+/// Maintenance-loop cadence in [`Pace::Background`] — the Android app while it's
+/// backgrounded / screen-off. 20× slower: the mesh stays up and a roster-doc change
+/// still wakes the loop early (see [`Inner::tick_notify`]), but the per-3s crypto/
+/// gossip/redb work that dominated idle battery use stops while nobody's looking.
+const TICK_BACKGROUND_MS: u64 = 60_000;
+
+/// Presence-heartbeat floor in [`Pace::Background`]. Well inside every peer's
+/// [`PRESENCE_FRESH_MS`] window, and a peer's *online* dot is derived from the live
+/// mesh connection (not this heartbeat), so slowing it changes only the last-seen
+/// granularity of a phone that later goes offline — not anyone's visibility.
+const PRESENCE_BROADCAST_BG_MS: u64 = 60_000;
+
+/// Rebuild the roster from the doc at least this often even absent a live-sync
+/// event, so a missed [`iroh_docs::api::Doc::subscribe`] notification can't leave
+/// the view stale. Bounds the staleness the event-gated rebuild could otherwise add.
+const ROSTER_REBUILD_CATCHALL_MS: u64 = 30_000;
+
+/// Upper bound on the per-peer dial backoff. After consecutive failures the next
+/// attempt is delayed `min(DIAL_TIMEOUT · 2^failures, this)` — so an unreachable
+/// member is retried ever more sparsely (was a flat ~20s forever) but never dropped.
+const DIAL_BACKOFF_MAX_MS: u64 = 300_000;
+
+/// How aggressively the maintenance loop runs. Desktop is always [`Pace::Interactive`];
+/// the Android facade drops to [`Pace::Background`] when the app isn't visible
+/// (screen off / backgrounded) to cut idle battery use. See [`Engine::set_pace`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pace {
+    Interactive,
+    Background,
+}
+
+/// Per-peer dial-backoff state (see [`DIAL_BACKOFF_MAX_MS`]).
+#[derive(Clone, Copy, Default)]
+struct BackoffEntry {
+    failures: u32,
+    /// Earliest wall-clock (ms) a fresh dial to this peer is allowed.
+    next_ok_ms: u64,
+}
 
 // ---------------------------------------------------------------------------
 // Persisted configuration
@@ -393,6 +436,29 @@ struct Inner {
     /// Monotonic tick counter, so every 10th tick (~30s) still emits a
     /// `Changed` even when nothing marked the tick dirty (see `tick`).
     tick_seq: AtomicU64,
+    /// Maintenance-loop pace: `0` = [`Pace::Interactive`] (default; desktop always),
+    /// `1` = [`Pace::Background`]. Switched by [`Engine::set_pace`] from the Android
+    /// facade on screen/visibility changes; read by the loop to pick its sleep.
+    pace: AtomicU8,
+    /// Wakes the maintenance loop before its sleep elapses — on a pace change, a
+    /// network-change hint, or a roster-doc live-sync event — so a slow Background
+    /// tick still reacts to real changes within a tick instead of up to 60s later.
+    tick_notify: Notify,
+    /// Set by the roster-doc live-sync watcher (see `activate`); consumed by `tick`
+    /// to decide whether to rebuild the roster this pass. Makes the per-tick redb+
+    /// blob roster rebuild event-driven instead of unconditional (a real idle cost
+    /// on every platform), bounded by [`ROSTER_REBUILD_CATCHALL_MS`].
+    docs_dirty: AtomicBool,
+    /// Last wall-clock (ms) `tick` rebuilt the roster from the doc (catch-all clock).
+    last_roster_rebuild: AtomicU64,
+    /// Last wall-clock (ms) we broadcast a presence heartbeat (Background throttle).
+    last_presence_broadcast: AtomicU64,
+    /// One-shot: a platform network-change hint ([`Engine::network_changed`]) asks
+    /// the next tick to bypass the reachability/throttle gates once and re-seed +
+    /// re-dial *every* member (recovery after another VPN released the network).
+    force_recover: AtomicBool,
+    /// Per-peer dial-backoff schedule (see [`BackoffEntry`], [`DIAL_BACKOFF_MAX_MS`]).
+    dial_backoff: StdMutex<HashMap<Id, BackoffEntry>>,
     /// Geolocation DB, loaded only on the originator (it resolves + propagates).
     /// Desktop-only — the geo stack isn't shipped on Android.
     #[cfg(not(target_os = "android"))]
@@ -468,6 +534,13 @@ impl Engine {
             protocol_version: AtomicU32::new(admission::PROTOCOL_VERSION),
             last_seen_saved: AtomicU64::new(0),
             tick_seq: AtomicU64::new(0),
+            pace: AtomicU8::new(0),
+            tick_notify: Notify::new(),
+            docs_dirty: AtomicBool::new(false),
+            last_roster_rebuild: AtomicU64::new(0),
+            last_presence_broadcast: AtomicU64::new(0),
+            force_recover: AtomicBool::new(false),
+            dial_backoff: StdMutex::new(HashMap::new()),
             relay_settings: StdRwLock::new(relay_settings),
             relay_apply: StdRwLock::new(crate::relays::RelayApply::Applied),
             relay_apply_lock: Mutex::new(()),
@@ -504,7 +577,16 @@ impl Engine {
                     if let Err(e) = tick(&inner).await {
                         tracing::debug!("tick error: {e:#}");
                     }
-                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    // Sleep for the current pace, but wake early on a pace change,
+                    // a network-change hint, or a roster-doc live-sync event.
+                    let ms = match inner.pace.load(Ordering::Relaxed) {
+                        0 => TICK_INTERACTIVE_MS,
+                        _ => TICK_BACKGROUND_MS,
+                    };
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(ms)) => {}
+                        _ = inner.tick_notify.notified() => {}
+                    }
                 }
             });
         }
@@ -514,6 +596,44 @@ impl Engine {
 
     pub fn subscribe(&self) -> broadcast::Receiver<EngineEvent> {
         self.inner.events.subscribe()
+    }
+
+    /// Switch the maintenance-loop pace. Android drops to [`Pace::Background`] when
+    /// the app isn't visible (screen off / backgrounded) to cut idle battery use;
+    /// desktop never calls this and stays [`Pace::Interactive`]. Wakes the loop
+    /// immediately so returning to the foreground refreshes state within a tick.
+    pub fn set_pace(&self, pace: Pace) {
+        let v = match pace {
+            Pace::Interactive => 0,
+            Pace::Background => 1,
+        };
+        if self.inner.pace.swap(v, Ordering::Relaxed) != v {
+            tracing::info!("maintenance pace -> {pace:?}");
+        }
+        self.inner.tick_notify.notify_one();
+    }
+
+    /// Platform hint that connectivity changed — the **only** such signal on Android,
+    /// where iroh's own network monitor is a no-op (netlink is restricted), so an
+    /// endpoint bound before a network switch otherwise keeps stale sockets/paths/
+    /// relay connections forever (the "can't see peers until I toggle the VPN" bug).
+    ///
+    /// Hands the hint to iroh (which rebinds its UDP sockets, re-checks the relay
+    /// connection, resets the DNS resolver, and re-runs net-report), then forces a
+    /// one-shot recovery burst — re-seed the roster doc to **all** members, re-join
+    /// the gossip mesh, and clear per-peer dial backoff — in case iroh's own
+    /// interface-state compare swallowed the hint. Safe to call spuriously.
+    pub async fn network_changed(&self) {
+        let inner = &self.inner;
+        tracing::info!("network-change hint: rebinding endpoint + recovery burst");
+        inner.node.endpoint.network_change().await;
+        inner.force_recover.store(true, Ordering::SeqCst);
+        // Make the throttled self-heals due immediately; the tick's `force` path then
+        // targets everyone rather than only presence-fresh members.
+        inner.last_doc_sync.store(0, Ordering::SeqCst);
+        inner.last_gossip_join.store(0, Ordering::SeqCst);
+        inner.dial_backoff.lock().unwrap().clear();
+        inner.tick_notify.notify_one();
     }
 
     pub fn self_node_id_hex(&self) -> String {
@@ -1560,6 +1680,14 @@ async fn activate(inner: &Arc<Inner>, cfg: StoredConfig) -> Result<()> {
                 match msg {
                     GossipMsg::Presence(p) => {
                         if p.verify(&net_id) && p.node_id != ti.my_id {
+                            // A live heartbeat proves the peer is reachable. If it was
+                            // in dial backoff, clear it and wake the tick to redial
+                            // now instead of waiting out the window. This only fires
+                            // for a peer we're *not* connected to (a connected peer
+                            // has no backoff entry), so it doesn't defeat the slow
+                            // Background cadence in steady state.
+                            let was_backed_off =
+                                ti.dial_backoff.lock().unwrap().remove(&p.node_id).is_some();
                             let mut st = ti.state.lock().await;
                             let changed = st.presence.record_heartbeat(
                                 p.node_id,
@@ -1570,6 +1698,9 @@ async fn activate(inner: &Arc<Inner>, cfg: StoredConfig) -> Result<()> {
                                 p.ts,
                             );
                             drop(st);
+                            if was_backed_off {
+                                ti.tick_notify.notify_one();
+                            }
                             // Routine heartbeats only bump last_seen; emitting for
                             // each was N events per 3s — the churn that kept the
                             // GUI re-rendering. Only user-visible changes push.
@@ -1598,6 +1729,41 @@ async fn activate(inner: &Arc<Inner>, cfg: StoredConfig) -> Result<()> {
         inner.net_tasks.lock().unwrap().push(h.abort_handle());
     }
 
+    // Roster-doc live-sync watcher: mark the roster dirty and wake the maintenance
+    // tick whenever the document changes, so the per-tick redb+blob roster rebuild
+    // is event-driven rather than unconditional (a real idle cost on every
+    // platform). A failed subscribe degrades to the catch-all interval, so it's
+    // non-fatal — never break going online over it.
+    match doc.subscribe().await {
+        Ok(mut events) => {
+            let ti = inner.clone();
+            let h = tokio::spawn(async move {
+                while let Some(ev) = events.next().await {
+                    let Ok(ev) = ev else { continue };
+                    use iroh_docs::engine::LiveEvent;
+                    if matches!(
+                        ev,
+                        LiveEvent::InsertLocal { .. }
+                            | LiveEvent::InsertRemote { .. }
+                            | LiveEvent::ContentReady { .. }
+                            | LiveEvent::SyncFinished(_)
+                    ) {
+                        ti.docs_dirty.store(true, Ordering::SeqCst);
+                        ti.tick_notify.notify_one();
+                    }
+                }
+            });
+            inner.net_tasks.lock().unwrap().push(h.abort_handle());
+        }
+        Err(e) => tracing::warn!("roster-doc live-sync subscribe failed: {e:#}"),
+    }
+
+    // Force the first post-activate tick to rebuild the roster immediately: the
+    // catch-all clock would otherwise let the just-cleared roster read empty for up
+    // to ROSTER_REBUILD_CATCHALL_MS after reconnecting.
+    inner.last_roster_rebuild.store(0, Ordering::SeqCst);
+    inner.docs_dirty.store(true, Ordering::SeqCst);
+
     let mut st = inner.state.lock().await;
     st.config = Some(cfg);
     st.doc = Some(doc);
@@ -1620,6 +1786,9 @@ async fn soft_disconnect(inner: &Arc<Inner>) {
     inner.last_doc_sync.store(0, Ordering::SeqCst);
     inner.last_gossip_join.store(0, Ordering::SeqCst);
     inner.gossip_neighbors.store(0, Ordering::SeqCst);
+    inner.dial_backoff.lock().unwrap().clear();
+    inner.docs_dirty.store(false, Ordering::SeqCst);
+    inner.force_recover.store(false, Ordering::SeqCst);
     // Android: ask the app to tear down its VpnService (desktop opened its own TUN,
     // which the `tun.write() = None` above already dropped).
     #[cfg(target_os = "android")]
@@ -1675,8 +1844,24 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
         }
     };
 
-    // Rebuild roster from the document, and the forwarding table from it.
-    let roster = membership::build_roster(&cfg.roster_cfg(), &doc, inner.node.blobs.blobs()).await?;
+    // Consume the one-shot network-change recovery flag for this pass.
+    let force = inner.force_recover.swap(false, Ordering::SeqCst);
+
+    // Rebuild the roster from the doc only when something changed — a live-sync
+    // event set `docs_dirty`, a recovery burst asked for it, or the catch-all
+    // interval elapsed. The full redb+blob rebuild every 3s was a real idle cost on
+    // every platform; otherwise reuse the cached roster (identical data). The
+    // forwarding table derives only from the roster, so it's rebuilt only alongside.
+    let rebuild = inner.docs_dirty.swap(false, Ordering::SeqCst)
+        || force
+        || now_coarse.saturating_sub(inner.last_roster_rebuild.load(Ordering::Relaxed))
+            > ROSTER_REBUILD_CATCHALL_MS;
+    let roster = if rebuild {
+        inner.last_roster_rebuild.store(now_coarse, Ordering::Relaxed);
+        membership::build_roster(&cfg.roster_cfg(), &doc, inner.node.blobs.blobs()).await?
+    } else {
+        inner.state.lock().await.roster.clone()
+    };
 
     // Whether this tick changed anything the UI displays. Only then is a
     // `Changed` event emitted at the end (plus a slow unconditional heartbeat
@@ -1697,7 +1882,9 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
         return Ok(());
     }
 
-    *inner.routes.write().unwrap() = RouteTable::from_roster(&roster);
+    if rebuild {
+        *inner.routes.write().unwrap() = RouteTable::from_roster(&roster);
+    }
 
     // Enforce membership on the live mesh continuously: close any connection to a
     // peer who is no longer a current member (e.g. removed by the originator or
@@ -1750,14 +1937,32 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
     }
 
     // Dial missing members (off-lock). `spawn_dials` skips peers already being
-    // dialed and bounds each attempt, so an unreachable member doesn't accumulate
-    // a fresh `connect()` (and its iroh path/QUIC state) every tick.
+    // dialed and bounds each attempt; on top of that, `dial_backoff_filter` spaces
+    // out retries to a *persistently* unreachable member (previously a flat ~20s
+    // forever), which both saves battery and further shrinks the iroh#4293 churn.
+    let to_dial = dial_backoff_filter(
+        to_dial,
+        &inner.dial_backoff.lock().unwrap(),
+        now_coarse,
+    );
     let psk = cfg.secret().psk();
     let dial_inner = inner.clone();
-    spawn_dials(&inner.dialing, to_dial, move |peer| {
-        let inner = dial_inner.clone();
-        async move { dial_member(&inner, peer, psk).await }
-    });
+    let outcome_inner = inner.clone();
+    spawn_dials(
+        &inner.dialing,
+        to_dial,
+        move |peer| {
+            let inner = dial_inner.clone();
+            async move { dial_member(&inner, peer, psk).await }
+        },
+        move |peer, success| {
+            if success {
+                reset_dial_backoff(&outcome_inner.dial_backoff, &peer);
+            } else {
+                record_dial_failure(&outcome_inner.dial_backoff, peer, now_ms());
+            }
+        },
+    );
 
     // Keep the roster-doc's live-sync gossip swarm seeded so a later Add/Remove/role
     // change (and the activity log derived from them, and a device's own removal)
@@ -1806,11 +2011,15 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
                 })
                 .collect()
         };
+        // `force` (a network-change recovery burst) re-seeds *all* members once,
+        // bypassing the reachable-only filter: after minutes behind another VPN no
+        // peer is presence-fresh, so the ordinary self-heal would target nothing.
+        // A single burst, not a cadence change, so it keeps the iroh#4293 guarantees.
         if let Some(targets) = doc_reseed_targets(
             &member_ids,
             &connected,
             |id| fresh.contains(id),
-            changed,
+            changed || force,
             due,
         ) {
             inner.last_doc_sync.store(now, Ordering::Relaxed);
@@ -1847,20 +2056,31 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
             let addr = inner.node.addr();
             split_local_public(addr.ip_addrs().copied()).1
         };
-        let rad = inner.remote_access_disabled.load(Ordering::Relaxed);
-        let hid = inner.hidden.load(Ordering::Relaxed);
-        let p = Presence::signed(
-            cfg.secret().network_id(),
-            &inner.device_key,
-            current_hostname(),
-            my_public_ip.clone(),
-            rad || hid, // hide implies the inbound block
-            hid,
-            now_ms(),
-        );
-        let mut buf = Vec::new();
-        let _ = ciborium::into_writer(&GossipMsg::Presence(p), &mut buf);
-        let _ = sender.broadcast(Bytes::from(buf)).await;
+        // Interactive pace broadcasts a heartbeat every tick (3s); Background
+        // throttles to PRESENCE_BROADCAST_BG_MS to stop per-3s crypto+radio while
+        // the app is backgrounded. A peer's online dot is derived from the live mesh
+        // connection, not this heartbeat, so slowing it doesn't change visibility.
+        let background = inner.pace.load(Ordering::Relaxed) != 0;
+        let due_presence = !background
+            || now_coarse.saturating_sub(inner.last_presence_broadcast.load(Ordering::Relaxed))
+                >= PRESENCE_BROADCAST_BG_MS;
+        if due_presence {
+            inner.last_presence_broadcast.store(now_coarse, Ordering::Relaxed);
+            let rad = inner.remote_access_disabled.load(Ordering::Relaxed);
+            let hid = inner.hidden.load(Ordering::Relaxed);
+            let p = Presence::signed(
+                cfg.secret().network_id(),
+                &inner.device_key,
+                current_hostname(),
+                my_public_ip.clone(),
+                rad || hid, // hide implies the inbound block
+                hid,
+                now_ms(),
+            );
+            let mut buf = Vec::new();
+            let _ = ciborium::into_writer(&GossipMsg::Presence(p), &mut buf);
+            let _ = sender.broadcast(Bytes::from(buf)).await;
+        }
 
         // Originator only: resolve each member's public IP to a location and
         // propagate a signed map so members can show it without the DB. (Not on
@@ -1999,10 +2219,11 @@ impl Drop for DialSlot {
 /// skipped, and each attempt is wrapped in [`DIAL_TIMEOUT`] so a `connect()` that
 /// never resolves can't pin resources; the [`DialSlot`] guard frees the slot on
 /// every exit path (success, error, timeout, or panic) so retries still happen.
-fn spawn_dials<F, Fut>(dialing: &DialingSet, to_dial: Vec<Id>, dial: F)
+fn spawn_dials<F, Fut, G>(dialing: &DialingSet, to_dial: Vec<Id>, dial: F, on_outcome: G)
 where
     F: Fn(Id) -> Fut + Clone + Send + 'static,
     Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+    G: Fn(Id, bool) + Clone + Send + 'static,
 {
     for peer in to_dial {
         // `insert` returns false if a dial to this peer is already in flight.
@@ -2011,17 +2232,64 @@ where
         }
         let dialing = dialing.clone();
         let dial = dial.clone();
+        let on_outcome = on_outcome.clone();
         tokio::spawn(async move {
             let _slot = DialSlot { dialing, peer };
-            match tokio::time::timeout(DIAL_TIMEOUT, dial(peer)).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::debug!("dial {} failed: {e:#}", short(&peer)),
-                Err(_) => {
-                    tracing::debug!("dial {} timed out after {}s", short(&peer), DIAL_TIMEOUT.as_secs())
+            let success = match tokio::time::timeout(DIAL_TIMEOUT, dial(peer)).await {
+                Ok(Ok(())) => true,
+                Ok(Err(e)) => {
+                    tracing::debug!("dial {} failed: {e:#}", short(&peer));
+                    false
                 }
-            }
+                Err(_) => {
+                    tracing::debug!(
+                        "dial {} timed out after {}s",
+                        short(&peer),
+                        DIAL_TIMEOUT.as_secs()
+                    );
+                    false
+                }
+            };
+            // Feeds the per-peer backoff (see `dial_backoff_filter`): success clears
+            // it, failure/timeout extends it.
+            on_outcome(peer, success);
         });
     }
+}
+
+/// Filter `to_dial` down to peers whose backoff window has elapsed. Peers with no
+/// backoff entry (never failed, or reset by a success/heartbeat) always pass. Pure
+/// (no clock, no I/O) so the schedule is unit-tested directly.
+fn dial_backoff_filter(
+    to_dial: Vec<Id>,
+    backoff: &HashMap<Id, BackoffEntry>,
+    now: u64,
+) -> Vec<Id> {
+    to_dial
+        .into_iter()
+        .filter(|id| backoff.get(id).map_or(true, |e| now >= e.next_ok_ms))
+        .collect()
+}
+
+/// Record a failed dial to `peer`, extending its backoff window to
+/// `min(DIAL_TIMEOUT · 2^failures, DIAL_BACKOFF_MAX_MS)` from `now`.
+fn record_dial_failure(backoff: &StdMutex<HashMap<Id, BackoffEntry>>, peer: Id, now: u64) {
+    let mut map = backoff.lock().unwrap();
+    let e = map.entry(peer).or_default();
+    e.failures = e.failures.saturating_add(1);
+    let base = DIAL_TIMEOUT.as_millis() as u64;
+    // Cap the shift well under 64 to avoid overflow; the value saturates at the max
+    // long before that anyway.
+    let delay = base
+        .saturating_mul(1u64 << e.failures.min(20))
+        .min(DIAL_BACKOFF_MAX_MS);
+    e.next_ok_ms = now.saturating_add(delay);
+}
+
+/// Clear a peer's dial backoff (a successful connection, or a fresh heartbeat that
+/// proves it's reachable).
+fn reset_dial_backoff(backoff: &StdMutex<HashMap<Id, BackoffEntry>>, peer: &Id) {
+    backoff.lock().unwrap().remove(peer);
 }
 
 async fn dial_member(inner: &Arc<Inner>, peer: Id, psk: [u8; 32]) -> Result<()> {
@@ -2393,7 +2661,9 @@ async fn register_mesh(inner: &Arc<Inner>, peer: Id, conn: Connection) {
         DupVerdict::Fresh => {}
     }
 
-    // This connection is now the live one for `peer`.
+    // This connection is now the live one for `peer`. Clear any dial backoff — this
+    // also covers inbound connections, which never go through the outbound dialer.
+    reset_dial_backoff(&inner.dial_backoff, &peer);
     {
         let mut st = inner.state.lock().await;
         st.presence.record_connection(peer, None, None, None, None, true);
@@ -3254,7 +3524,7 @@ mod dial_tests {
         // The leak reproduced: 500 ticks for the same unreachable peer. Pre-fix this
         // spawned 500 dials; the guard must collapse them to a single in-flight one.
         for _ in 0..500 {
-            spawn_dials(&dialing, vec![peer], dial.clone());
+            spawn_dials(&dialing, vec![peer], dial.clone(), |_, _| {});
         }
         settle().await;
 
@@ -3279,7 +3549,7 @@ mod dial_tests {
             }
         };
 
-        spawn_dials(&dialing, vec![peer], dial.clone());
+        spawn_dials(&dialing, vec![peer], dial.clone(), |_, _| {});
         settle().await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(dialing.lock().unwrap().contains(&peer), "in flight before timeout");
@@ -3294,7 +3564,7 @@ mod dial_tests {
         );
 
         // The next tick is now free to re-dial the (still unreachable) peer.
-        spawn_dials(&dialing, vec![peer], dial.clone());
+        spawn_dials(&dialing, vec![peer], dial.clone(), |_, _| {});
         settle().await;
         assert_eq!(calls.load(Ordering::SeqCst), 2, "retry after the slot freed");
     }
@@ -3313,9 +3583,9 @@ mod dial_tests {
         };
 
         let peers = vec![id(1), id(2), id(3)];
-        spawn_dials(&dialing, peers.clone(), dial.clone());
+        spawn_dials(&dialing, peers.clone(), dial.clone(), |_, _| {});
         // A second tick with the same set must add nothing (all already in flight).
-        spawn_dials(&dialing, peers, dial.clone());
+        spawn_dials(&dialing, peers, dial.clone(), |_, _| {});
         settle().await;
 
         assert_eq!(calls.load(Ordering::SeqCst), 3, "one dial per distinct peer");
@@ -3466,6 +3736,70 @@ mod reseed_tests {
         assert!(
             doc_reseed_targets(&members, &connected, |_| false, false, true).is_none(),
             "nothing reachable → skip the dialing start_sync entirely"
+        );
+    }
+}
+
+/// Tests for the per-peer dial backoff: a persistently unreachable member is retried
+/// ever more sparsely (never a flat ~20s forever, never dropped), and any sign of
+/// life — a successful connection or a fresh heartbeat — resets it to immediate.
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn id(n: u8) -> Id {
+        [n; 32]
+    }
+
+    #[test]
+    fn no_entry_always_passes_the_filter() {
+        let backoff = HashMap::new();
+        let got = dial_backoff_filter(vec![id(1), id(2)], &backoff, 1_000);
+        assert_eq!(got.len(), 2, "peers that never failed are always dialable");
+    }
+
+    #[test]
+    fn backed_off_peer_is_held_until_its_window_elapses() {
+        let backoff = StdMutex::new(HashMap::new());
+        record_dial_failure(&backoff, id(1), 0);
+        // First failure delays by DIAL_TIMEOUT*2 = 40s; still held at 30s, freed at 40s.
+        let map = backoff.lock().unwrap().clone();
+        assert!(
+            dial_backoff_filter(vec![id(1)], &map, 30_000).is_empty(),
+            "still inside the backoff window"
+        );
+        assert_eq!(
+            dial_backoff_filter(vec![id(1)], &map, 40_000),
+            vec![id(1)],
+            "dialable once the window elapses"
+        );
+    }
+
+    #[test]
+    fn window_grows_with_consecutive_failures_and_caps() {
+        let backoff = StdMutex::new(HashMap::new());
+        let mut prev = 0u64;
+        for _ in 0..12 {
+            record_dial_failure(&backoff, id(1), 0);
+            let next = backoff.lock().unwrap().get(&id(1)).unwrap().next_ok_ms;
+            assert!(next >= prev, "backoff is monotonic across failures");
+            assert!(next <= DIAL_BACKOFF_MAX_MS, "never exceeds the cap");
+            prev = next;
+        }
+        assert_eq!(prev, DIAL_BACKOFF_MAX_MS, "saturates at the cap");
+    }
+
+    #[test]
+    fn reset_clears_the_backoff() {
+        let backoff = StdMutex::new(HashMap::new());
+        record_dial_failure(&backoff, id(1), 0);
+        reset_dial_backoff(&backoff, &id(1));
+        let map = backoff.lock().unwrap().clone();
+        assert_eq!(
+            dial_backoff_filter(vec![id(1)], &map, 0),
+            vec![id(1)],
+            "a reset peer is immediately dialable again"
         );
     }
 }

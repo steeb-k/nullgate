@@ -20,8 +20,8 @@
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
-use ipn_core::{Engine, EngineEvent};
-use tokio::runtime::Runtime;
+use ipn_core::{Engine, EngineEvent, Pace};
+use tokio::runtime::{Builder, Runtime};
 use tokio::sync::broadcast;
 
 uniffi::setup_scaffolding!();
@@ -302,8 +302,15 @@ impl MobileEngine {
         init_android_logging();
         ipn_core::set_device_name_override(device_name);
 
-        let rt =
-            Runtime::new().map_err(|e| NullgateError::Engine(format!("create runtime: {e}")))?;
+        // A small fixed pool rather than one worker per core: the engine is I/O-bound
+        // (a phone's mesh is a handful of connections), and two workers keep a blocking
+        // `block_on` dispatch from starving the data-plane pump without spinning up a
+        // thread per core on an 8-core phone.
+        let rt = Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map_err(|e| NullgateError::Engine(format!("create runtime: {e}")))?;
         let engine = rt.block_on(async { Engine::start(&data_dir).await })?;
 
         let inner = Arc::new(Inner { engine, listener });
@@ -575,6 +582,29 @@ impl MobileEngine {
     }
 
     // --- Lifecycle ---------------------------------------------------------
+
+    /// Switch the engine's maintenance cadence to match app visibility. Call with
+    /// `background = true` when the app is backgrounded / the screen is off (slows
+    /// the housekeeping loop and presence heartbeat to save battery) and `false`
+    /// when it returns to the foreground. Cheap and synchronous.
+    pub fn set_pace(&self, background: bool) {
+        let pace = if background {
+            Pace::Background
+        } else {
+            Pace::Interactive
+        };
+        self.inner.engine.set_pace(pace);
+    }
+
+    /// Tell the engine the device's connectivity changed (from Android's
+    /// `ConnectivityManager` — the only such signal on Android). Rebinds iroh's
+    /// sockets and kicks a recovery burst so peers become visible again after
+    /// another VPN released the network, without waiting for anything to time out.
+    /// Safe to call spuriously.
+    pub fn network_changed(&self) {
+        self.rt
+            .block_on(async { self.inner.engine.network_changed().await });
+    }
 
     /// Best-effort graceful stop: go offline. The node is fully torn down when the
     /// object is dropped (the foreground service drops its reference on stop).

@@ -62,6 +62,28 @@ object EngineHolder {
     private val _needsVpnConsent = MutableStateFlow(false)
     val needsVpnConsent: StateFlow<Boolean> = _needsVpnConsent.asStateFlow()
 
+    /** Whether the app is in the foreground (screen on AND activity resumed). Drives
+     * the engine's maintenance pace and the mDNS multicast lock — both are pure
+     * battery cost while nobody's looking. The service observes this. */
+    private val _foreground = MutableStateFlow(false)
+    val foreground: StateFlow<Boolean> = _foreground.asStateFlow()
+
+    @Volatile
+    private var activityResumed = false
+
+    @Volatile
+    private var screenInteractive = true
+
+    /** The user's *intended* online state, so an automatic resume after a foreign VPN
+     * releases the network never overrides a deliberate "go offline". Defaults true
+     * (the common case); flipped false only on an explicit offline / leave. */
+    @Volatile
+    private var userWantsOnline = true
+
+    /** Set when another VPN revoked our tunnel; cleared once we auto-resume. */
+    @Volatile
+    private var revokedByOtherVpn = false
+
     /** One-shot user-facing messages (errors / confirmations) for snackbars. */
     private val _toasts = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val toasts: SharedFlow<String> = _toasts.asSharedFlow()
@@ -160,6 +182,63 @@ object EngineHolder {
 
     fun assignedIp(): String? = engine?.assignedIp()
 
+    // --- visibility / pace / connectivity ---------------------------------
+
+    /** MainActivity resumed/paused. Foreground (with the screen on) runs the engine
+     * at its interactive cadence; backgrounding drops it to the battery-saving one. */
+    fun setActivityResumed(resumed: Boolean) {
+        activityResumed = resumed
+        applyPace()
+    }
+
+    /** Screen turned interactive (on) or not (off) — the other half of "foreground". */
+    fun setScreenInteractive(on: Boolean) {
+        screenInteractive = on
+        applyPace()
+    }
+
+    private fun applyPace() {
+        val interactive = activityResumed && screenInteractive
+        _foreground.value = interactive
+        // setPace is a cheap atomic store + wakeup on the engine; safe off any thread.
+        runCatching { engine?.setPace(background = !interactive) }
+    }
+
+    /**
+     * The device's connectivity changed (from [NetworkMonitor]). If a foreign VPN had
+     * forced us offline and the user still wants to be online, resume as soon as it's
+     * gone (`VpnService.prepare == null` — no other app owns the VPN); either way,
+     * hint the engine so iroh rebinds its sockets and re-forms the mesh.
+     */
+    fun onNetworkChanged(context: Context) {
+        scope.launch {
+            if (revokedByOtherVpn && userWantsOnline &&
+                VpnService.prepare(context) == null
+            ) {
+                revokedByOtherVpn = false
+                // setOnline re-activates the network; the engine then re-emits
+                // TunSetupRequired, which brings the VpnService tunnel back up.
+                runCatching { requireEngine().setOnline(true) }
+                    .onFailure { Log.w(TAG, "resume after revoke failed", it) }
+            }
+            runCatching { engine?.networkChanged() }
+        }
+    }
+
+    /**
+     * Another VPN took over routing (our tunnel was revoked). Quiesce fully: while a
+     * foreign VPN owns the network our data plane is dead, so keeping the mesh alive
+     * is pure battery burn and would show peers a green dot for a phone they can't
+     * reach. We auto-resume from [onNetworkChanged] once it's gone (gated on
+     * [userWantsOnline], so a deliberate offline is respected).
+     */
+    fun onVpnRevoked() {
+        revokedByOtherVpn = true
+        // Raw engine call (not the wrapper): this is a forced offline, so it must not
+        // clear userWantsOnline or we'd never auto-resume.
+        scope.launch { runCatching { engine?.setOnline(false) } }
+    }
+
     private fun refreshStatus() {
         scope.launch {
             val s = runCatching { engine?.status() }.getOrNull()
@@ -204,16 +283,26 @@ object EngineHolder {
 
     // --- mutations (suspend; run off the main thread) ---------------------
 
-    suspend fun createNetwork(name: String): String =
-        io { requireEngine().createNetwork(name) }
+    suspend fun createNetwork(name: String): String = io {
+        userWantsOnline = true
+        requireEngine().createNetwork(name)
+    }
 
     suspend fun joinNetwork(ticket: String) = io {
+        userWantsOnline = true
         _joinSas.value = null
         requireEngine().joinNetwork(ticket)
     }
 
-    suspend fun leaveNetwork() = io { requireEngine().leaveNetwork() }
-    suspend fun setOnline(online: Boolean) = io { requireEngine().setOnline(online) }
+    suspend fun leaveNetwork() = io {
+        userWantsOnline = false
+        requireEngine().leaveNetwork()
+    }
+
+    suspend fun setOnline(online: Boolean) = io {
+        userWantsOnline = online
+        requireEngine().setOnline(online)
+    }
     suspend fun deleteNetwork() = io { requireEngine().deleteNetwork() }
     suspend fun rotateNetwork(): String = io { requireEngine().rotateNetwork() }
     suspend fun setNetworkName(name: String) = io { requireEngine().setNetworkName(name) }
