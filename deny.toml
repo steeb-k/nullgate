@@ -1,0 +1,97 @@
+# cargo-deny configuration — supply-chain checks for CI.
+#
+# Run locally with:  cargo deny check
+# Docs:              https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# No `targets` filter, so dependencies for every platform are checked. An
+# advisory affecting a target we build only occasionally still fails CI.
+#
+# `all-features` is intentionally not set here: CI runs with `--all-features` so
+# that optional dependencies are covered too. Local `cargo deny check` runs
+# without it and will see a slightly smaller graph.
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Only flag unmaintained crates we depend on directly — the ones we can actually
+# act on. Transitive unmaintained crates are upstream's call, and failing on them
+# turns CI permanently red for something we cannot fix.
+unmaintained = "workspace"
+# Open advisories as of 2026-07-26, suppressed so CI is green on merge.
+# These are earmarked work, NOT accepted risk. Removing an entry from this
+# list is how each one gets fixed — re-run `cargo deny check advisories`
+# after any dependency bump to see if it can go.
+ignore = [
+    # maxminddb: Reader::open_mmap marks an unsafe memmap operation safe
+    #   fix: cargo update -p maxminddb (>=0.27.0) — likely a semver-major bump
+    "RUSTSEC-2025-0132",
+    # crossbeam-epoch: invalid pointer deref in fmt::Pointer impl
+    #   fix: cargo update -p crossbeam-epoch (>=0.9.20)
+    "RUSTSEC-2026-0204",
+    # quick-xml: quadratic run time on duplicate attribute names
+    #   fix: needs quick-xml >=0.41; transitive, not a direct bump
+    "RUSTSEC-2026-0194",
+    # quick-xml: unbounded namespace-declaration allocation (memory DoS)
+    #   fix: needs quick-xml >=0.41; transitive, not a direct bump
+    "RUSTSEC-2026-0195",
+]
+
+[bans]
+# Duplicate versions are common in large trees and usually not our fault.
+multiple-versions = "warn"
+# A wildcard version means "whatever the registry serves today", which is how a
+# substituted crate gets pulled in silently. Every wildcard in these workspaces
+# is an internal `{ path = "../foo" }` dependency, which is harmless — but
+# `allow-wildcard-paths` only exempts those on crates marked `publish = false`,
+# and these crates are not. Warn rather than fail so the check stays useful
+# without CI being permanently red. Mark the workspace crates `publish = false`
+# and this can go back to "deny".
+wildcards = "warn"
+allow-wildcard-paths = true
+deny = []
+
+[sources]
+# The anti-substitution control: every crate must come from crates.io. A
+# dependency appearing from an unexpected registry or an arbitrary git URL fails
+# CI instead of being vendored into the build silently.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[licenses]
+# Permissive licenses plus GPL-3.0 (these projects are GPL-3.0-or-later
+# themselves). Anything outside this list is a deliberate decision, not a silent
+# addition to the tree.
+allow = [
+    "GPL-3.0-or-later",
+    # Deprecated SPDX id, still used by winfsp / winfsp-sys.
+    "GPL-3.0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "BSL-1.0",
+    "MPL-2.0",
+    # Bundled fonts (epaint_default_fonts).
+    "OFL-1.1",
+    "LicenseRef-UFL-1.0",
+    "Ubuntu-font-1.0",
+    # Mozilla CA root bundle (webpki-roots, webpki-root-certs) — data, not code.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+# This config is shared across repos, so a license allowed here but unused in a
+# given tree is expected and should not be reported.
+unused-allowed-license = "allow"
+
+[licenses.private]
+ignore = true
