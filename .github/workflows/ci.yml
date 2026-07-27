@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch makes the older run's verdict irrelevant, and
+# these builds are not cheap (the iroh stack dominates the compile time).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: build + test (ubuntu)
+    runs-on: ubuntu-latest
+    # A cold build of the iroh stack is ~10 min; this only trips on a hang.
+    timeout-minutes: 30
+    steps:
+      # Actions are pinned by commit SHA rather than tag, matching the
+      # cargo-deny workflow: a tag can be moved to point at different code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # GTK4 and libadwaita are *link-time* requirements of ipn-gui. Its own
+      # tests are pure logic (tokenizing, tray ordering, arg parsing, notify
+      # debounce) and there is no gtk::init/Application::new anywhere in the
+      # crate, so no display server or xvfb is needed — the crate just has to
+      # link. Ubuntu 24.04 ships GTK 4.14, which satisfies the gtk4 crate's
+      # "v4_10" feature.
+      - name: Install GTK4 + libadwaita
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev
+
+      # Uses the toolchain preinstalled on the runner rather than a
+      # setup-toolchain action: one less third-party action in the supply chain
+      # for a workflow whose whole point is to be trustworthy. The workspace
+      # sets rust-version = 1.85, far below what the image ships.
+      - name: Toolchain versions
+        run: |
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      # Split from the test step so a compile failure is distinguishable from a
+      # test failure at a glance. --locked makes a stale Cargo.lock a CI failure
+      # instead of a silent resolve, which is the same supply-chain property
+      # cargo-deny is there to protect.
+      - name: Build
+        run: cargo build --workspace --locked --all-targets
+
+      # Plain `cargo test` deliberately: the tests that need real network peers
+      # or an elevated shell are already #[ignore]d in-tree and stay skipped
+      # here. Running them would need infrastructure this job does not have.
+      - name: Test
+        run: cargo test --workspace --locked
