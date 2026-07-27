@@ -29,17 +29,21 @@ jobs:
       # cargo-deny workflow: a tag can be moved to point at different code.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # GTK4 and libadwaita are *link-time* requirements of ipn-gui. Its own
-      # tests are pure logic (tokenizing, tray ordering, arg parsing, notify
-      # debounce) and there is no gtk::init/Application::new anywhere in the
-      # crate, so no display server or xvfb is needed — the crate just has to
-      # link. Ubuntu 24.04 ships GTK 4.14, which satisfies the gtk4 crate's
-      # "v4_10" feature.
-      - name: Install GTK4 + libadwaita
+      # All three are *link-time* requirements of ipn-gui. Its own tests are
+      # pure logic (tokenizing, tray ordering, arg parsing, notify debounce)
+      # and there is no gtk::init/Application::new anywhere in the crate, so no
+      # display server or xvfb is needed — the crate just has to link.
+      #
+      # - libgtk-4-dev / libadwaita-1-dev: the GUI itself. Ubuntu 24.04 ships
+      #   GTK 4.14, which satisfies the gtk4 crate's "v4_10" feature.
+      # - libdbus-1-dev: the Linux tray is ksni (StatusNotifier), and ksni 0.3
+      #   reaches libdbus-sys via the `dbus` crate rather than a pure-Rust zbus,
+      #   so it needs the C library's pkg-config file to build.
+      - name: Install GTK4, libadwaita and D-Bus headers
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev
+            libgtk-4-dev libadwaita-1-dev libdbus-1-dev
 
       # Uses the toolchain preinstalled on the runner rather than a
       # setup-toolchain action: one less third-party action in the supply chain
