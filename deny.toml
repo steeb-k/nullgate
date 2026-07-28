@@ -22,16 +22,57 @@ unmaintained = "workspace"
 # list is how each one gets fixed — re-run `cargo deny check advisories`
 # after any dependency bump to see if it can go.
 ignore = [
-    # maxminddb: Reader::open_mmap marks an unsafe memmap operation safe
-    #   fix: cargo update -p maxminddb (>=0.27.0) — likely a semver-major bump
+    # maxminddb — NOT APPLICABLE. Do not "fix" this by bumping; see below.
+    #
+    # The advisory scopes itself to two functions, and we call neither:
+    #     "maxminddb::Reader::open_mmap" = ["< 0.27.0, >= 0.11.0"]
+    #     "maxminddb::Reader::open"      = ["< 0.12.0, >= 0.11.0"]
+    # crates/ipn-core/src/geo.rs is the only usage in the tree and calls
+    # `Reader::open_readfile`, holding a `Reader<Vec<u8>>` — an owned heap
+    # buffer. The bug is UB when a memory-mapped file is modified on disk while
+    # the map is live; with no mapping there is nothing to invalidate.
+    #
+    # That choice is deliberate and worth keeping: geo.rs downloads the ~60 MB
+    # DB-IP database at runtime and refreshes it periodically, which is exactly
+    # the overwrite-under-an-active-map scenario that makes open_mmap unsound.
+    # open_readfile is the correct call here, not a lucky one.
+    #
+    # The upstream "fix" was to mark open_mmap `unsafe` and push the obligation
+    # to the caller — which is why 0.27 is semver-major. Bumping buys us
+    # nothing: 0.27 also turns `lookup()` into `LookupResult` instead of
+    # `Option<T>`, breaking geo.rs, and restructures the error variants.
+    #
+    # There IS a reason to upgrade eventually, but it is not this advisory:
+    # 0.28.1-0.30 hardened the parser against corrupt databases (runaway
+    # allocation, invalid metadata, infinite loops on cyclic search trees), and
+    # we fetch that .mmdb over the network. Treat that as planned maintenance
+    # with an API migration, not as a response to RUSTSEC-2025-0132.
     "RUSTSEC-2025-0132",
     # FIXED and removed, not suppressed — cargo-deny passing without it is the
     # proof: RUSTSEC-2026-0204, crossbeam-epoch 0.9.18 -> 0.9.20.
-    # quick-xml: quadratic run time on duplicate attribute names
-    #   fix: needs quick-xml >=0.41; transitive, not a direct bump
+    # quick-xml — NOT APPLICABLE rather than deferred:
+    #
+    #   0194  quadratic run time on duplicate attribute names
+    #   0195  unbounded namespace-declaration allocation (memory DoS)
+    #
+    # `cargo tree -i quick-xml` shows exactly one consumer, and every path ends
+    # at the same place:
+    #
+    #   quick-xml -> wayland-scanner (proc-macro)
+    #
+    # wayland-scanner is a build-time code generator: it parses the fixed
+    # Wayland protocol XML that ships inside wayland-protocols and emits Rust.
+    # quick-xml never links into a binary — `cargo tree -e normal` shows no
+    # runtime path either.
+    #
+    # Both advisories are denial-of-service on parser *input*. The only input
+    # here is trusted XML vendored in the dependency tree, parsed on the build
+    # machine. Triggering either would require controlling that XML, which is
+    # already arbitrary code execution via build.rs.
+    #
+    # No action needed and none possible: quick-xml >=0.41 is transitive, so it
+    # clears itself whenever wayland-scanner bumps.
     "RUSTSEC-2026-0194",
-    # quick-xml: unbounded namespace-declaration allocation (memory DoS)
-    #   fix: needs quick-xml >=0.41; transitive, not a direct bump
     "RUSTSEC-2026-0195",
 ]
 
