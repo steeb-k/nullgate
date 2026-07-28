@@ -84,7 +84,21 @@ universal `.app` tarball
 `steeb-k/nullgate` repo; the in-product updaters + `install.sh` read its
 `releases/latest`. The signing metadata (`artifact-signing-metadata.json`) is **git-ignored** —
 never commit it. Builds are **local** (Windows native; Linux/Android via WSL; macOS on a Mac).
-**Do not add GitHub Actions / CI.**
+**Do not build or publish releases from GitHub Actions** — no workflow may produce, sign, or
+upload an artifact. Shipping stays a local, signed, human-driven step.
+
+CI is limited to **checking**, never shipping. Two workflows run on push + PR and neither emits
+an artifact:
+- `.github/workflows/ci.yml` — `cargo build --workspace --locked --all-targets` then
+  `cargo test --workspace --locked` on ubuntu. Installs `libgtk-4-dev libadwaita-1-dev
+  libdbus-1-dev`: all three are link-time requirements of `ipn-gui` (the last via `ksni`, which
+  reaches `libdbus-sys` through the `dbus` crate). No display server is needed — the GUI's tests
+  are pure logic and nothing calls `gtk::init`.
+- `.github/workflows/cargo-deny.yml` — supply-chain checks (advisories, licenses, sources).
+  `deny.toml`'s `ignore` list is the open-advisory backlog; removing an entry is how one gets
+  fixed.
+
+The e2e tests stay `#[ignore]`d and do not run in CI — they open real iroh endpoints.
 
 ## Adding a feature — the workflow
 1. **Engine first.** Implement the behavior as a method on `Engine` in `ipn-core` (or a new
