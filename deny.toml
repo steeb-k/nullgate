@@ -25,9 +25,8 @@ ignore = [
     # maxminddb: Reader::open_mmap marks an unsafe memmap operation safe
     #   fix: cargo update -p maxminddb (>=0.27.0) — likely a semver-major bump
     "RUSTSEC-2025-0132",
-    # crossbeam-epoch: invalid pointer deref in fmt::Pointer impl
-    #   fix: cargo update -p crossbeam-epoch (>=0.9.20)
-    "RUSTSEC-2026-0204",
+    # FIXED and removed, not suppressed — cargo-deny passing without it is the
+    # proof: RUSTSEC-2026-0204, crossbeam-epoch 0.9.18 -> 0.9.20.
     # quick-xml: quadratic run time on duplicate attribute names
     #   fix: needs quick-xml >=0.41; transitive, not a direct bump
     "RUSTSEC-2026-0194",
