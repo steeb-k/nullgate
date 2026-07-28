@@ -17,6 +17,29 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # act on. Transitive unmaintained crates are upstream's call, and failing on them
 # turns CI permanently red for something we cannot fix.
 unmaintained = "workspace"
+#
+# THIS LIST IS NOT A COMPLETE INVENTORY OF KNOWN ADVISORIES. It only contains
+# things that would otherwise FAIL the build. RustSec marks some advisories
+# `informational = "unsound"` (or "notice"), and cargo-deny does not fail on
+# those — so they never appear here even though they are real and open.
+#
+# Worked example, because the discrepancy is confusing if you meet it cold:
+# GHSA-wrw7-89jp-8q8g / RUSTSEC-2024-0429 (unsoundness in glib's
+# VariantStrIter iterators, fixed in 0.20.0) is open against glib 0.18.5 in
+# Cargo.lock. Dependabot raises it; cargo-deny is silent because it is
+# informational; and Dependabot cannot fix it because it is transitive, so its
+# auto-update job just fails on repeat. It is dismissed on the Dependabot tab
+# as not-used rather than suppressed here, because it is not suppressible here.
+#
+# Why it is genuinely not reachable: glib 0.18.5 enters only through
+# tray-icon -> libappindicator/muda -> gtk 0.18 (GTK3). tray-icon is gated to
+# cfg(any(windows, target_os = "macos")) and libappindicator/GTK3 is Linux-only
+# within tray-icon, so the combination never occurs — this crate deliberately
+# uses ksni on Linux to avoid the GTK3 stack. `cargo tree -i glib@0.18.5` finds
+# nothing on x86_64-pc-windows-msvc, x86_64-apple-darwin or
+# x86_64-unknown-linux-gnu; it shows up only under `--target all`, as an
+# artifact of union-of-all-platforms lockfile resolution.
+#
 # Open advisories as of 2026-07-26, suppressed so CI is green on merge.
 # These are earmarked work, NOT accepted risk. Removing an entry from this
 # list is how each one gets fixed — re-run `cargo deny check advisories`
