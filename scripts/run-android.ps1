@@ -81,8 +81,13 @@ try {
         if ($LASTEXITCODE -ne 0) { Warn "Emulator HW acceleration (WHPX) unavailable — boot will be slow. Enable 'Windows Hypervisor Platform'." }
         $running = (& $adb devices) | Select-String -Pattern "^emulator-\d+\s+device"
         if (-not $running) {
-            Step "Booting emulator '$Avd'"
-            Start-Process $emu -ArgumentList "-avd",$Avd,"-no-snapshot-load","-no-boot-anim"
+            Step "Booting emulator '$Avd' (console output -> %TEMP%\nullgate-emulator-*.log)"
+            # Redirected: the emulator spews INFO lines forever, and when this script
+            # runs inside another one (scripts\soak\setup-soak.ps1) that spam buried
+            # the parent's interactive prompts.
+            Start-Process $emu -ArgumentList "-avd",$Avd,"-no-snapshot-load","-no-boot-anim" `
+                -RedirectStandardOutput (Join-Path $env:TEMP "nullgate-emulator-out.log") `
+                -RedirectStandardError (Join-Path $env:TEMP "nullgate-emulator-err.log")
         } else { Step "Emulator already running" }
     } else {
         $devs = (& $adb devices) | Select-String -Pattern "\sdevice$"
