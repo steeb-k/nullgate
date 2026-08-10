@@ -94,3 +94,11 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
+
+# Debug info only for OUR crates, not the ~600-crate dependency tree (iroh, GTK,
+# …): full dep debuginfo made a from-scratch `target/debug` weigh ~32 GB, which
+# filled the disk twice in one day and killed builds mid-compile. Backtraces
+# through deps still resolve symbol names; stepping through our own code in a
+# debugger is unaffected.
+[profile.dev.package."*"]
+debug = false
