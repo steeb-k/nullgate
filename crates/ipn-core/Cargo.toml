@@ -14,7 +14,6 @@ iroh-blobs.workspace = true
 iroh-gossip.workspace = true
 iroh-docs.workspace = true
 iroh-tickets.workspace = true
-iroh-mdns-address-lookup.workspace = true
 
 # async
 tokio.workspace = true
@@ -51,9 +50,12 @@ thiserror.workspace = true
 anyhow.workspace = true
 
 # Desktop-only: the OS keystore has no Android backend (secrets fall back to a
-# file in app-private storage there), and the originator-only geolocation stack
-# (MMDB read + HTTP download) is not shipped on mobile.
+# file in app-private storage there), the originator-only geolocation stack
+# (MMDB read + HTTP download) is not shipped on mobile, and mDNS discovery is
+# excluded on Android (a permanent ~700ms multicast announcer the phone's
+# foreground-only multicast lock mostly can't hear anyway — see `node.rs`).
 [target.'cfg(not(target_os = "android"))'.dependencies]
+iroh-mdns-address-lookup.workspace = true
 keyring.workspace = true
 maxminddb.workspace = true
 serde_json.workspace = true

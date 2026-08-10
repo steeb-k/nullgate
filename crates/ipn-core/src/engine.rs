@@ -40,7 +40,9 @@ use crate::network::{
     decode_recovery_key, encode_recovery_key, generate_originator_key, NetworkSecret, Ticket,
 };
 use crate::node::IrohNode;
-use crate::presence::{GossipMsg, Locations, Presence, PresenceTracker};
+#[cfg(not(target_os = "android"))]
+use crate::presence::Locations;
+use crate::presence::{GossipMsg, Presence, PresenceTracker};
 use crate::roster::{now_ms, sign, Config, Id, InviteCheck, InviteKind, Nonce, Op, Role, Roster};
 use crate::router::{clamp_tcp_mss, dst_ipv4, RouteTable};
 use crate::tun_device::RealTun;
@@ -121,6 +123,31 @@ const ROSTER_REBUILD_CATCHALL_MS: u64 = 30_000;
 /// member is retried ever more sparsely (was a flat ~20s forever) but never dropped.
 const DIAL_BACKOFF_MAX_MS: u64 = 300_000;
 
+/// Minimum spacing between two [`Engine::network_changed`] recovery *bursts*. The
+/// hint to iroh is always forwarded (iroh debounces it itself); this bounds only
+/// the engine-side fan-out — re-seed + re-join + re-dial every member — which
+/// Android's ConnectivityManager can otherwise trigger many times a minute on a
+/// flapping link (including for our own VPN interface coming up). One burst per
+/// window recovers just as well; the extras re-ran the full dial fan-out over the
+/// same network state, a top data burner on metered connections.
+const RECOVERY_BURST_COOLDOWN_MS: u64 = 20_000;
+
+/// Cadence of the periodic `net-stats` log line (see [`log_net_stats`]).
+const NET_STATS_LOG_MS: u64 = 60_000;
+
+/// Consecutive unhealthy [`Engine::health_check`]s before escalating from a
+/// recovery burst to a full node rebuild. With Android's ~15-min alarm cadence
+/// this bounds "silently dead" at roughly two check intervals.
+const REBUILD_AFTER_STRIKES: u32 = 2;
+
+/// Floor between two node rebuilds, so a network that is *genuinely* down (peer
+/// machines off, no internet) doesn't churn the endpoint every health check.
+const REBUILD_MIN_SPACING_MS: u64 = 600_000;
+
+/// Rate limit for the demand-dial kick from the TUN pump: real outbound traffic
+/// to a peer with no live connection makes that peer's backoff due immediately.
+const DEMAND_DIAL_KICK_MS: u64 = 5_000;
+
 /// How aggressively the maintenance loop runs. Desktop is always [`Pace::Interactive`];
 /// the Android facade drops to [`Pace::Background`] when the app isn't visible
 /// (screen off / backgrounded) to cut idle battery use. See [`Engine::set_pace`].
@@ -136,6 +163,28 @@ struct BackoffEntry {
     failures: u32,
     /// Earliest wall-clock (ms) a fresh dial to this peer is allowed.
     next_ok_ms: u64,
+}
+
+/// Rolling counters behind the periodic `net-stats` log line ([`log_net_stats`]):
+/// this engine's own transmit *decisions* per interval (the byte totals come from
+/// iroh's [`iroh::metrics::EndpointMetrics`] at log time). The activity counters
+/// are swapped to zero on every log line; the `last_*` fields are the iroh
+/// counter baselines that turn cumulative totals into per-interval deltas.
+#[derive(Default)]
+struct NetCounters {
+    dial_attempts: AtomicU64,
+    dial_failures: AtomicU64,
+    doc_reseed_targets: AtomicU64,
+    gossip_joins: AtomicU64,
+    presence_broadcasts: AtomicU64,
+    recovery_bursts: AtomicU64,
+    throttled_bursts: AtomicU64,
+    /// Wall-clock (ms) of the last `net-stats` line (log throttle).
+    last_log_ms: AtomicU64,
+    last_tx_bytes: AtomicU64,
+    last_rx_bytes: AtomicU64,
+    last_relay_tx: AtomicU64,
+    last_reports: AtomicU64,
 }
 
 // ---------------------------------------------------------------------------
@@ -347,7 +396,20 @@ struct State {
 }
 
 struct Inner {
-    node: IrohNode,
+    /// The live iroh node, swappable: [`rebuild_node`] replaces it wholesale when
+    /// the endpoint's sockets are beyond repair (post-doze Android). Access via
+    /// [`Inner::node`], which snapshots the `Arc` — callers keep the snapshot for
+    /// one operation, so a swap never blocks on them and stragglers just see
+    /// their calls fail against the closed old node.
+    node: StdRwLock<Arc<IrohNode>>,
+    /// Serializes [`rebuild_node`] runs (health checks can overlap the alarm).
+    rebuild_lock: Mutex<()>,
+    /// Wall-clock (ms) of the last completed node rebuild (spacing guard).
+    last_rebuild: AtomicU64,
+    /// Consecutive unhealthy health checks (see [`REBUILD_AFTER_STRIKES`]).
+    unhealthy_checks: AtomicU32,
+    /// Wall-clock (ms) of the last demand-dial kick from the TUN pump.
+    last_demand_kick: AtomicU64,
     device_key: SigningKey,
     my_id: Id,
     /// This client's **local** friendly nicknames for other members, keyed by
@@ -459,6 +521,10 @@ struct Inner {
     force_recover: AtomicBool,
     /// Per-peer dial-backoff schedule (see [`BackoffEntry`], [`DIAL_BACKOFF_MAX_MS`]).
     dial_backoff: StdMutex<HashMap<Id, BackoffEntry>>,
+    /// Wall-clock (ms) of the last recovery burst (see [`RECOVERY_BURST_COOLDOWN_MS`]).
+    last_recovery_burst: AtomicU64,
+    /// Counters behind the periodic `net-stats` line (see [`NetCounters`]).
+    stats: NetCounters,
     /// Geolocation DB, loaded only on the originator (it resolves + propagates).
     /// Desktop-only — the geo stack isn't shipped on Android.
     #[cfg(not(target_os = "android"))]
@@ -466,6 +532,28 @@ struct Inner {
     /// Guards against launching multiple concurrent geo-DB downloads.
     #[cfg(not(target_os = "android"))]
     geo_downloading: AtomicBool,
+}
+
+impl Inner {
+    /// Snapshot the current iroh node. Hold the returned `Arc` for one operation,
+    /// not across long waits — a rebuild may swap the field underneath, and work
+    /// against a stale snapshot should fail fast on the closed node, not pin it.
+    fn node(&self) -> Arc<IrohNode> {
+        self.node.read().unwrap().clone()
+    }
+}
+
+/// What a [`Engine::health_check`] found and did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HealthAction {
+    /// Nothing wrong (or nothing to check: offline, or no other members).
+    Healthy,
+    /// Unhealthy: fired a recovery burst (cheap first escalation).
+    Burst,
+    /// Unhealthy repeatedly: rebuilt the iroh node and re-activated.
+    Rebuilt,
+    /// Rebuild was attempted and failed (will retry on a later check).
+    Failed,
 }
 
 #[derive(Clone)]
@@ -479,13 +567,7 @@ impl Engine {
     pub async fn start(data_dir: impl AsRef<Path>) -> Result<Engine> {
         let data_dir = data_dir.as_ref().to_path_buf();
 
-        let (mesh_tx, mesh_rx) = mpsc::channel::<Connection>(32);
-        let (join_tx, join_rx) = mpsc::channel::<Connection>(32);
-        let node = IrohNode::spawn_with(&data_dir, |b| {
-            b.accept(MESH_ALPN, ChannelProto { tx: mesh_tx })
-                .accept(JOIN_ALPN, ChannelProto { tx: join_tx })
-        })
-        .await?;
+        let (node, mesh_rx, join_rx) = spawn_node(&data_dir).await?;
 
         let device_key = node.device_signing_key();
         let my_id = node.node_id_bytes();
@@ -498,7 +580,11 @@ impl Engine {
 
         let (events, _) = broadcast::channel(64);
         let inner = Arc::new(Inner {
-            node,
+            node: StdRwLock::new(Arc::new(node)),
+            rebuild_lock: Mutex::new(()),
+            last_rebuild: AtomicU64::new(0),
+            unhealthy_checks: AtomicU32::new(0),
+            last_demand_kick: AtomicU64::new(0),
             device_key,
             my_id,
             nicknames: StdRwLock::new(nicknames),
@@ -541,6 +627,8 @@ impl Engine {
             last_presence_broadcast: AtomicU64::new(0),
             force_recover: AtomicBool::new(false),
             dial_backoff: StdMutex::new(HashMap::new()),
+            last_recovery_burst: AtomicU64::new(0),
+            stats: NetCounters::default(),
             relay_settings: StdRwLock::new(relay_settings),
             relay_apply: StdRwLock::new(crate::relays::RelayApply::Applied),
             relay_apply_lock: Mutex::new(()),
@@ -625,15 +713,77 @@ impl Engine {
     /// interface-state compare swallowed the hint. Safe to call spuriously.
     pub async fn network_changed(&self) {
         let inner = &self.inner;
+        // Always forward the hint — iroh debounces it and no-ops it itself when the
+        // re-read interface state compares equal, so this half is cheap.
+        inner.node().endpoint.network_change().await;
+        // The engine-side burst is NOT cheap (re-seed + re-join + re-dial every
+        // member), so it's rate-limited: ConnectivityManager delivers hint storms on
+        // a flapping link, and each un-throttled burst re-ran the full dial fan-out
+        // over the same network state (see [`RECOVERY_BURST_COOLDOWN_MS`]).
+        let now = now_ms();
+        if now.saturating_sub(inner.last_recovery_burst.load(Ordering::SeqCst))
+            < RECOVERY_BURST_COOLDOWN_MS
+        {
+            inner.stats.throttled_bursts.fetch_add(1, Ordering::Relaxed);
+            tracing::info!("network-change hint: forwarded to iroh (recovery burst throttled)");
+            inner.tick_notify.notify_one();
+            return;
+        }
+        inner.last_recovery_burst.store(now, Ordering::SeqCst);
+        inner.stats.recovery_bursts.fetch_add(1, Ordering::Relaxed);
         tracing::info!("network-change hint: rebinding endpoint + recovery burst");
-        inner.node.endpoint.network_change().await;
         inner.force_recover.store(true, Ordering::SeqCst);
         // Make the throttled self-heals due immediately; the tick's `force` path then
         // targets everyone rather than only presence-fresh members.
         inner.last_doc_sync.store(0, Ordering::SeqCst);
         inner.last_gossip_join.store(0, Ordering::SeqCst);
-        inner.dial_backoff.lock().unwrap().clear();
+        expire_dial_backoff(&inner.dial_backoff);
         inner.tick_notify.notify_one();
+    }
+
+    /// Level-triggered recovery probe, driven on Android by a doze-safe alarm
+    /// (the edge-triggered `ConnectivityManager` path never fires for the killer
+    /// failure: connectivity dies with no network change — post-doze NAT/socket
+    /// death). Unhealthy means "online with peers on the roster and zero live
+    /// mesh connections". Escalation: first strike fires a recovery burst; at
+    /// [`REBUILD_AFTER_STRIKES`] the iroh node is rebuilt outright (the sockets
+    /// themselves are usually dead by then — soak `blackhole` measured 12/12
+    /// non-recoveries without this, and a rebuild recovering in ~5 s).
+    pub async fn health_check(&self) -> HealthAction {
+        let inner = &self.inner;
+        let (online, other_members) = {
+            let st = inner.state.lock().await;
+            let others = st
+                .roster
+                .members()
+                .filter(|(id, _)| **id != inner.my_id)
+                .count();
+            (st.doc.is_some(), others)
+        };
+        let conns = inner.conns.read().unwrap().len();
+        if !online || other_members == 0 || conns > 0 {
+            inner.unhealthy_checks.store(0, Ordering::SeqCst);
+            return HealthAction::Healthy;
+        }
+        let strikes = inner.unhealthy_checks.fetch_add(1, Ordering::SeqCst) + 1;
+        tracing::info!(
+            "health check: online with {other_members} peer(s) and zero connections (strike {strikes})"
+        );
+        let rebuild_due = strikes >= REBUILD_AFTER_STRIKES
+            && now_ms().saturating_sub(inner.last_rebuild.load(Ordering::SeqCst))
+                >= REBUILD_MIN_SPACING_MS;
+        if !rebuild_due {
+            self.network_changed().await;
+            return HealthAction::Burst;
+        }
+        inner.unhealthy_checks.store(0, Ordering::SeqCst);
+        match rebuild_node(inner).await {
+            Ok(()) => HealthAction::Rebuilt,
+            Err(e) => {
+                tracing::warn!("node rebuild failed: {e:#}");
+                HealthAction::Failed
+            }
+        }
     }
 
     pub fn self_node_id_hex(&self) -> String {
@@ -759,7 +909,7 @@ impl Engine {
             subnet,
             &secret,
             originator_id,
-            self.inner.node.addr(),
+            self.inner.node().addr(),
             InviteKind::Peer,
             peer_nonce,
         );
@@ -1014,7 +1164,7 @@ impl Engine {
             subnet,
             &secret,
             originator_id,
-            self.inner.node.addr(),
+            self.inner.node().addr(),
             InviteKind::Peer,
             peer_nonce,
         );
@@ -1166,7 +1316,7 @@ impl Engine {
             subnet,
             &secret,
             originator_id,
-            self.inner.node.addr(),
+            self.inner.node().addr(),
             InviteKind::Peer,
             nonce,
         )
@@ -1205,7 +1355,7 @@ impl Engine {
             subnet,
             &secret,
             originator_id,
-            self.inner.node.addr(),
+            self.inner.node().addr(),
             InviteKind::Controller,
             nonce,
         )
@@ -1271,7 +1421,7 @@ impl Engine {
     pub fn relay_connections(&self) -> Vec<(iroh::RelayUrl, bool)> {
         use iroh::Watcher as _;
         self.inner
-            .node
+            .node()
             .endpoint
             .home_relay_status()
             .get()
@@ -1318,7 +1468,7 @@ impl Engine {
         // Everything the *user* can observe flips here, atomically and without
         // awaiting anything: the selector, the in-memory settings, the reported
         // apply state.
-        self.inner.node.preferred_relays.set(custom_urls.clone());
+        self.inner.node().preferred_relays.set(custom_urls.clone());
         let old = std::mem::replace(
             &mut *self.inner.relay_settings.write().unwrap(),
             settings.clone(),
@@ -1362,7 +1512,7 @@ impl Engine {
             let cfg = st.config.as_ref().context("no network")?;
             (st.doc.clone().context("network offline")?, cfg.originator_id)
         };
-        let entries = membership::load_entries(&doc, self.inner.node.blobs.blobs()).await?;
+        let entries = membership::load_entries(&doc, self.inner.node().blobs.blobs()).await?;
 
         // Resolve friendly names from Add hostnames + this client's local nicknames.
         let mut hostnames: HashMap<Id, String> = HashMap::new();
@@ -1501,7 +1651,7 @@ impl Engine {
         let cfg = st.config.as_ref().context("no network")?;
         let nicks = self.inner.nicknames.read().unwrap();
         let notes = self.inner.notes.read().unwrap();
-        let self_addr = self.inner.node.addr();
+        let self_addr = self.inner.node().addr();
         let (self_local, self_public) = split_local_public(self_addr.ip_addrs().copied());
         let is_orig = cfg.originator_secret.is_some();
         let mut members = Vec::new();
@@ -1613,7 +1763,7 @@ impl Engine {
             online: st.doc.is_some(),
             home_relay: self
                 .inner
-                .node
+                .node()
                 .addr()
                 .relay_urls()
                 .next()
@@ -1627,22 +1777,79 @@ impl Engine {
 // Activation + background work
 // ---------------------------------------------------------------------------
 
+/// Bind a fresh iroh node with the engine's ALPNs. The mesh/join accept loops
+/// consume the returned receivers; their senders live inside the node's router,
+/// so when the node is closed the old loops end on their own.
+async fn spawn_node(
+    data_dir: &Path,
+) -> Result<(IrohNode, mpsc::Receiver<Connection>, mpsc::Receiver<Connection>)> {
+    let (mesh_tx, mesh_rx) = mpsc::channel::<Connection>(32);
+    let (join_tx, join_rx) = mpsc::channel::<Connection>(32);
+    let node = IrohNode::spawn_with(data_dir, |b| {
+        b.accept(MESH_ALPN, ChannelProto { tx: mesh_tx })
+            .accept(JOIN_ALPN, ChannelProto { tx: join_tx })
+    })
+    .await?;
+    Ok((node, mesh_rx, join_rx))
+}
+
+/// Replace the iroh node wholesale: leave the mesh, close the old node's router/
+/// stores/sockets in place, bind a fresh one from the same data dir (same device
+/// key ⇒ same NodeId), and re-activate the stored network. This is the recovery
+/// primitive a manual Always-on-VPN toggle performed by accident — the only fix
+/// for an endpoint whose UDP sockets died under Android doze, because iroh's
+/// rebind path is unreachable from any public API there (netwatch is a stub and
+/// the `network_change` hint no-ops when interface state compares equal).
+async fn rebuild_node(inner: &Arc<Inner>) -> Result<()> {
+    let _guard = inner.rebuild_lock.lock().await;
+    tracing::info!("rebuilding iroh node (endpoint recovery)");
+    let cfg = { inner.state.lock().await.config.clone() };
+    // Take the mesh down exactly like going offline (aborts net tasks, closes
+    // conns, drops doc/gossip handles) — those all reference the old node.
+    soft_disconnect(inner).await;
+    // Release the old node's sockets + store locks in place; in-flight holders of
+    // the old Arc see clean errors. The new bind below needs those locks free.
+    inner.node().close().await;
+    let (node, mesh_rx, join_rx) = spawn_node(&inner.data_dir).await?;
+    anyhow::ensure!(
+        node.node_id_bytes() == inner.my_id,
+        "node identity changed across rebuild"
+    );
+    // The bound ports are diagnostic gold: a soak run showed a process whose
+    // rebuilds never restored connectivity while a process restart fixed it in
+    // 5 s — if this logs the SAME port every rebuild, the endpoint is re-binding
+    // a port whose NAT state died, and the fresh-process fix is a fresh port.
+    tracing::info!("rebuilt endpoint bound to {:?}", node.endpoint.bound_sockets());
+    *inner.node.write().unwrap() = Arc::new(node);
+    spawn_accept_loop(inner.clone(), mesh_rx, handle_mesh_incoming);
+    spawn_accept_loop(inner.clone(), join_rx, handle_join_incoming);
+    if let Some(cfg) = cfg {
+        activate(inner, cfg).await?;
+        inner.tick_notify.notify_one();
+    }
+    inner.last_rebuild.store(now_ms(), Ordering::SeqCst);
+    let _ = inner.events.send(EngineEvent::Changed);
+    tracing::info!("node rebuild complete");
+    Ok(())
+}
+
 async fn activate(inner: &Arc<Inner>, cfg: StoredConfig) -> Result<()> {
+    // One node snapshot for the whole activation: everything below must land on
+    // the same node instance (a rebuild swaps the field, then re-runs activate).
+    let node = inner.node();
     let secret = cfg.secret();
     // Open the deterministic roster document (same namespace for every member).
     let ns = iroh_docs::NamespaceSecret::from_bytes(&secret.docs_namespace_seed());
-    let doc = inner
-        .node
+    let doc = node
         .docs_api()
         .import_namespace(iroh_docs::Capability::Write(ns))
         .await
         .context("open roster doc")?;
-    let author = inner.node.docs_api().author_create().await?;
+    let author = node.docs_api().author_create().await?;
 
     // Subscribe to presence gossip on the private rendezvous topic.
     let topic = TopicId::from_bytes(secret.rendezvous());
-    let sub = inner
-        .node
+    let sub = node
         .gossip
         .subscribe(topic, Vec::<EndpointId>::new())
         .await
@@ -1836,6 +2043,9 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
         tracing::info!("one-way block: dropped {dropped} unsolicited inbound packet(s)");
     }
 
+    // Before the no-network bail-out: the endpoint is bound (and probing) either way.
+    log_net_stats(inner, now_coarse);
+
     let (doc, cfg) = {
         let st = inner.state.lock().await;
         match (st.doc.clone(), st.config.clone()) {
@@ -1858,7 +2068,7 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
             > ROSTER_REBUILD_CATCHALL_MS;
     let roster = if rebuild {
         inner.last_roster_rebuild.store(now_coarse, Ordering::Relaxed);
-        membership::build_roster(&cfg.roster_cfg(), &doc, inner.node.blobs.blobs()).await?
+        membership::build_roster(&cfg.roster_cfg(), &doc, inner.node().blobs.blobs()).await?
     } else {
         inner.state.lock().await.roster.clone()
     };
@@ -1956,9 +2166,11 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
             async move { dial_member(&inner, peer, psk).await }
         },
         move |peer, success| {
+            outcome_inner.stats.dial_attempts.fetch_add(1, Ordering::Relaxed);
             if success {
                 reset_dial_backoff(&outcome_inner.dial_backoff, &peer);
             } else {
+                outcome_inner.stats.dial_failures.fetch_add(1, Ordering::Relaxed);
                 record_dial_failure(&outcome_inner.dial_backoff, peer, now_ms());
             }
         },
@@ -2023,6 +2235,10 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
             due,
         ) {
             inner.last_doc_sync.store(now, Ordering::Relaxed);
+            inner
+                .stats
+                .doc_reseed_targets
+                .fetch_add(targets.len() as u64, Ordering::Relaxed);
             let addrs: Vec<EndpointAddr> =
                 targets.iter().filter_map(|id| bootstrap_addr(id).ok()).collect();
             let doc = doc.clone();
@@ -2053,7 +2269,7 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
         // Advertise our own public IP (same source the self view uses) so peers
         // can show it even over a relay path where they can't observe it directly.
         let my_public_ip = {
-            let addr = inner.node.addr();
+            let addr = inner.node().addr();
             split_local_public(addr.ip_addrs().copied()).1
         };
         // Interactive pace broadcasts a heartbeat every tick (3s); Background
@@ -2066,6 +2282,7 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
                 >= PRESENCE_BROADCAST_BG_MS;
         if due_presence {
             inner.last_presence_broadcast.store(now_coarse, Ordering::Relaxed);
+            inner.stats.presence_broadcasts.fetch_add(1, Ordering::Relaxed);
             let rad = inner.remote_access_disabled.load(Ordering::Relaxed);
             let hid = inner.hidden.load(Ordering::Relaxed);
             let p = Presence::signed(
@@ -2147,6 +2364,10 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
                 now.saturating_sub(inner.last_gossip_join.load(Ordering::Relaxed)) > cadence;
             if member_set_changed || due {
                 inner.last_gossip_join.store(now, Ordering::Relaxed);
+                inner
+                    .stats
+                    .gossip_joins
+                    .fetch_add(peers.len() as u64, Ordering::Relaxed);
                 let _ = sender.join_peers(peers).await;
             }
         }
@@ -2292,12 +2513,67 @@ fn reset_dial_backoff(backoff: &StdMutex<HashMap<Id, BackoffEntry>>, peer: &Id) 
     backoff.lock().unwrap().remove(peer);
 }
 
+/// Make every peer's backoff window due immediately while keeping its failure
+/// count — a network-change hint means "conditions changed, retry now", not
+/// "forget that this peer has been dead for an hour". The wholesale `clear()`
+/// this replaces put every dead peer back on full-rate dialing after each blip,
+/// which is exactly the iroh#4293 churn the backoff exists to stop; with the
+/// count kept, the immediate retry still happens but a failure resumes the long
+/// spacing instead of restarting the schedule from zero.
+fn expire_dial_backoff(backoff: &StdMutex<HashMap<Id, BackoffEntry>>) {
+    for e in backoff.lock().unwrap().values_mut() {
+        e.next_ok_ms = 0;
+    }
+}
+
+/// Emit the periodic `net-stats` line: one greppable INFO line a minute with the
+/// interval's iroh byte/report deltas plus this engine's own transmit decisions.
+/// This is the instrumentation the Android soak harness asserts against (logcat
+/// tag `nullgate`) and the first thing to read when "where is the data going"
+/// comes up. It runs even with no network configured — a bound-but-idle endpoint
+/// still probes (net-report, relay keepalive), and that burn must be visible.
+/// The first line after boot shows totals-since-boot; every later line, deltas.
+fn log_net_stats(inner: &Inner, now: u64) {
+    let s = &inner.stats;
+    if now.saturating_sub(s.last_log_ms.load(Ordering::Relaxed)) < NET_STATS_LOG_MS {
+        return;
+    }
+    s.last_log_ms.store(now, Ordering::Relaxed); // tick is the only caller
+    let node = inner.node();
+    let m = node.endpoint.metrics();
+    let tx = m.socket.send_ipv4.get() + m.socket.send_ipv6.get() + m.socket.send_relay.get();
+    let rx = m.socket.recv_data_ipv4.get()
+        + m.socket.recv_data_ipv6.get()
+        + m.socket.recv_data_relay.get();
+    let relay_tx = m.socket.send_relay.get();
+    let reports = m.net_report.reports.get();
+    tracing::info!(
+        "net-stats: tx={}B rx={}B relay_tx={}B reports={} dials={} dial_fail={} doc_seeds={} gossip_joins={} presence={} bursts={} bursts_throttled={} conns={} relay_moves={}",
+        tx.saturating_sub(s.last_tx_bytes.swap(tx, Ordering::Relaxed)),
+        rx.saturating_sub(s.last_rx_bytes.swap(rx, Ordering::Relaxed)),
+        relay_tx.saturating_sub(s.last_relay_tx.swap(relay_tx, Ordering::Relaxed)),
+        reports.saturating_sub(s.last_reports.swap(reports, Ordering::Relaxed)),
+        s.dial_attempts.swap(0, Ordering::Relaxed),
+        s.dial_failures.swap(0, Ordering::Relaxed),
+        s.doc_reseed_targets.swap(0, Ordering::Relaxed),
+        s.gossip_joins.swap(0, Ordering::Relaxed),
+        s.presence_broadcasts.swap(0, Ordering::Relaxed),
+        s.recovery_bursts.swap(0, Ordering::Relaxed),
+        s.throttled_bursts.swap(0, Ordering::Relaxed),
+        m.socket
+            .num_conns_opened
+            .get()
+            .saturating_sub(m.socket.num_conns_closed.get()),
+        m.socket.relay_home_change.get(),
+    );
+}
+
 async fn dial_member(inner: &Arc<Inner>, peer: Id, psk: [u8; 32]) -> Result<()> {
     let addr = EndpointAddr::from_parts(
         EndpointId::from_bytes(&peer).context("bad peer id")?,
         Vec::<TransportAddr>::new(),
     );
-    let conn = inner.node.endpoint.connect(addr, MESH_ALPN).await?;
+    let conn = inner.node().endpoint.connect(addr, MESH_ALPN).await?;
     let _verified = admission::dial(
         &conn,
         inner.my_id,
@@ -2459,7 +2735,7 @@ async fn handle_join_incoming(inner: Arc<Inner>, conn: Connection) {
 async fn join_handshake(inner: &Arc<Inner>, cfg: &StoredConfig, ticket: &Ticket) -> Result<()> {
     let secret = cfg.secret();
     let conn = inner
-        .node
+        .node()
         .endpoint
         .connect(ticket.bootstrap.clone(), JOIN_ALPN)
         .await
@@ -2510,7 +2786,7 @@ async fn join_handshake(inner: &Arc<Inner>, cfg: &StoredConfig, ticket: &Ticket)
                 let doc = inner.state.lock().await.doc.clone();
                 if let Some(doc) = doc {
                     if let Ok(r) =
-                        membership::build_roster(&roster_cfg, &doc, inner.node.blobs.blobs()).await
+                        membership::build_roster(&roster_cfg, &doc, inner.node().blobs.blobs()).await
                     {
                         if r.is_member(&inner.my_id) {
                             joined = true;
@@ -2854,6 +3130,31 @@ fn spawn_tun_pump(inner: &Arc<Inner>, tun: Arc<RealTun>) {
                         if let Err(e) = conn.send_datagram(Bytes::copy_from_slice(pkt)) {
                             tracing::trace!("dropped {}-byte packet: {e}", pkt.len());
                         }
+                    } else {
+                        // Demand dial: real traffic wants this peer NOW (e.g. a
+                        // KDE Connect push while the mesh is down). The packet is
+                        // lost (no queueing — TCP/app retries cover that), but
+                        // clearing the peer's backoff and waking the tick starts
+                        // the dial immediately instead of up to a backoff window
+                        // later. Rate-limited so a packet flood can't spin the
+                        // tick; coarse_now avoids a syscall on this hot path.
+                        let now = inner2.coarse_now.load(Ordering::Relaxed);
+                        let last = inner2.last_demand_kick.load(Ordering::Relaxed);
+                        if now.saturating_sub(last) >= DEMAND_DIAL_KICK_MS
+                            && inner2
+                                .last_demand_kick
+                                .compare_exchange(
+                                    last,
+                                    now,
+                                    Ordering::SeqCst,
+                                    Ordering::Relaxed,
+                                )
+                                .is_ok()
+                        {
+                            tracing::debug!("demand-dial kick for {}", short(&peer));
+                            reset_dial_backoff(&inner2.dial_backoff, &peer);
+                            inner2.tick_notify.notify_one();
+                        }
                     }
                 }
                 Err(e) => {
@@ -2885,7 +3186,8 @@ async fn conn_info(inner: &Arc<Inner>, peer: &Id) -> ConnInfo {
     let Ok(eid) = EndpointId::from_bytes(peer) else {
         return out;
     };
-    let Some(info) = inner.node.endpoint.remote_info(eid).await else {
+    let node = inner.node();
+    let Some(info) = node.endpoint.remote_info(eid).await else {
         return out;
     };
     use iroh::endpoint::TransportAddrUsage;
@@ -3042,7 +3344,7 @@ async fn refresh_roster(inner: &Arc<Inner>) {
         }
     };
     if let Ok(roster) =
-        membership::build_roster(&cfg.roster_cfg(), &doc, inner.node.blobs.blobs()).await
+        membership::build_roster(&cfg.roster_cfg(), &doc, inner.node().blobs.blobs()).await
     {
         if roster.is_member(&inner.my_id) {
             inner.was_member.store(true, Ordering::SeqCst);
@@ -3199,7 +3501,8 @@ async fn apply_relay_map(
         return;
     }
 
-    let ep = &inner.node.endpoint;
+    let node = inner.node();
+    let ep = &node.endpoint;
     let mut last_stuck = String::new();
     for attempt in 1..=ATTEMPTS {
         let mut stuck: Vec<String> = Vec::new();
@@ -3308,7 +3611,7 @@ async fn settle_home_relay(
         // The home relay, if we have one. No home relay is fine: it means no
         // relay is reachable, not that we're using one we shouldn't be.
         let home = inner
-            .node
+            .node()
             .endpoint
             .home_relay_status()
             .get()
@@ -3593,6 +3896,7 @@ mod dial_tests {
     }
 }
 
+
 /// Tests for the duplicate-connection tie-break that fixes the unexplained per-peer
 /// drops: a simultaneous double-dial must converge on **one** connection at *both*
 /// ends, so neither side later evicts the connection the other kept.
@@ -3801,5 +4105,48 @@ mod backoff_tests {
             vec![id(1)],
             "a reset peer is immediately dialable again"
         );
+    }
+
+    // A network-change hint must make dead peers retryable *now* without
+    // forgetting how dead they've been — the wholesale `clear()` this replaced
+    // put every unreachable member back on full-rate dialing after every
+    // connectivity blip (a top data burner on metered Android).
+    #[test]
+    fn expire_makes_peers_due_but_keeps_failure_counts() {
+        let backoff = StdMutex::new(HashMap::new());
+        let now: u64 = 1_000_000;
+        // Three straight failures: well into the exponential schedule.
+        for _ in 0..3 {
+            record_dial_failure(&backoff, id(1), now);
+        }
+        assert!(
+            dial_backoff_filter(vec![id(1)], &backoff.lock().unwrap(), now).is_empty(),
+            "peer must be in backoff before the hint"
+        );
+
+        expire_dial_backoff(&backoff);
+        assert_eq!(
+            dial_backoff_filter(vec![id(1)], &backoff.lock().unwrap(), now),
+            vec![id(1)],
+            "the hint must allow an immediate retry"
+        );
+
+        // The retry fails again: the schedule must RESUME (failures=4 ⇒ capped at
+        // DIAL_BACKOFF_MAX_MS), not restart from the first-failure delay.
+        record_dial_failure(&backoff, id(1), now);
+        let e = backoff.lock().unwrap()[&id(1)];
+        assert_eq!(e.failures, 4, "failure count survives the expiry");
+        assert_eq!(
+            e.next_ok_ms,
+            now + DIAL_BACKOFF_MAX_MS,
+            "post-hint failure resumes the long spacing (20s·2^4 caps at the max)"
+        );
+    }
+
+    #[test]
+    fn expire_only_touches_existing_entries() {
+        let backoff = StdMutex::new(HashMap::new());
+        expire_dial_backoff(&backoff);
+        assert!(backoff.lock().unwrap().is_empty(), "no entries invented");
     }
 }

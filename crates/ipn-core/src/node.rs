@@ -59,6 +59,7 @@ impl IrohNode {
         // The endpoint id is the public half of the device key; we need it to
         // build the mDNS service below, before the secret key is moved into the
         // endpoint builder.
+        #[cfg(not(target_os = "android"))]
         let endpoint_id = secret_key.public();
 
         // The N0 preset wires up n0 DNS discovery + relays (internet path). On
@@ -68,6 +69,25 @@ impl IrohNode {
         // where multicast is unavailable) — degrade to "no LAN discovery" with a
         // warning rather than failing endpoint startup.
         let mut builder = Endpoint::builder(iroh::endpoint::presets::N0).secret_key(secret_key);
+
+        // Android runs on a metered radio, and iroh's *broken-network* behavior is
+        // its most expensive: when no relay is reachable, every 20-26s net-report
+        // falls back to the maximal probe plan (3 HTTPS probes x every relay, each
+        // a fresh TCP+TLS handshake, plus 7-way staggered DNS per probe) — a
+        // measured multi-GB/month burn on a phone whose connectivity flaps daily.
+        // `minimal()` keeps the QAD probes (which feed address discovery, the part
+        // that matters) and drops the HTTPS/captive-portal extras. The portmapper
+        // re-probes UPnP/NAT-PMP/PCP every report too, and behind a VpnService +
+        // carrier NAT a port mapping is never obtainable — pure waste. Desktop
+        // keeps both defaults: unmetered, stable links, and UPnP can actually win
+        // a direct path there.
+        #[cfg(target_os = "android")]
+        {
+            use iroh::endpoint::{NetReportConfig, PortmapperConfig};
+            builder = builder
+                .net_report_config(NetReportConfig::minimal())
+                .portmapper_config(PortmapperConfig::Disabled);
+        }
 
         // Custom relay servers (see `crate::relays`). The path selector is
         // installed unconditionally — with no preferred relays it behaves like
@@ -95,6 +115,14 @@ impl IrohNode {
                 tracing::warn!("ignoring invalid relay settings: {e:#}")
             }
         }
+        // No mDNS on Android: the discoverer multicasts a query every ~700ms for
+        // the endpoint's whole lifetime (swarm-discovery's "interactive" cadence,
+        // not configurable from here), the multicast lock that would let replies
+        // in is foreground-only anyway, and LAN-direct paths still form without
+        // it — QUIC NAT traversal exchanges local addresses over the relay. On
+        // desktop it stays: it's what lets two members on the same LAN connect
+        // with no internet at all.
+        #[cfg(not(target_os = "android"))]
         match iroh_mdns_address_lookup::MdnsAddressLookup::builder().build(endpoint_id) {
             Ok(mdns) => builder = builder.address_lookup(mdns),
             Err(e) => tracing::warn!("local-network (mDNS) discovery unavailable: {e}"),
@@ -161,6 +189,27 @@ impl IrohNode {
     pub async fn shutdown(self) -> anyhow::Result<()> {
         self.router.shutdown().await?;
         Ok(())
+    }
+
+    /// Shut this node down **in place**, releasing everything a replacement node
+    /// needs: the router (whose shutdown fans out to each protocol handler —
+    /// docs closes its redb, gossip quiesces) and the endpoint's UDP sockets.
+    /// By-reference on purpose: during an engine-level rebuild the old node's
+    /// `Arc` can still be held briefly by in-flight tasks, and every operation on
+    /// a closed node fails cleanly instead of panicking. This is the primitive
+    /// behind the engine health check's recovery — on Android a doze can leave
+    /// the endpoint's sockets dead with no OS signal and no iroh API to rebind
+    /// them, so the only real fix is a fresh bind (what a manual VPN toggle did).
+    pub async fn close(&self) {
+        if let Err(e) = self.router.shutdown().await {
+            tracing::warn!("router shutdown: {e:#}");
+        }
+        // Belt-and-braces: make sure the blob store actor is stopped so blobs.db
+        // is unlocked for the successor node.
+        if let Err(e) = self.blobs.shutdown().await {
+            tracing::debug!("blob store shutdown: {e:#}");
+        }
+        self.endpoint.close().await;
     }
 }
 

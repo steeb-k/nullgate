@@ -3,6 +3,7 @@ package io.github.steeb_k.nullgate.engine
 import android.content.Context
 import android.net.VpnService
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
@@ -84,6 +85,13 @@ object EngineHolder {
     @Volatile
     private var revokedByOtherVpn = false
 
+    /** Whether *our* VPN tunnel is currently established. [NetworkMonitor] reads this
+     * to tell our own tunnel apart from a foreign VPN in the default-network
+     * callback — reacting to our own establish/teardown cost a recovery burst per
+     * tunnel transition. */
+    @Volatile
+    private var tunnelActive = false
+
     /** One-shot user-facing messages (errors / confirmations) for snackbars. */
     private val _toasts = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val toasts: SharedFlow<String> = _toasts.asSharedFlow()
@@ -128,10 +136,14 @@ object EngineHolder {
         return "$base ($suffix)"
     }
 
-    /** Idempotent: boot the engine once and seed the initial UI state. */
+    /** Idempotent: boot the engine once and seed the initial UI state. Returns
+     * whether the engine is up — a failed init (e.g. started at boot before any
+     * network exists) must be retryable, not terminal; the caller leaves its own
+     * "started" latch unset so the next start intent (including the health-check
+     * alarm's) tries again. */
     @Synchronized
-    fun start(context: Context) {
-        if (engine != null) return
+    fun start(context: Context): Boolean {
+        if (engine != null) return true
         val appCtx = context.applicationContext
         val data = dataDir(appCtx).absolutePath
         val name = deviceName(appCtx)
@@ -154,16 +166,80 @@ object EngineHolder {
             override fun onTunTeardownRequired() {
                 // The engine has already dropped its TUN (closing the fd, which
                 // tears down the interface). Nothing to do but refresh the UI.
+                tunnelActive = false
                 refreshStatus()
             }
         }
         try {
             engine = MobileEngine.init(data, name, listener)
             _running.value = true
+            // The engine boots at its Interactive (3s) pace, and the screen receiver
+            // only sees *transitions* — so a service started with the screen already
+            // off (boot via Always-on VPN, an overnight START_STICKY restart) used to
+            // gossip at 20× the background rate for hours. Seed the real screen state
+            // and push a pace immediately.
+            screenInteractive = runCatching {
+                (appCtx.getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
+            }.getOrDefault(true)
+            applyPace()
             refreshStatus()
         } catch (e: Exception) {
             Log.e(TAG, "engine init failed", e)
             emit("Engine failed to start: ${e.message}")
+        }
+        return engine != null
+    }
+
+    /**
+     * Run the engine's level-triggered health check (from [HealthCheckReceiver]'s
+     * doze-safe alarm). A short partial wakelock keeps the CPU up long enough for
+     * a node rebuild to finish if the check escalates that far — without it, doze
+     * can re-freeze the process mid-rebuild the moment the receiver returns.
+     */
+    /** Consecutive health checks that came back "rebuilt" without the engine ever
+     * reaching healthy in between — i.e. the in-process rebuild rung is not
+     * working. See [healthCheck] for the final rung. */
+    @Volatile
+    private var rebuildsWithoutHealth = 0
+
+    fun healthCheck(context: Context) {
+        val wl = runCatching {
+            (context.getSystemService(Context.POWER_SERVICE) as PowerManager)
+                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "nullgate:health")
+                .apply { acquire(60_000) }
+        }.getOrNull()
+        scope.launch {
+            try {
+                val action = runCatching { engine?.healthCheck() }.getOrNull()
+                when (action) {
+                    null, "healthy" -> rebuildsWithoutHealth = 0
+                    "rebuilt" -> rebuildsWithoutHealth++
+                    else -> {}
+                }
+                if (action != null && action != "healthy") {
+                    Log.i(TAG, "health check -> $action (rebuilds without health: $rebuildsWithoutHealth)")
+                    refreshStatus()
+                    // Pull the next check in close: the ladder climbs one rung per
+                    // check, so this is what makes recovery take minutes, not the
+                    // better part of an hour (see HealthCheckReceiver).
+                    HealthCheckReceiver.schedule(context, fast = true)
+                }
+                // Final rung: if repeated in-process node rebuilds cannot restore
+                // connectivity, restart the whole process — empirically the one
+                // recovery that has never failed (always-on VPN + START_STICKY
+                // bring the service back in ~5 s; the alarm chain is registered
+                // with the OS and survives). A soak run found process state that
+                // outlives a node rebuild but not a process restart; until that
+                // is root-caused, this rung keeps the phone reachable. Mirrors
+                // the desktop daemon's watchdog-restart philosophy.
+                if (rebuildsWithoutHealth >= 2) {
+                    Log.w(TAG, "rebuilds are not restoring connectivity — restarting the process")
+                    rebuildsWithoutHealth = 0
+                    android.os.Process.killProcess(android.os.Process.myPid())
+                }
+            } finally {
+                runCatching { if (wl?.isHeld == true) wl.release() }
+            }
         }
     }
 
@@ -173,6 +249,7 @@ object EngineHolder {
         runCatching { engine?.close() }
         engine = null
         pendingTun = null
+        tunnelActive = false
         _needsVpnConsent.value = false
         _running.value = false
         _status.value = null
@@ -215,11 +292,16 @@ object EngineHolder {
             if (revokedByOtherVpn && userWantsOnline &&
                 VpnService.prepare(context) == null
             ) {
-                revokedByOtherVpn = false
                 // setOnline re-activates the network; the engine then re-emits
                 // TunSetupRequired, which brings the VpnService tunnel back up.
+                // The flag is cleared only after the resume SUCCEEDS: clearing it
+                // first meant one failed setOnline (routine right after a network
+                // transition) permanently ended auto-resume — the "have to
+                // reconnect multiple times" bug. On failure the flag stays set and
+                // the next connectivity callback retries.
                 runCatching { requireEngine().setOnline(true) }
-                    .onFailure { Log.w(TAG, "resume after revoke failed", it) }
+                    .onSuccess { revokedByOtherVpn = false }
+                    .onFailure { Log.w(TAG, "resume after revoke failed; will retry", it) }
             }
             runCatching { engine?.networkChanged() }
         }
@@ -234,10 +316,18 @@ object EngineHolder {
      */
     fun onVpnRevoked() {
         revokedByOtherVpn = true
+        tunnelActive = false
         // Raw engine call (not the wrapper): this is a forced offline, so it must not
         // clear userWantsOnline or we'd never auto-resume.
         scope.launch { runCatching { engine?.setOnline(false) } }
     }
+
+    /** See [tunnelActive]; set by the service when `establish()` succeeds. */
+    fun noteTunnelActive(active: Boolean) {
+        tunnelActive = active
+    }
+
+    fun isTunnelActive(): Boolean = tunnelActive
 
     private fun refreshStatus() {
         scope.launch {
@@ -278,6 +368,7 @@ object EngineHolder {
 
     /** Drop the engine's TUN (VPN revoked / explicit teardown). */
     fun detachTun() {
+        tunnelActive = false
         scope.launch { runCatching { engine?.detachTun() } }
     }
 

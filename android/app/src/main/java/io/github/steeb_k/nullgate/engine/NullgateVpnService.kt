@@ -72,11 +72,22 @@ class NullgateVpnService : VpnService() {
     /** One-time engine startup + notification refresh loop. */
     private fun ensureStarted() {
         if (started) return
-        started = true
         startForegroundCompat(buildNotification("Starting…"))
-        EngineHolder.start(applicationContext)
+        val engineUp = EngineHolder.start(applicationContext)
+        // Monitors + the recovery alarm exist regardless of engine state (all
+        // idempotent): the alarm is precisely what retries a failed init.
         registerScreenReceiver()
         startNetworkMonitor()
+        HealthCheckReceiver.schedule(applicationContext)
+        if (!engineUp) {
+            // Init failed (routine at boot via Always-on VPN, before any network
+            // is up). `started` stays false so the next start intent — including
+            // the health-check alarm's — retries instead of latching a dead
+            // engine forever behind a healthy-looking notification.
+            Log.w(TAG, "engine init failed; will retry on the next start intent")
+            return
+        }
+        started = true
 
         // Notification: re-post only when the rendered line actually changes. It used
         // to re-post on every status emission (≥ every ~30s) even when unchanged.
@@ -100,15 +111,16 @@ class NullgateVpnService : VpnService() {
     }
 
     /** Watch connectivity so the engine can recover after a network switch (and set
-     * our VpnService's underlying network for correct metering/transport). */
+     * our VpnService's underlying networks for correct metering/attribution). */
     private fun startNetworkMonitor() {
         if (networkMonitor != null) return
         networkMonitor = NetworkMonitor(
             applicationContext,
             onNetworkChanged = { EngineHolder.onNetworkChanged(applicationContext) },
-            onUnderlyingNetwork = { net ->
-                runCatching { setUnderlyingNetworks(net?.let { arrayOf(it) }) }
+            onUnderlyingNetworks = { nets ->
+                runCatching { setUnderlyingNetworks(nets) }
             },
+            ourTunnelActive = { EngineHolder.isTunnelActive() },
         ).also { it.start() }
     }
 
@@ -123,14 +135,19 @@ class NullgateVpnService : VpnService() {
                 }
             }
         }
-        registerReceiver(
-            r,
-            IntentFilter().apply {
-                addAction(Intent.ACTION_SCREEN_ON)
-                addAction(Intent.ACTION_SCREEN_OFF)
-            },
-        )
-        screenReceiver = r
+        // Guarded: an exception here previously escaped ensureStarted() *after*
+        // `started` latched, silently skipping the network monitor registration —
+        // an engine with no connectivity recovery at all.
+        runCatching {
+            registerReceiver(
+                r,
+                IntentFilter().apply {
+                    addAction(Intent.ACTION_SCREEN_ON)
+                    addAction(Intent.ACTION_SCREEN_OFF)
+                },
+            )
+        }.onSuccess { screenReceiver = r }
+            .onFailure { Log.w(TAG, "screen receiver failed; pace follows activity only", it) }
     }
 
     /** Build the VPN interface for our virtual IP and hand its fd to the engine.
@@ -147,8 +164,16 @@ class NullgateVpnService : VpnService() {
                 ?: error("VpnService.establish() returned null (permission revoked?)")
             // Ownership of the fd transfers to Rust (detachFd); it closes it on drop.
             EngineHolder.attachTun(pfd.detachFd())
+            EngineHolder.noteTunnelActive(true)
             Log.i(TAG, "VPN established at $ip/24 (mtu $mtu)")
-        }.onFailure { Log.e(TAG, "establishTun failed", it) }
+        }.onFailure {
+            Log.e(TAG, "establishTun failed", it)
+            // The engine latched tun_attempted when it asked for this tunnel;
+            // detaching resets that latch so a later tick re-emits
+            // TunSetupRequired and the attempt repeats — a failed establish used
+            // to leave routing silently dead until a manual offline/online.
+            EngineHolder.detachTun()
+        }
     }
 
     /** Drop routing without stopping the engine (the engine clears its own TUN; this
@@ -167,6 +192,7 @@ class NullgateVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        HealthCheckReceiver.cancel(applicationContext)
         screenReceiver?.let { runCatching { unregisterReceiver(it) } }
         screenReceiver = null
         networkMonitor?.stop()

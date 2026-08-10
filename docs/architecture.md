@@ -355,9 +355,48 @@ a full process restart (which rebinds the endpoint) recovered. The app therefore
 calls `MobileEngine::network_changed` → `Engine::network_changed`, which hands iroh the hint
 (`Endpoint::network_change` — the API that exists precisely for platforms that can't self-detect)
 **and** fires a one-shot recovery burst (re-seed the roster doc to *all* members, re-join gossip,
-clear dial backoff) in case iroh's own interface-state compare swallowed the hint. It also reports
-the underlying non-VPN network to the `VpnService` so metering/transport stay correct across
-Wi-Fi↔cellular.
+make every dial-backoff window due immediately) in case iroh's own interface-state compare swallowed
+the hint. The burst is engine-side **rate-limited** (`RECOVERY_BURST_COOLDOWN_MS`): the hint itself
+is always forwarded, but the expensive fan-out runs at most once per window, because Android
+delivers callback storms on a flapping link and each un-throttled burst re-ran the full dial fan-out
+— a top data burner on metered connections. For the same reason the burst *expires* the per-peer
+backoff windows rather than clearing them: failure counts survive, so a still-dead peer resumes its
+long spacing after one immediate retry instead of returning to full-rate dialing on every blip.
+The monitor watches `NET_CAPABILITY_VALIDATED` alongside transport/identity changes (the one signal
+Android raises when a network stays up but stops actually working), ignores our *own* tunnel in the
+default-network callback (its lifecycle used to self-trigger a burst per establish/teardown — a
+foreign VPN still registers, which drives the auto-resume), and reports the full **ordered set** of
+non-VPN internet networks as the `VpnService`'s underlying networks. The old single-network,
+last-callback-wins version could declare cellular the underlying network while traffic rode Wi-Fi,
+which made Android bill Wi-Fi bytes to the mobile-data counter.
+
+**Edge triggers are not enough — the killer failure has no edge.** A doze can kill the NAT
+mappings and the endpoint's UDP sockets while the OS network looks unchanged: no callback fires,
+and even the forwarded hint is dropped by iroh's interface-state compare. The sockets are then dead
+beyond any public iroh API's reach (rebind + DNS-resolver reset sit behind netwatch's `is_major`
+path, unreachable on Android). So recovery has a **level-triggered** half: a doze-safe
+`AlarmManager` broadcast (~15 min, `HealthCheckReceiver`, re-armed each fire, short wakelock so
+work survives the maintenance window) runs `Engine::health_check`. Unhealthy — online, peers on
+the roster, zero live mesh connections — escalates: first strike fires a recovery burst; the next
+runs `rebuild_node`, which closes the old iroh node in place (router → per-protocol shutdown →
+sockets), binds a fresh one from the same data dir (same key ⇒ same NodeId), and re-activates the
+network. This is precisely what a manual Always-on-VPN toggle did by accident, automated: the soak
+rig's silent-blackhole scenario measured 12/12 non-recoveries without it and ~5 s recovery with a
+process restart. The alarm also restarts a service whose boot-time engine init failed. Finally,
+**demand dialing**: an outbound TUN packet for a member with no live connection (a KDE Connect
+push, an SSH attempt) clears that member's dial backoff and wakes the tick — recovery starts at
+the moment traffic proves it matters, not up to a backoff window later.
+
+**The Android endpoint is built lean** (`node.rs`): net-report runs `NetReportConfig::minimal()`
+(QAD probes only — no HTTPS latency probes or captive-portal checks, whose *broken-network*
+fallback plan re-ran 12 fresh TLS handshakes plus ~200 staggered DNS queries every 20-26 s,
+forever), the portmapper is disabled (UPnP/NAT-PMP/PCP re-probed every report and can never win
+behind a VpnService + carrier NAT), and mDNS discovery is not registered at all (a permanent
+~700 ms multicast announcer whose replies the foreground-only multicast lock mostly can't hear;
+LAN-direct paths still form — QUIC NAT traversal exchanges local addresses over the relay).
+Desktop keeps all three defaults. The engine also logs a `net-stats` line once a minute (iroh
+byte/report deltas + its own dial/reseed/join/presence/burst counts, tag `nullgate` in logcat) —
+the instrumentation the soak harness (`scripts/soak/`) asserts against.
 
 **Foreground/visibility and foreign-VPN handling live in the service + `EngineHolder`.** Screen
 on/off (a `BroadcastReceiver`) and `MainActivity` resume/pause drive `Engine::set_pace`

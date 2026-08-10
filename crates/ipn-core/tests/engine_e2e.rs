@@ -213,6 +213,68 @@ async fn network_changed_keeps_the_mesh_connected() {
     .expect("mesh did not stay connected across network_changed()");
 }
 
+/// The level-triggered health check must detect the zombie state (online, peers on
+/// the roster, zero live connections), escalate burst → node rebuild, and leave a
+/// FULLY functional node behind: same identity, working accept loops, and the
+/// ability to reconnect once the peer is reachable again. This is the automated
+/// version of the manual Always-on-VPN toggle (soak `blackhole` baseline: 12/12
+/// non-recoveries without it; a process restart recovered in ~5 s).
+#[tokio::test]
+#[ignore = "opens real iroh endpoints; run with --ignored"]
+async fn health_check_rebuilds_and_reconnects() {
+    use ipn_core::engine::HealthAction;
+    std::env::set_var("NULLGATE_DISABLE_TUN", "1");
+    std::env::set_var("NULLGATE_SECRETS_FILE_ONLY", "1");
+
+    let (a, b) = connected_pair("health").await;
+    let a_id = a.self_node_id_hex();
+    let b_id = b.self_node_id_hex();
+
+    // Healthy pair: the check must be a no-op.
+    assert_eq!(a.health_check().await, HealthAction::Healthy);
+
+    // B goes away (the peer side of a dead mesh). A must drop to zero conns.
+    b.set_online(false).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while a.live_connection_count() > 0 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .expect("A never noticed B leaving");
+
+    // Escalation ladder: strike 1 = recovery burst, strike 2 = node rebuild
+    // (the first-ever rebuild is not blocked by the spacing floor).
+    assert_eq!(a.health_check().await, HealthAction::Burst, "first strike bursts");
+    assert_eq!(
+        a.health_check().await,
+        HealthAction::Rebuilt,
+        "second strike rebuilds the node"
+    );
+    assert_eq!(
+        a.self_node_id_hex(),
+        a_id,
+        "identity survives the rebuild (same device key)"
+    );
+
+    // B returns; the rebuilt A must re-form the mesh — proving the fresh
+    // endpoint, accept loops, doc and gossip all work end to end.
+    b.set_online(true).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            if a.live_connection_count() >= 1 && sees(&a, &b_id).await && sees(&b, &a_id).await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .expect("rebuilt node did not reconnect once the peer returned");
+
+    // And the check settles back to healthy.
+    assert_eq!(a.health_check().await, HealthAction::Healthy);
+}
+
 /// Self-eviction must still be prompt in `Pace::Background`: a removed device drops
 /// to zero connections and stops seeing the network well inside the 60s Background
 /// tick — proving the roster-doc live-sync event wakes the slow loop early (a pure

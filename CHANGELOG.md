@@ -5,6 +5,58 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 
+### Changed
+- **Android: the app uses drastically less data, especially when connectivity is broken.**
+  Investigation of a ~28 GB/month report found the most expensive state was being *disconnected*:
+  iroh probes hardest when nothing is reachable. Four fixes: (1) the Android endpoint now runs a
+  minimal net-report (no HTTPS latency probes / captive-portal checks — their broken-network
+  fallback re-ran a dozen TLS handshakes plus hundreds of DNS queries every ~23 s, forever),
+  disables the port-mapper (useless behind a VpnService + carrier NAT), and drops mDNS discovery
+  (a permanent ~700 ms multicast announcer; LAN-direct paths still form via QUIC NAT traversal).
+  (2) The engine seeds its maintenance pace from the real screen state at startup — a service
+  started with the screen off (boot via Always-on VPN, an overnight restart) used to gossip at
+  the 3-second interactive cadence for hours. (3) The network-change recovery burst is
+  rate-limited engine-side and no longer wipes dial-backoff failure counts, so a flapping link
+  can't put every unreachable member back on full-rate dialing many times a minute — and our own
+  tunnel coming up no longer triggers a burst against ourselves. (4) The VpnService now reports
+  the true ordered set of underlying networks instead of last-callback-wins, which could bill
+  Wi-Fi traffic to the mobile-data counter.
+- **The engine logs a `net-stats` line once a minute** (iroh byte/report deltas plus its own
+  dial/reseed/join/presence/burst counts) in the daemon log and Android logcat, so data-usage
+  questions are answerable from evidence. Runs even with no network configured.
+
+### Fixed
+- **Android: the app now recovers on its own from the "silently dead after doze" state** —
+  the bug where it vanished from the network until Always-on VPN was toggled by hand. Recovery
+  is now level-triggered, not just edge-triggered: a doze-safe alarm (~15 min) runs an engine
+  health check; "online with peers and zero connections" escalates from a recovery burst to a
+  **full iroh node rebuild** — the same thing the manual VPN toggle achieved, automated and
+  proven end-to-end (the soak rig's silent-blackhole scenario measured 12/12 non-recoveries
+  before; a rebuild recovers in seconds). The check runs at a 15-minute cadence while healthy and
+  pulls itself in to ~3 minutes the moment a check comes back unhealthy, so the full ladder
+  completes in minutes rather than the better part of an hour; its final rung restarts the app
+  process outright if two consecutive rebuilds fail to restore connectivity — the recovery that
+  has never failed in testing, now automatic (soak evidence found rare process-level state that
+  outlives a node rebuild; until root-caused, the ladder covers it). Real outbound traffic (e.g. a
+  KDE Connect push) to an unreachable peer also triggers an immediate redial instead of waiting
+  out the backoff window.
+  Additionally, a failed engine start at boot (Always-on VPN racing the network) and a failed
+  tunnel establish are now retried instead of leaving a permanently dead engine behind a
+  healthy-looking notification.
+- **Android: a failed auto-resume after another VPN released the network is retried.** The
+  resume flag was cleared before the attempt; one failure (routine right after a network
+  transition) permanently ended auto-resume until the VPN was toggled by hand. The monitor also
+  now watches Android's own network-validation signal, so a network that stays up but stops
+  working produces a recovery hint at all.
+
+### Added
+- **An Android soak-test harness** (`scripts/soak/`): an isolated desktop daemon + emulator rig
+  with unattended multi-day scenarios — idle data baseline, doze/wake recovery, network
+  flapping, a host-firewall "silent blackhole" (connectivity dies with no network change visible
+  to Android — the production failure), process-kill restart, data-attribution audit, and an
+  unreachable-peer leak watch. Each run emits JSONL events, raw netstats, logcat, and a
+  pass/fail summary.
+
 ## [0.5.0] - 2026-07-22
 
 ### Changed

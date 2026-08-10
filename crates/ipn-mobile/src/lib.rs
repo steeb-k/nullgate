@@ -606,6 +606,26 @@ impl MobileEngine {
             .block_on(async { self.inner.engine.network_changed().await });
     }
 
+    /// Level-triggered recovery probe — call from a doze-safe alarm (~15 min
+    /// cadence). Detects the post-doze zombie ("online with peers on the roster
+    /// and zero live connections", which no `ConnectivityManager` edge ever
+    /// reports) and escalates: a recovery burst first, then a full iroh node
+    /// rebuild — the only thing that revives sockets doze killed, previously
+    /// achieved only by toggling Always-on VPN by hand. Returns what it did:
+    /// `"healthy"`, `"burst"`, `"rebuilt"`, or `"failed"`.
+    pub fn health_check(&self) -> String {
+        let action = self
+            .rt
+            .block_on(async { self.inner.engine.health_check().await });
+        match action {
+            ipn_core::engine::HealthAction::Healthy => "healthy",
+            ipn_core::engine::HealthAction::Burst => "burst",
+            ipn_core::engine::HealthAction::Rebuilt => "rebuilt",
+            ipn_core::engine::HealthAction::Failed => "failed",
+        }
+        .to_string()
+    }
+
     /// Best-effort graceful stop: go offline. The node is fully torn down when the
     /// object is dropped (the foreground service drops its reference on stop).
     pub fn shutdown(&self) {

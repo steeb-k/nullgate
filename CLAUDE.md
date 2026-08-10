@@ -68,6 +68,11 @@ cargo test -p ipn-core --test engine_e2e -- --ignored
 cargo test -p ipn-core --test delete_e2e -- --ignored
 cargo test -p ipn-core --test rotate_e2e -- --ignored
 
+# Android soak harness (long-running reliability/data tests on the emulator against an
+# isolated desktop daemon; zero app changes needed — see scripts/soak/README.md):
+pwsh -File scripts/soak/setup-soak.ps1     # one-time; interactive join on the emulator
+pwsh -File scripts/soak/run-soak.ps1 -Scenario blackhole -Cycles 12 -WithDoze  # elevated shell
+
 # Android (needs JDK 17 + Android SDK 35 + NDK r27c + cargo-ndk + the 3 android rust targets):
 cargo ndk -t arm64-v8a build -p ipn-core      # quick cross-compile sanity check
 pwsh -File scripts/run-android.ps1            # build APK + install + launch (emulator AVD seed_api35)
@@ -239,10 +244,33 @@ added.
   relay conns forever — the "can't see peers until I toggle Always-on VPN" bug (only a process
   restart, which rebinds the endpoint, recovered). The fix is *not* to recreate `IrohNode`: iroh has
   `Endpoint::network_change()` for exactly this. `Engine::network_changed()` calls it **and** fires a
-  one-shot recovery burst (`force_recover`: reseed the doc to *all* members, re-join gossip, clear
+  one-shot recovery burst (`force_recover`: reseed the doc to *all* members, re-join gossip, expire
   dial backoff) because iroh silently drops the hint when its re-read interface state compares equal
-  — keep both halves. The signal comes from `NetworkMonitor.kt` (`ConnectivityManager`), the only
-  source Android exposes. (2) The engine's maintenance tick + presence heartbeat are 3 s on
+  — keep both halves. Two guards on the burst that look like fat to trim and aren't: it is
+  **rate-limited** (`RECOVERY_BURST_COOLDOWN_MS` — ConnectivityManager delivers storms on a flaky
+  link and every un-throttled burst re-ran the full dial fan-out; the hint to iroh is still always
+  forwarded), and it **expires** dial-backoff windows instead of `clear()`ing them (failure counts
+  survive: a dead peer gets one immediate retry then resumes its 5-min spacing — a wholesale clear
+  returned every dead peer to full-rate dialing on every blip, a top metered-data burner). The
+  signal comes from `NetworkMonitor.kt` (`ConnectivityManager`), the only source Android exposes;
+  it ignores our *own* tunnel in the default-network callback (its establish/teardown used to
+  self-trigger a burst — foreign VPNs still register, which drives auto-resume), watches
+  `NET_CAPABILITY_VALIDATED` (the only signal when a network stays up but stops *working*), and
+  reports the **ordered set** of non-VPN networks as the VpnService's underlying networks (the old
+  single-network last-callback-wins version mis-attributed Wi-Fi bytes to the mobile-data counter).
+  The Android endpoint is also built lean in `node.rs` — minimal net-report, no portmapper, no mDNS
+  — because iroh probes *hardest* when nothing is reachable (the broken-network HTTPS/DNS fallback
+  plan ran every ~23 s forever); don't re-enable those on Android without re-measuring, and don't
+  remove the once-a-minute `net-stats` log line — the soak harness asserts on it. Because the
+  killer failure (post-doze socket death) produces **no edge at all**, recovery also has a
+  level-triggered half: `HealthCheckReceiver` (doze-safe alarm, ~15 min) → `Engine::health_check`
+  → burst, then `rebuild_node` — a full in-place iroh node replacement (`IrohNode::close` +
+  fresh bind, same NodeId), the automated form of the manual VPN toggle. `Inner.node` is behind a
+  lock for exactly this; access it via the `Inner::node()` snapshot, never hold the snapshot across
+  long waits. The TUN pump's demand-dial kick (packet for an unconnected peer → backoff cleared +
+  tick woken) is what makes recovery prompt when real traffic wants a peer. e2e:
+  `health_check_rebuilds_and_reconnects`; field-shaped proof is the soak `blackhole` scenario
+  (12/12 failures pre-fix — a post-fix run must pass it before this area is touched again). (2) The engine's maintenance tick + presence heartbeat are 3 s on
   desktop but **60 s in `Pace::Background`** (`Engine::set_pace`), switched by the app on screen/
   visibility; a `tick_notify` `Notify` wakes the slow loop early on a roster-doc live-sync event
   (the per-tick redb+blob roster rebuild is now event-gated, 30 s catch-all) or a network-change

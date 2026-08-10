@@ -57,6 +57,13 @@
             </intent-filter>
         </service>
 
+        <!-- Doze-safe connectivity health check: re-armed AlarmManager broadcast
+             (see HealthCheckReceiver). Manifest-declared so the PendingIntent
+             survives process death. -->
+        <receiver
+            android:name=".engine.HealthCheckReceiver"
+            android:exported="false" />
+
         <!-- Portrait QR scanner (ZXing's default CaptureActivity is sensorLandscape). -->
         <activity
             android:name=".PortraitCaptureActivity"
