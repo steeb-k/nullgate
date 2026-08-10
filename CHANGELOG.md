@@ -5,6 +5,8 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-10
+
 ### Changed
 - **Android: the app uses drastically less data, especially when connectivity is broken.**
   Investigation of a ~28 GB/month report found the most expensive state was being *disconnected*:
