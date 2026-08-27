@@ -123,6 +123,177 @@ pub(crate) mod macos_single_instance {
     }
 }
 
+/// Single-instance support for Windows, where GApplication's machinery is *unreliable*.
+///
+/// GLib's uniqueness runs over a D-Bus session bus, which Windows only has via GLib's
+/// own autolaunch: a `rundll32 …,g_win32_run_session_bus` helper on nonce-authenticated
+/// TCP, its address published in session-local shared memory. That record can go stale
+/// — the helper dies, or a temp cleaner deletes the nonce file from `%TEMP%` — and GLib
+/// then keeps handing out the dead address instead of respawning, so every launch fails
+/// to find a primary and becomes one (observed in the field: a new tray icon per GUI
+/// start). Rebuild the guarantee the macOS way, on kernel objects that cannot go stale:
+/// a named mutex per role (it exists exactly as long as some process holds a handle, so
+/// a crash releases it like a dropped `flock` fd), plus a named auto-reset event the
+/// GUI primary waits on so a second launch can say "present yourself" before exiting.
+/// Names live in the `Local\` namespace, which is per login session — matching the
+/// per-uid `/tmp` paths on macOS.
+#[cfg(windows)]
+pub(crate) mod windows_single_instance {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
+    use windows_sys::Win32::System::Threading::{
+        CreateEventW, CreateMutexW, OpenEventW, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE,
+        INFINITE,
+    };
+
+    const AGENT_MUTEX: &str = "Local\\io.github.steeb_k.Nullgate.Agent.SingleInstance";
+    const GUI_MUTEX: &str = "Local\\io.github.steeb_k.Nullgate.Gui.SingleInstance";
+    const GUI_PRESENT_EVENT: &str = "Local\\io.github.steeb_k.Nullgate.Gui.Present";
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// An owned handle to a claimed single-instance mutex. Dropping it (or the process
+    /// dying) closes the handle; the named object vanishes with its last handle, which
+    /// is what makes the claim crash-safe. Long-lived holders `mem::forget` it.
+    pub(crate) struct InstanceClaim(HANDLE);
+
+    impl Drop for InstanceClaim {
+        fn drop(&mut self) {
+            // SAFETY: we own this handle and nothing else closes it.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    /// Claim the named mutex. `Ok(None)` means another process already holds a handle
+    /// to it — i.e. that role is already running. `Err` is the Win32 error code from a
+    /// failed create. We only ever test *existence* (any open handle keeps the object
+    /// alive), never mutex *ownership*, so no one ever waits on it.
+    fn try_claim(name: &str) -> Result<Option<InstanceClaim>, u32> {
+        let name = wide(name);
+        // SAFETY: `name` is a valid NUL-terminated wide string for the whole call.
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+        if handle.is_null() {
+            // SAFETY: trivially safe; reads the calling thread's last-error value.
+            return Err(unsafe { GetLastError() });
+        }
+        // SAFETY: as above.
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            // SAFETY: `handle` is the valid handle we were just given.
+            unsafe { CloseHandle(handle) };
+            return Ok(None);
+        }
+        Ok(Some(InstanceClaim(handle)))
+    }
+
+    /// `false` means another agent is already running and the caller should exit.
+    /// A mutex-creation failure must never cost the user their tray icon.
+    pub(crate) fn claim_agent_slot() -> bool {
+        match try_claim(AGENT_MUTEX) {
+            Ok(Some(claim)) => {
+                // The claim lives exactly as long as its handle; hold it for the process.
+                std::mem::forget(claim);
+                true
+            }
+            Ok(None) => false,
+            Err(code) => {
+                tracing::warn!(code, "agent: cannot create single-instance mutex; starting unguarded");
+                true
+            }
+        }
+    }
+
+    /// The named event the GUI primary blocks on to hear "present yourself" pokes.
+    /// Auto-reset: each poke wakes exactly one wait, and rapid pokes coalesce.
+    pub(crate) struct PresentEvent(HANDLE);
+
+    // SAFETY: an event HANDLE is a kernel object reference, freely usable from any
+    // thread; the wrapper is moved to the wait thread, never shared.
+    unsafe impl Send for PresentEvent {}
+
+    impl PresentEvent {
+        /// Block until the next poke. `false` on a wait failure — give up serving.
+        pub(crate) fn wait(&self) -> bool {
+            // SAFETY: `self.0` is a valid event handle held for the process lifetime.
+            unsafe { WaitForSingleObject(self.0, INFINITE) == 0 /* WAIT_OBJECT_0 */ }
+        }
+    }
+
+    /// Outcome of trying to become the one GUI process (mirrors the macOS `GuiSlot`).
+    pub(crate) enum GuiSlot {
+        /// This process owns the window. The event, when present, receives
+        /// "present yourself" pokes from later launches.
+        Primary(Option<PresentEvent>),
+        /// A window is already open and has been asked to come forward; exit quietly.
+        AlreadyOpen,
+    }
+
+    pub(crate) fn claim_gui_slot() -> GuiSlot {
+        match try_claim(GUI_MUTEX) {
+            Ok(Some(claim)) => std::mem::forget(claim),
+            Ok(None) => {
+                // Someone owns the window: poke them, then step aside. A missing event
+                // (primary still starting up) is not worth blocking on.
+                let name = wide(GUI_PRESENT_EVENT);
+                // SAFETY: `name` is a valid NUL-terminated wide string; a null return
+                // is handled.
+                let event = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr()) };
+                if !event.is_null() {
+                    // SAFETY: `event` is the valid handle we were just given.
+                    unsafe {
+                        SetEvent(event);
+                        CloseHandle(event);
+                    }
+                }
+                return GuiSlot::AlreadyOpen;
+            }
+            // A mutex problem must never cost the user their window.
+            Err(code) => {
+                tracing::warn!(code, "gui: cannot create single-instance mutex; starting unguarded");
+                return GuiSlot::Primary(None);
+            }
+        }
+        let name = wide(GUI_PRESENT_EVENT);
+        // SAFETY: `name` is a valid NUL-terminated wide string for the whole call. If a
+        // dying predecessor's event briefly lingers, the returned handle is still ours
+        // to use — existence is not an error here.
+        let event = unsafe { CreateEventW(std::ptr::null(), 0, 0, name.as_ptr()) };
+        if event.is_null() {
+            // SAFETY: trivially safe; reads the calling thread's last-error value.
+            let code = unsafe { GetLastError() };
+            tracing::warn!(code, "gui: cannot create present event; window won't be reusable");
+            return GuiSlot::Primary(None);
+        }
+        GuiSlot::Primary(Some(PresentEvent(event)))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::try_claim;
+
+        /// Existence-based claiming: the second claim of a live name fails, and the
+        /// name is reusable once the first claim's handle closes (the crash story).
+        #[test]
+        fn claim_is_exclusive_and_released_on_drop() {
+            // Unique per test process so parallel test runs can't collide.
+            let name = format!("Local\\NullgateTestClaim{}", std::process::id());
+            let first = try_claim(&name).expect("create mutex").expect("first claim wins");
+            assert!(try_claim(&name).expect("create mutex").is_none(), "second claim must lose");
+            drop(first);
+            assert!(
+                try_claim(&name).expect("create mutex").is_some(),
+                "claim must be reusable after the holder is gone"
+            );
+        }
+    }
+}
+
+// One name for the platform whose guard is in effect, so `main()` reads the same on both.
+#[cfg(target_os = "macos")]
+pub(crate) use macos_single_instance as single_instance;
+#[cfg(windows)]
+pub(crate) use windows_single_instance as single_instance;
+
 /// Messages from the IO side to the UI.
 #[derive(Clone)]
 enum UiMsg {
@@ -642,13 +813,15 @@ fn main() -> glib::ExitCode {
         return agent::run(ipn_ipc::default_socket());
     }
 
-    // macOS: GApplication can't dedupe us (no D-Bus session bus), so a second launch
-    // — e.g. the tray's "Open Nullgate" while the window is already up — would build a
-    // duplicate window. Hand the request to the existing window instead, and exit.
-    #[cfg(target_os = "macos")]
-    let present_requests = match macos_single_instance::claim_gui_slot() {
-        macos_single_instance::GuiSlot::AlreadyOpen => return glib::ExitCode::SUCCESS,
-        macos_single_instance::GuiSlot::Primary(listener) => listener,
+    // macOS/Windows: GApplication can't be trusted to dedupe us (macOS has no D-Bus
+    // session bus; Windows only has GLib's fragile autolaunched one — see the module
+    // docs), so a second launch — e.g. the tray's "Open Nullgate" while the window is
+    // already up — would build a duplicate window. Hand the request to the existing
+    // window instead, and exit.
+    #[cfg(any(target_os = "macos", windows))]
+    let present_requests = match single_instance::claim_gui_slot() {
+        single_instance::GuiSlot::AlreadyOpen => return glib::ExitCode::SUCCESS,
+        single_instance::GuiSlot::Primary(pr) => pr,
     };
 
     // Whenever the GUI starts, make sure the tray agent is up. The agent is a
@@ -657,10 +830,11 @@ fn main() -> glib::ExitCode {
     // Nullgate after an install, without waiting for the next login. The agent is a
     // separate process and keeps running after this GUI window is closed.
     //
-    // Single-instance is enforced by GApplication on Windows/Linux, but on macOS
-    // that runs over a D-Bus session bus which doesn't exist — so the agent takes an
-    // `flock` there (see `macos_single_instance`). Without it, every GUI start left
-    // behind another agent, and another tray icon.
+    // Single-instance is enforced by GApplication on Linux only. On macOS its D-Bus
+    // session bus doesn't exist, and on Windows GLib's autolaunched one can go stale
+    // and silently stop deduping — so the agent takes an `flock` (macOS) or a named
+    // mutex (Windows) of its own. Without a guard, every GUI start left behind
+    // another agent, and another tray icon.
     spawn_agent();
 
     #[cfg(windows)]
@@ -690,7 +864,7 @@ fn main() -> glib::ExitCode {
     glib::set_application_name("Nullgate");
 
     let app = adw::Application::builder().application_id(APP_ID).build();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     let present_requests = RefCell::new(present_requests);
     app.connect_activate(move |app| {
         // Re-launched (e.g. from the tray's "Open Nullgate", or the notification's
@@ -701,11 +875,11 @@ fn main() -> glib::ExitCode {
             return;
         }
         build_ui(app, net.clone(), rx.clone());
-        // macOS only, and only once: start answering the pokes that later launches
-        // send instead of opening a window of their own.
-        #[cfg(target_os = "macos")]
-        if let Some(listener) = present_requests.borrow_mut().take() {
-            serve_present_requests(app, listener);
+        // macOS/Windows only, and only once: start answering the pokes that later
+        // launches send instead of opening a window of their own.
+        #[cfg(any(target_os = "macos", windows))]
+        if let Some(pr) = present_requests.borrow_mut().take() {
+            serve_present_requests(app, pr);
         }
     });
     let empty: [&str; 0] = [];
@@ -726,6 +900,26 @@ fn serve_present_requests(app: &adw::Application, listener: std::os::unix::net::
                 break;
             }
         }
+    });
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        while rx.recv().await.is_ok() {
+            if let Some(win) = app.active_window() {
+                win.present();
+            }
+        }
+    });
+}
+
+/// Present the window whenever another launch signals our named event. Waiting
+/// blocks, so it lives on its own thread and reaches GTK through an `async-channel`,
+/// like every other off-thread event in this process.
+#[cfg(windows)]
+fn serve_present_requests(app: &adw::Application, event: windows_single_instance::PresentEvent) {
+    let (tx, rx) = async_channel::unbounded::<()>();
+    std::thread::spawn(move || {
+        // A wait failure won't heal; a closed channel means the GUI is gone. Stop on both.
+        while event.wait() && tx.send_blocking(()).is_ok() {}
     });
     let app = app.clone();
     glib::spawn_future_local(async move {
@@ -1550,10 +1744,10 @@ pub(crate) fn launch_gui() {
 }
 
 /// Ensure the tray agent is running by spawning `nullgate --agent` as a detached
-/// process. The agent is single-instance — a GApplication primary on Windows/Linux,
-/// an `flock` holder on macOS — so if one is already running (from login autostart,
-/// or a prior GUI start) the new process hands off to it and exits, making this safe
-/// to call unconditionally. This is how the tray reliably appears whenever Nullgate
+/// process. The agent is single-instance — a GApplication primary on Linux, an
+/// `flock` holder on macOS, a named-mutex holder on Windows — so if one is already
+/// running (from login autostart, or a prior GUI start) the new process hands off
+/// to it and exits, making this safe to call unconditionally. This is how the tray reliably appears whenever Nullgate
 /// is used, without the user ever having to launch the agent by hand.
 pub(crate) fn spawn_agent() {
     if let Ok(exe) = std::env::current_exe() {

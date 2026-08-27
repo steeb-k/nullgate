@@ -5,6 +5,16 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 
+### Fixed
+- **Windows: opening the app can no longer leave a duplicate tray icon (or window).** Tray-agent
+  and GUI uniqueness relied on GApplication, whose deduplication runs over GLib's autolaunched
+  D-Bus session bus — and when that bus's published address goes stale (its helper process dies,
+  or a temp cleanup deletes its nonce file), every launch silently becomes its own primary, so
+  each "Open Nullgate" spawned another agent and another tray icon until the next logoff. Both
+  roles now guard themselves with named kernel mutexes (crash-safe: the claim dies with the
+  process), and a second GUI launch signals a named event so the existing window comes forward —
+  mirroring the `flock`-based guard macOS has had all along.
+
 ## [0.6.0] - 2026-08-10
 
 ### Changed

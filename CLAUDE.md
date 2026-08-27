@@ -194,13 +194,22 @@ added.
   Single-instance makes every one of these a safe no-op if the agent is already up. The **daemon
   never launches it** (session 0 can't draw UI, and the agent's lifetime is independent of the
   daemon).
-- **GApplication single-instance does nothing on macOS.** GLib implements it over a D-Bus session
-  bus, which macOS has none of, so *every* launch becomes its own primary. Both long-lived roles
-  rebuild it on `flock` in `macos_single_instance` (`ipn-gui/src/main.rs`): the **agent** takes
-  `/tmp/nullgate-agent-<uid>.lock` (without it, each GUI start left another agent and another tray
-  icon), and the **GUI** takes `/tmp/nullgate-gui-<uid>.lock` plus a `…-gui-<uid>.sock` that a second
-  launch pokes so the existing window presents itself (without it, the tray's *Open Nullgate* opened
-  a duplicate window). Do **not** "simplify" `launch_gui` to `open -a Nullgate.app`: the agent runs
+- **GApplication single-instance does nothing on macOS and cannot be trusted on Windows.** GLib
+  implements it over a D-Bus session bus: macOS has none, so *every* launch becomes its own primary;
+  Windows only has GLib's autolaunched one (`rundll32 …,g_win32_run_session_bus`, nonce-auth TCP,
+  address in session-local shared memory), and that record **goes stale** — the helper dies or a
+  temp cleaner deletes the `%TEMP%` nonce file — after which GLib keeps handing out the dead address
+  instead of respawning, and every launch again becomes primary (field-observed: one extra tray icon
+  per GUI start, wedged until logoff). Both long-lived roles therefore rebuild the guarantee on
+  kernel objects on both OSes. macOS, `flock` in `macos_single_instance` (`ipn-gui/src/main.rs`):
+  the **agent** takes `/tmp/nullgate-agent-<uid>.lock` (without it, each GUI start left another
+  agent and another tray icon), and the **GUI** takes `/tmp/nullgate-gui-<uid>.lock` plus a
+  `…-gui-<uid>.sock` that a second launch pokes so the existing window presents itself (without it,
+  the tray's *Open Nullgate* opened a duplicate window). Windows, named kernel objects in
+  `windows_single_instance` (same file): a `Local\…` **mutex per role** — only *existence* is
+  tested, never ownership, and the object dies with its last handle, so a crash releases it like a
+  dropped flock fd — plus a named auto-reset **event** the GUI primary waits on for the same
+  "present yourself" poke. Only Linux still relies on GApplication's own path. Do **not** "simplify" `launch_gui` to `open -a Nullgate.app`: the agent runs
   the bundle's `CFBundleExecutable`, so Launch Services thinks the app is already running and
   activates the *headless agent* — the window never appears. Two corollaries for `nullgatectl`:
   stray GUI-spawned agents are not launchd jobs, so `launchctl bootout` won't stop them

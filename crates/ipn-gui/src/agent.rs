@@ -51,7 +51,7 @@ enum AgentMsg {
 /// Hold the agent's `flock` for the life of the process, returning `false` if another
 /// agent already holds it. See [`crate::macos_single_instance`] for why macOS needs
 /// this at all: without it, every GUI start left behind another agent — and another
-/// tray icon. Linux/Windows keep using GApplication's own single-instance path.
+/// tray icon. Linux keeps using GApplication's own single-instance path.
 #[cfg(target_os = "macos")]
 fn acquire_single_instance_lock() -> bool {
     use crate::macos_single_instance::{agent_lock_path, take_flock};
@@ -71,9 +71,18 @@ fn acquire_single_instance_lock() -> bool {
     }
 }
 
+/// The Windows twin of the flock above: a named mutex, because GApplication's
+/// uniqueness rides GLib's autolaunched D-Bus session bus and that bus can go stale —
+/// at which point every `--agent` launch becomes its own primary and its own tray
+/// icon. See [`crate::windows_single_instance`] for the failure mechanics.
+#[cfg(windows)]
+fn acquire_single_instance_lock() -> bool {
+    crate::windows_single_instance::claim_agent_slot()
+}
+
 /// Run the tray agent to completion. Returns when "Quit Nullgate" is chosen.
 pub fn run(socket: PathBuf) -> glib::ExitCode {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     if !acquire_single_instance_lock() {
         tracing::info!("agent: another tray agent already holds the lock; exiting");
         return glib::ExitCode::SUCCESS;

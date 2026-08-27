@@ -310,7 +310,7 @@ The tray therefore runs in a **third process**: a lightweight, unprivileged **tr
   and all **desktop notifications** (`ipn-gui/src/notify.rs`), so alerts fire even with the GUI
   closed and the tray survives a GUI crash;
 - launches the **GUI window** on demand (tray *Open Nullgate*, or a notification click). The GUI is
-  a single-instance GApplication, so re-launch just presents the existing window;
+  single-instance, so re-launch just presents the existing window;
 - offers **Restart Nullgate daemon** (the same elevated helper the GUI's banner uses) and **Quit
   Nullgate** (disconnect, then quit the agent).
 
@@ -320,7 +320,12 @@ primary instances at once; on Windows it registers the same AppUserModelID for t
 
 **Ensuring the agent is up.** The agent must be running for the tray to exist, so it is (re)launched
 from every angle a user session offers — and, being single-instance, a redundant launch just hands
-off to the running one and exits, so all of these are safe to fire unconditionally:
+off to the running one and exits, so all of these are safe to fire unconditionally. GApplication's
+own uniqueness (D-Bus-based) is only trusted on Linux: macOS has no session bus at all, and on
+Windows GLib's autolaunched one can go stale (dead helper process, temp-cleaned nonce file) and
+silently stop deduping — so both roles carry their own guard there, an `flock` on macOS
+(`macos_single_instance`) and a named mutex on Windows (`windows_single_instance`), each paired
+with a "present yourself" channel so a second GUI launch raises the existing window:
 
 - **at login** — the per-user autostart entry (Windows Run key / macOS LaunchAgent / Linux XDG
   autostart) runs `nullgate --agent`;

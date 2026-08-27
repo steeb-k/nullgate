@@ -47,7 +47,9 @@ winresource = "0.1"
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.7.2"
 winreg = "0.56.0"
-# ShellExecuteEx "runas" elevation for restarting the daemon (no PowerShell).
+# ShellExecuteEx "runas" elevation for restarting the daemon (no PowerShell), and
+# the named mutex/event single-instance guards (GApplication's D-Bus-based
+# uniqueness is unreliable on Windows — see `windows_single_instance`).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
