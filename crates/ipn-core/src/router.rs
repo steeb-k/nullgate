@@ -61,6 +61,45 @@ pub fn src_ipv4(pkt: &[u8]) -> Option<Ipv4Addr> {
     Some(Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15]))
 }
 
+/// Whether `pkt` — just read *from* the TUN — is our own iroh underlay traffic
+/// that the OS routed back into our own tunnel.
+///
+/// Every member's TUN interface holds an address inside the virtual /24, and iroh
+/// advertises *all* non-loopback local interface addresses as direct-address
+/// candidates (netwatch filters only loopback, link-local and multicast). Since
+/// every member also routes the whole /24 at its TUN, a peer's virtual IP looks
+/// like a perfectly good "direct" path — so iroh dials it, the OS sends those
+/// QUIC packets into our tunnel, and the pump forwards them over the very
+/// connection they belong to. That is a routing loop: each keepalive it carries
+/// is itself re-tunneled, so a single stray packet ratchets the mesh up to
+/// megabytes a minute of nested traffic (measured: ~113 packets/s on an
+/// otherwise idle desktop, all of it relayed to a phone on battery).
+///
+/// [`crate::relays::VirtualSubnet`] stops the *selector* choosing such a path;
+/// this is the data-plane backstop that holds however the address leaked (iroh
+/// pushes the endpoint's full local address set into QUIC NAT-traversal
+/// candidates on every connection, which no iroh API filters). Dropping the
+/// packets also makes the bogus path fail validation, so iroh retires it instead
+/// of keeping it warm.
+///
+/// Matched on the **UDP source port**: only our own endpoint's sockets send from
+/// a port it has bound, and the destination port belongs to the peer, which we
+/// don't know. `bound_ports` is normally one or two entries (IPv4 + IPv6).
+pub fn is_own_underlay(pkt: &[u8], bound_ports: &[u16]) -> bool {
+    if bound_ports.is_empty() {
+        return false;
+    }
+    if pkt.len() < 20 || (pkt[0] >> 4) != 4 || pkt[9] != 17 {
+        return false; // not IPv4 UDP
+    }
+    let ihl = ((pkt[0] & 0x0f) as usize) * 4;
+    if ihl < 20 || pkt.len() < ihl + 4 {
+        return false;
+    }
+    let src_port = u16::from_be_bytes([pkt[ihl], pkt[ihl + 1]]);
+    bound_ports.contains(&src_port)
+}
+
 /// A connection 5-tuple, used by the conntrack one-way "disable remote access"
 /// block. Ports are 0 for non-TCP/UDP protocols (matched coarsely by address).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -259,6 +298,44 @@ mod tests {
         p[0] = 0x60; // IPv6
         assert_eq!(dst_ipv4(&p), None);
         assert_eq!(dst_ipv4(&[0u8; 4]), None);
+    }
+
+    /// IPv4 UDP packet with the given ports (20-byte IP header + 8-byte UDP).
+    fn udp_packet(src_port: u16, dst_port: u16) -> Vec<u8> {
+        let mut p = ipv4_packet(Ipv4Addr::new(10, 99, 0, 3), Ipv4Addr::new(10, 99, 0, 6));
+        p[9] = 17; // UDP
+        p.extend_from_slice(&[0u8; 8]);
+        p[20..22].copy_from_slice(&src_port.to_be_bytes());
+        p[22..24].copy_from_slice(&dst_port.to_be_bytes());
+        p
+    }
+
+    #[test]
+    fn detects_our_own_underlay_packets_by_source_port() {
+        // A QUIC packet our endpoint sent from its bound port to a peer's virtual
+        // IP: the loop this guard exists to break.
+        assert!(is_own_underlay(&udp_packet(41641, 36071), &[41641]));
+        // Same shape from any other local port is ordinary tunnel traffic.
+        assert!(!is_own_underlay(&udp_packet(50000, 36071), &[41641]));
+        // The *destination* port belongs to the peer and must never match.
+        assert!(!is_own_underlay(&udp_packet(50000, 41641), &[41641]));
+        // Both sockets (IPv4 + IPv6) count.
+        assert!(is_own_underlay(&udp_packet(41642, 36071), &[41641, 41642]));
+    }
+
+    #[test]
+    fn own_underlay_ignores_everything_that_is_not_ipv4_udp() {
+        // TCP from the same port number is a real tunnelled flow, not our underlay.
+        let mut tcp = udp_packet(41641, 36071);
+        tcp[9] = 6;
+        assert!(!is_own_underlay(&tcp, &[41641]));
+        // ICMP has no ports at all.
+        let mut icmp = udp_packet(41641, 36071);
+        icmp[9] = 1;
+        assert!(!is_own_underlay(&icmp, &[41641]));
+        // Truncated / non-IPv4 / no bound ports known yet: never drop.
+        assert!(!is_own_underlay(&udp_packet(41641, 36071)[..21], &[41641]));
+        assert!(!is_own_underlay(&udp_packet(41641, 36071), &[]));
     }
 
     #[test]

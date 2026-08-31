@@ -159,6 +159,20 @@ class NullgateVpnService : VpnService() {
                 .addAddress(ip, 24)
                 .addRoute(VIRTUAL_SUBNET, 24)
                 .setMtu(mtu)
+            // Exclude *ourselves* from our own tunnel. iroh advertises every local
+            // interface address as a direct-address candidate, our TUN's 10.99.0.x
+            // among them, and every member routes the whole /24 — so peers dial us
+            // at our virtual IP, iroh treats that as a *direct* path (preferring it
+            // over the relay), and the mesh's own QUIC packets get re-encapsulated
+            // into the mesh. That loop is self-feeding: each keepalive it carries is
+            // itself re-tunnelled. The engine refuses to select or forward such a
+            // path (`relays::VirtualSubnet`, `router::is_own_underlay`); this makes
+            // it impossible here at the OS level, which is what Tailscale does too.
+            // Cost: the Nullgate app itself can no longer reach 10.99.0.x. It has no
+            // reason to — routing is for other apps, and the engine's own traffic is
+            // exactly what must stay off the tunnel.
+            runCatching { builder.addDisallowedApplication(packageName) }
+                .onFailure { Log.w(TAG, "could not exclude ourselves from the tunnel", it) }
             // Don't route DNS or other traffic — split tunnel for the /24 only.
             val pfd = builder.establish()
                 ?: error("VpnService.establish() returned null (permission revoked?)")

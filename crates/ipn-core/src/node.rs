@@ -35,6 +35,10 @@ pub struct IrohNode {
     /// whose paths outrank other relays. The engine updates it when the user
     /// edits relay settings (the selector itself is fixed at bind time).
     pub preferred_relays: crate::relays::PreferredRelays,
+    /// The other live handle into the selector: the active network's virtual /24,
+    /// whose paths are never selected because they run through our own tunnel.
+    /// Set on activate, cleared on disconnect.
+    pub virtual_subnet: crate::relays::VirtualSubnet,
 }
 
 impl IrohNode {
@@ -100,8 +104,13 @@ impl IrohNode {
         // relays, so telling it to prefer the defaults too would be a no-op.
         let relay_settings = crate::relays::load_relay_settings(data_dir);
         let preferred_relays = crate::relays::PreferredRelays::default();
+        // The selector also refuses paths through our own tunnel. It has to live
+        // here rather than anywhere network-scoped: the selector is fixed at bind
+        // time, long before a network exists, so both handles are set later.
+        let virtual_subnet = crate::relays::VirtualSubnet::default();
         builder = builder.path_selector(Arc::new(crate::relays::PreferMyRelaySelector::new(
             preferred_relays.clone(),
+            virtual_subnet.clone(),
         )));
         match (relay_settings.urls(), relay_settings.desired_relay_configs()) {
             (Ok(custom), Ok(desired)) if !custom.is_empty() => {
@@ -157,6 +166,7 @@ impl IrohNode {
             router,
             node_secret,
             preferred_relays,
+            virtual_subnet,
         })
     }
 

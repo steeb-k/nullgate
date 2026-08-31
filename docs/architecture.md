@@ -26,7 +26,8 @@ the membership list is a small signed document every member replicates.
   A custom `PathSelector` (`relays::PreferMyRelaySelector`, installed at bind via iroh's
   `unstable-custom-transports` feature) mirrors iroh's default biased-RTT path choice but ranks a
   path through one of the *user's* relays (tier 1) above any other relay (tier 2); direct paths
-  (tier 0) still always win. Under `preferred` the map genuinely holds both tiers, which is the case
+  (tier 0) still always win. It also **refuses any path into the virtual /24** — see
+  "Never tunnel our own mesh traffic" below. Under `preferred` the map genuinely holds both tiers, which is the case
   the selector exists for. The preferred-set holds the **custom URLs only**, never the defaults that
   share the map with them.
 
@@ -125,6 +126,41 @@ the membership list is a small signed document every member replicates.
   clamped (1280) and TCP **MSS clamping** is applied to SYNs (both directions) so TCP flows never
   produce segments too large for a datagram. That's why ordinary RDP/SSH/etc. clients
   work unchanged — to them it's just another network.
+
+### Never tunnel our own mesh traffic
+
+Nullgate's underlay (iroh's QUIC) must never be carried by Nullgate's overlay. Nothing prevents
+that by default, and the failure is quiet and expensive:
+
+- iroh advertises **every** non-loopback local interface address as a direct-address candidate.
+  `netwatch` filters only loopback, link-local and multicast — a VPN/TUN address is not special to
+  it, so each member offers its own `10.99.0.x`.
+- Every member also *routes* the whole `10.99.0.0/24` at its TUN.
+- So a peer's virtual IP is a reachable UDP address, and iroh scores it as a **direct** path —
+  ranking it above the relay. For any peer without a real direct path (a phone on cellular, the
+  common case) it therefore becomes the chosen path.
+- Then iroh's packets for that peer go into our own tunnel, the pump reads them, looks up the
+  route, and re-sends them over the very connection they belong to. Each keepalive the loop
+  carries is itself re-tunnelled, so it feeds itself: measured in the field at ~113 packets/s and
+  ~1.5 MB/min on an *idle* desktop mesh, essentially all of it relayed to a phone on battery, and
+  triggered by two stray ICMP packets.
+
+Three independent guards, because no single one covers every way the address can leak:
+
+| guard | where | covers |
+|-------|-------|--------|
+| `relays::VirtualSubnet` | `PreferMyRelaySelector::select` skips any `FourTuple::Ip` inside the active /24 | the path is never *chosen*; set on activate, cleared on disconnect (the selector is fixed at bind, before any network exists, so it reads a live handle) |
+| `router::is_own_underlay` | the TUN pump drops packets whose **UDP source port** is one of `Endpoint::bound_sockets()` | the data-plane backstop — holds however the address leaked, and starves the path so iroh retires it instead of keeping it warm |
+| `addDisallowedApplication` | Android `VpnService.Builder` | our own process cannot enter our own tunnel at all (what Tailscale does); costs only the app's own access to `10.99.0.x`, which it never needs |
+
+Filtering iroh's *published* addresses is not one of the guards, and deliberately: the N0 preset
+publishes through `PkarrPublisher`, which already defaults to `AddrFilter::relay_only()`, so no
+direct IPs reach DNS/pkarr. The leak is `update_qnt_candidates` — iroh pushes the endpoint's full
+local address set into QUIC NAT-traversal candidates over the connection itself, and no iroh API
+filters that. Hence the selector and pump guards rather than a discovery-level fix.
+
+`net-stats` reports `loop_drops=` per interval, so a loop re-appearing is visible rather than
+silent.
 
 ## Network identity
 A network has a single **secret**, carried in the join ticket. Everything else is derived from

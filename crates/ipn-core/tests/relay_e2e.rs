@@ -32,7 +32,10 @@ use iroh::{
 };
 use ipn_core::{
     engine::{Engine, EngineEvent},
-    relays::{PreferMyRelaySelector, PreferredRelays, RelayApply, RelayPolicy, RelayServer, RelaySettings},
+    relays::{
+        PreferMyRelaySelector, PreferredRelays, RelayApply, RelayPolicy, RelayServer,
+        RelaySettings, VirtualSubnet,
+    },
 };
 
 const ALPN: &[u8] = b"ipn/relay-e2e/0";
@@ -46,7 +49,12 @@ async fn bind_endpoint(map: RelayMap, preferred: PreferredRelays) -> Result<Endp
     // relays' self-signed certs only.
     let ep = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Custom(map))
-        .path_selector(Arc::new(PreferMyRelaySelector::new(preferred)))
+        // No network is joined in this test, so the virtual-subnet exclusion is
+        // inert here — exactly as it is on a freshly bound endpoint in production.
+        .path_selector(Arc::new(PreferMyRelaySelector::new(
+            preferred,
+            VirtualSubnet::default(),
+        )))
         .ca_tls_config(CaTlsConfig::insecure_skip_verify())
         .alpns(vec![ALPN.to_vec()])
         .bind()

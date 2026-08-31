@@ -38,7 +38,16 @@
 //! distributed through the roster: every member that should use the relay has
 //! to configure it, with the same URL and token.
 
-use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeSet,
+    net::{IpAddr, Ipv4Addr},
+    path::Path,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use anyhow::{bail, Context, Result};
 use arc_swap::ArcSwap;
@@ -291,6 +300,61 @@ impl PreferredRelays {
     }
 }
 
+/// The active network's virtual /24, shared live with [`PreferMyRelaySelector`].
+///
+/// Paths whose remote address falls inside it are never selected. Such a path is
+/// always a loop: the address belongs to a peer's *TUN*, we route the whole /24
+/// at our own TUN, so iroh's packets for it go into the tunnel and come back out
+/// over the connection they belong to (see [`crate::router::is_own_underlay`] for
+/// the full mechanism and the measured cost). iroh scores it as a *direct* path
+/// and prefers it over the relay, so on any peer without a real direct path —
+/// a phone on cellular, typically — every byte of mesh traffic ends up nested.
+///
+/// Held here rather than passed to the selector at construction because the
+/// endpoint (and thus the selector) is built before any network is joined: the
+/// engine sets it on activate and clears it on disconnect. Zero means "no
+/// network active", which no valid subnet base can be.
+#[derive(Clone, Debug, Default)]
+pub struct VirtualSubnet(Arc<AtomicU32>);
+
+impl VirtualSubnet {
+    /// The active network's /24 base address (e.g. `10.99.0.0`).
+    pub fn set(&self, subnet: Ipv4Addr) {
+        self.0.store(u32::from(subnet), Ordering::Relaxed);
+    }
+
+    /// No network is active; nothing is excluded.
+    pub fn clear(&self) {
+        self.0.store(0, Ordering::Relaxed);
+    }
+
+    /// Whether `ip` is inside the active virtual /24. The endpoint also binds a
+    /// v6 socket, so a path to a v4 peer can surface as `::ffff:10.99.0.6` —
+    /// unmap before comparing or the guard has a hole exactly where dual-stack
+    /// hosts are involved.
+    fn contains(&self, ip: IpAddr) -> bool {
+        let base = self.0.load(Ordering::Relaxed);
+        if base == 0 {
+            return false;
+        }
+        let v4 = match ip {
+            IpAddr::V4(v4) => v4,
+            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => v4,
+                // A genuine v6 address: the virtual network is IPv4-only.
+                None => return false,
+            },
+        };
+        u32::from(v4) & 0xffff_ff00 == base & 0xffff_ff00
+    }
+}
+
+/// Whether this path runs over the virtual network itself — i.e. through our own
+/// tunnel. Always excluded from selection; see [`VirtualSubnet`].
+fn is_looped(path: &FourTuple, subnet: &VirtualSubnet) -> bool {
+    matches!(path, FourTuple::Ip { remote, .. } if subnet.contains(remote.ip()))
+}
+
 /// Mirrors iroh's default path selection (IPv6 3ms ahead of IPv4, lowest
 /// biased RTT wins, 5ms stickiness against flapping) with one change: relay
 /// paths are split into two tiers, and a path through one of the user's own
@@ -337,11 +401,15 @@ fn should_switch(current: (u8, i128), best: (u8, i128)) -> bool {
 #[derive(Debug)]
 pub struct PreferMyRelaySelector {
     preferred: PreferredRelays,
+    virtual_subnet: VirtualSubnet,
 }
 
 impl PreferMyRelaySelector {
-    pub fn new(preferred: PreferredRelays) -> Self {
-        Self { preferred }
+    pub fn new(preferred: PreferredRelays, virtual_subnet: VirtualSubnet) -> Self {
+        Self {
+            preferred,
+            virtual_subnet,
+        }
     }
 }
 
@@ -354,6 +422,13 @@ impl PathSelector for PreferMyRelaySelector {
 
         for psd in ctx.paths() {
             let path = psd.network_path();
+            // A path through our own tunnel is a loop, never a route (see
+            // `VirtualSubnet`). Skipping it here also leaves `current_key` unset
+            // when it is the path in use, which makes the next branch move off it
+            // immediately rather than waiting for an RTT win it would never lose.
+            if is_looped(path, &self.virtual_subnet) {
+                continue;
+            }
             // A path whose stats are gone was closed concurrently; skip it.
             let Some(stats) = psd.stats() else { continue };
             let key = (
@@ -410,6 +485,65 @@ mod tests {
         let p = PreferredRelays::default();
         p.set(urls.iter().map(|u| u.parse().unwrap()).collect());
         p
+    }
+
+    fn ip_path_at(addr: &str) -> FourTuple {
+        FourTuple::from_remote(iroh::endpoint::transports::Addr::Ip(addr.parse().unwrap()))
+    }
+
+    fn subnet(base: &str) -> VirtualSubnet {
+        let v = VirtualSubnet::default();
+        v.set(base.parse().unwrap());
+        v
+    }
+
+    #[test]
+    fn paths_through_our_own_tunnel_are_never_selected() {
+        let v = subnet("10.99.0.0");
+        // A peer's virtual IP looks like a direct path to iroh, but reaching it
+        // means going back through our own TUN — the loop.
+        assert!(is_looped(&ip_path_at("10.99.0.6:36071"), &v));
+        assert!(is_looped(&ip_path_at("10.99.0.5:42658"), &v));
+        // Its real LAN and public addresses are ordinary direct paths.
+        assert!(!is_looped(&ip_path_at("192.168.50.163:59040"), &v));
+        assert!(!is_looped(&ip_path_at("68.14.236.20:47171"), &v));
+        // A neighbouring /24 is not ours.
+        assert!(!is_looped(&ip_path_at("10.99.1.6:36071"), &v));
+        // The endpoint binds v6 too, so the same peer can surface v4-mapped.
+        assert!(is_looped(&ip_path_at("[::ffff:10.99.0.6]:36071"), &v));
+        assert!(!is_looped(&ip_path_at("[::ffff:192.168.50.163]:59040"), &v));
+        // A real v6 address is never inside the (IPv4-only) virtual network.
+        assert!(!is_looped(&ip_path_at("[2600:1011:1168:7385::1]:51174"), &v));
+        // Relay paths never run through the tunnel.
+        assert!(!is_looped(&relay_path("https://mine.example.com"), &v));
+    }
+
+    #[test]
+    fn no_active_network_excludes_nothing() {
+        // Before a network is joined the endpoint is already bound and selecting
+        // paths; with no subnet set the selector must behave exactly as before.
+        let v = VirtualSubnet::default();
+        assert!(!is_looped(&ip_path_at("10.99.0.6:36071"), &v));
+        // ...and clearing on disconnect restores that.
+        let v = subnet("10.99.0.0");
+        assert!(is_looped(&ip_path_at("10.99.0.6:36071"), &v));
+        v.clear();
+        assert!(!is_looped(&ip_path_at("10.99.0.6:36071"), &v));
+    }
+
+    #[test]
+    fn a_looped_path_loses_to_the_relay_it_would_otherwise_beat() {
+        // The regression this guards: iroh scores the tunnel path as *direct*
+        // (tier 0), so on a peer with no real direct path it beat the relay and
+        // every byte of mesh traffic ended up nested inside our own tunnel.
+        let p = preferred(&[]);
+        let looped = ip_path_at("10.99.0.6:36071");
+        let relay = relay_path("https://relay.iroh.link");
+        assert!(
+            (path_tier(&looped, &p), biased_rtt(&looped, ms(5)))
+                < (path_tier(&relay, &p), biased_rtt(&relay, ms(80))),
+            "a tunnel path outranks the relay on tier alone — so it must be              excluded before ranking, not ranked lower"
+        );
     }
 
     #[test]

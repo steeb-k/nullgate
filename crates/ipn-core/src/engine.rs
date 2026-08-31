@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use ed25519_dalek::SigningKey;
 use futures_lite::StreamExt;
@@ -44,7 +45,7 @@ use crate::node::IrohNode;
 use crate::presence::Locations;
 use crate::presence::{GossipMsg, Presence, PresenceTracker};
 use crate::roster::{now_ms, sign, Config, Id, InviteCheck, InviteKind, Nonce, Op, Role, Roster};
-use crate::router::{clamp_tcp_mss, dst_ipv4, RouteTable};
+use crate::router::{clamp_tcp_mss, dst_ipv4, is_own_underlay, RouteTable};
 use crate::tun_device::RealTun;
 
 /// TUN MTU: clamped well under the QUIC datagram limit (~1200–1400B after
@@ -471,6 +472,14 @@ struct Inner {
     /// Inbound packets dropped by the one-way block since the last tick (logged
     /// per-interval so the block is observable in the daemon log).
     blocked_inbound: AtomicU64,
+    /// The UDP ports our own iroh endpoint is bound to, refreshed each tick.
+    /// Read lock-free on the per-packet pump to break the self-tunnelling loop
+    /// (see [`crate::router::is_own_underlay`]); an `ArcSwap` because a node
+    /// rebuild rebinds to new ports while the pump keeps running.
+    self_underlay_ports: ArcSwap<Vec<u16>>,
+    /// Our own underlay packets the pump dropped since the last log (reported in
+    /// `net-stats`, so a loop re-appearing is visible instead of silent).
+    self_loop_drops: AtomicU64,
     /// Abort handles for network-scoped background tasks (presence receiver, TUN
     /// read loop) so leaving/deleting a network stops them cleanly.
     net_tasks: StdMutex<Vec<tokio::task::AbortHandle>>,
@@ -615,6 +624,8 @@ impl Engine {
             conntrack: Conntrack::default(),
             coarse_now: AtomicU64::new(0),
             blocked_inbound: AtomicU64::new(0),
+            self_underlay_ports: ArcSwap::from_pointee(Vec::new()),
+            self_loop_drops: AtomicU64::new(0),
             net_tasks: StdMutex::new(Vec::new()),
             was_member: AtomicBool::new(false),
             protocol_version: AtomicU32::new(admission::PROTOCOL_VERSION),
@@ -1837,6 +1848,12 @@ async fn activate(inner: &Arc<Inner>, cfg: StoredConfig) -> Result<()> {
     // One node snapshot for the whole activation: everything below must land on
     // the same node instance (a rebuild swaps the field, then re-runs activate).
     let node = inner.node();
+    // Arm both halves of the self-tunnelling guard before anything can route:
+    // the path selector must refuse paths into the virtual /24, and the pump must
+    // know our own underlay ports. Doing it here covers a rebuild too — that
+    // rebinds to new ports and then re-runs activate.
+    node.virtual_subnet.set(cfg.subnet());
+    refresh_self_underlay_ports(inner);
     let secret = cfg.secret();
     // Open the deterministic roster document (same namespace for every member).
     let ns = iroh_docs::NamespaceSecret::from_bytes(&secret.docs_namespace_seed());
@@ -1986,6 +2003,9 @@ async fn soft_disconnect(inner: &Arc<Inner>) {
     for h in inner.net_tasks.lock().unwrap().drain(..) {
         h.abort();
     }
+    // No network, no virtual subnet to exclude: the selector goes back to iroh's
+    // plain tier/RTT policy (`activate` re-arms it on reconnect).
+    inner.node().virtual_subnet.clear();
     *inner.tun.write().unwrap() = None;
     inner.tun_attempted.store(false, Ordering::SeqCst);
     *inner.assigned_ip.write().unwrap() = None;
@@ -2038,6 +2058,7 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
     let now_coarse = now_ms();
     inner.coarse_now.store(now_coarse, Ordering::Relaxed);
     inner.conntrack.sweep(now_coarse);
+    refresh_self_underlay_ports(inner);
     let dropped = inner.blocked_inbound.swap(0, Ordering::Relaxed);
     if dropped > 0 {
         tracing::info!("one-way block: dropped {dropped} unsolicited inbound packet(s)");
@@ -2548,7 +2569,7 @@ fn log_net_stats(inner: &Inner, now: u64) {
     let relay_tx = m.socket.send_relay.get();
     let reports = m.net_report.reports.get();
     tracing::info!(
-        "net-stats: tx={}B rx={}B relay_tx={}B reports={} dials={} dial_fail={} doc_seeds={} gossip_joins={} presence={} bursts={} bursts_throttled={} conns={} relay_moves={}",
+        "net-stats: tx={}B rx={}B relay_tx={}B reports={} dials={} dial_fail={} doc_seeds={} gossip_joins={} presence={} bursts={} bursts_throttled={} conns={} relay_moves={} loop_drops={}",
         tx.saturating_sub(s.last_tx_bytes.swap(tx, Ordering::Relaxed)),
         rx.saturating_sub(s.last_rx_bytes.swap(rx, Ordering::Relaxed)),
         relay_tx.saturating_sub(s.last_relay_tx.swap(relay_tx, Ordering::Relaxed)),
@@ -2565,7 +2586,28 @@ fn log_net_stats(inner: &Inner, now: u64) {
             .get()
             .saturating_sub(m.socket.num_conns_closed.get()),
         m.socket.relay_home_change.get(),
+        inner.self_loop_drops.swap(0, Ordering::Relaxed),
     );
+}
+
+/// Refresh the cached set of ports our endpoint sends from, so the pump can
+/// recognise our own underlay packets. Called from the tick and after a node
+/// rebuild, which rebinds to different ports. `bound_sockets` is a cheap
+/// in-memory read; the write only happens when the set actually changed, so the
+/// pump's `ArcSwap` load stays on the same allocation between rebinds.
+fn refresh_self_underlay_ports(inner: &Arc<Inner>) {
+    let mut ports: Vec<u16> = inner
+        .node()
+        .endpoint
+        .bound_sockets()
+        .iter()
+        .map(|sa| sa.port())
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    if **inner.self_underlay_ports.load() != ports {
+        inner.self_underlay_ports.store(Arc::new(ports));
+    }
 }
 
 async fn dial_member(inner: &Arc<Inner>, peer: Id, psk: [u8; 32]) -> Result<()> {
@@ -3116,6 +3158,18 @@ fn spawn_tun_pump(inner: &Arc<Inner>, tun: Arc<RealTun>) {
                 Ok(n) => {
                     let pkt = &mut buf[..n];
                     let Some(dst) = dst_ipv4(pkt) else { continue };
+                    // Never tunnel our own mesh traffic. A peer's virtual IP is a
+                    // candidate "direct" address for iroh, and we route the whole
+                    // /24 here, so without this the endpoint's own packets come
+                    // straight back down the pump and get re-sent over the very
+                    // connection they belong to — a loop that ratchets an idle
+                    // mesh up to megabytes a minute. `relays::VirtualSubnet` keeps
+                    // the selector off that path; this is the backstop that also
+                    // starves it so iroh retires it. See `router::is_own_underlay`.
+                    if is_own_underlay(pkt, &inner2.self_underlay_ports.load()) {
+                        inner2.self_loop_drops.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
                     // Track this outbound flow so the one-way block lets its
                     // return traffic back in (record before the MSS rewrite).
                     inner2

@@ -5,7 +5,26 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-31
+
 ### Fixed
+- **Android battery: the mesh no longer tunnels its own traffic through itself.** A phone reported
+  78% of a 13% battery drop with the app merely running in the background. The cause was a routing
+  loop, not pacing: iroh advertises every local interface address as a direct-address candidate —
+  including our own TUN's `10.99.0.x`, which `netwatch` has no reason to treat specially — and
+  every member routes the whole `10.99.0.0/24`. So a peer's *virtual* IP looked like a reachable
+  UDP address, iroh scored it as a **direct** path (outranking the relay), and the mesh's own QUIC
+  packets were routed into the mesh's own tunnel and re-sent over the connection they belonged to.
+  The loop feeds itself — each keepalive it carries is re-tunnelled — so it ratchets: on an idle
+  desktop mesh it measured ~113 packets/s and ~1.5 MB/min (~2 GB/day), almost all of it relayed to
+  the phone, keeping its radio out of idle around the clock. Two stray ICMP packets were enough to
+  start it. Three guards now, since the address leaks through QUIC NAT-traversal candidates that no
+  iroh API filters: the path selector never *chooses* a path into the virtual /24
+  (`relays::VirtualSubnet`), the TUN pump drops packets sent from our own endpoint's bound ports
+  (`router::is_own_underlay`) so the bogus path also starves and gets retired, and on Android the
+  `VpnService` excludes our own app from our own tunnel (`addDisallowedApplication`, as Tailscale
+  does). Strictly a connectivity *improvement* — it removes a fake path iroh preferred over the
+  working one. `net-stats` gained `loop_drops=` so a recurrence is visible rather than silent.
 - **Windows: opening the app can no longer leave a duplicate tray icon (or window).** Tray-agent
   and GUI uniqueness relied on GApplication, whose deduplication runs over GLib's autolaunched
   D-Bus session bus — and when that bus's published address goes stale (its helper process dies,

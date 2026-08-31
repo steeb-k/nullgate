@@ -247,6 +247,28 @@ added.
   cross-checked against the public `IOPM.h`). (2) The sleep callback **must finish the disconnect
   before it acknowledges** the event, or powerd freezes the machine mid-teardown. The `notify.rs`
   online-debounce cannot substitute for any of this: a laptop asleep for hours clears any debounce.
+- **The mesh must never be tunnelled through itself, and three separate guards keep it that way.**
+  iroh advertises *every* non-loopback local interface address as a direct-address candidate
+  (netwatch filters only loopback/link-local/multicast — a TUN address is not special to it), and
+  every member routes the whole `10.99.0.0/24`. So a peer's **virtual** IP is a reachable UDP
+  address that iroh scores as a **direct** path and therefore prefers over the relay; for any peer
+  without a real direct path (a phone on cellular) it wins outright. iroh's packets then go into
+  our tunnel, the pump forwards them over the connection they belong to, and every keepalive the
+  loop carries is re-tunnelled — it feeds itself. Field-measured on an *idle* desktop mesh:
+  ~113 pkt/s, ~1.5 MB/min (~2 GB/day), almost all relayed to the phone, and **two ICMP packets
+  started it**. The guards look redundant and are not: (1) `relays::VirtualSubnet` makes
+  `PreferMyRelaySelector` skip any `FourTuple::Ip` in the active /24 — it is a *live handle* set on
+  activate and cleared on `soft_disconnect` because the selector is fixed at bind, before a network
+  exists; (2) `router::is_own_underlay` drops packets off the TUN whose **UDP source port** is one
+  of `Endpoint::bound_sockets()` (the *destination* port belongs to the peer and must never match)
+  — this is what holds when the address leaks anyway, and starving the path is what makes iroh
+  retire it rather than keep it warm; (3) Android's `addDisallowedApplication(packageName)` keeps
+  our own process out of our own tunnel entirely, as Tailscale does. Do **not** "simplify" this to
+  an address-publishing filter: the N0 preset already publishes via `PkarrPublisher`, which defaults
+  to `AddrFilter::relay_only()`, so DNS/pkarr never carried the IPs — the leak is
+  `update_qnt_candidates`, which pushes the endpoint's whole local address set into QUIC
+  NAT-traversal candidates over the connection, and no iroh API filters it. Watch `loop_drops=` in
+  the `net-stats` line; a non-zero steady state means a guard regressed.
 - **On Android, iroh gets no network-change signal and no cheap idle — both are fed from Kotlin.**
   (1) iroh's `netwatch` network monitor is a **no-op on Android** (netlink is restricted), so an
   endpoint bound before a Wi-Fi↔cellular switch or a foreign-VPN takeover keeps stale sockets/paths/
