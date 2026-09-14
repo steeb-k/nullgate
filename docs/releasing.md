@@ -4,7 +4,8 @@ From 0.1.0, Nullgate ships **real installers** with **auto-update**: a code-sign
 **Linux tarball** (system-service installer), and a **macOS** universal `.app` tarball. Releases
 are published to the **public `steeb-k/nullgate` repo**; the in-product updaters and
 the `install.sh` one-liner read its `releases/latest`. Builds are **local, no CI** — each OS's
-artifact is built on that OS (Windows native; Linux via WSL; macOS on a Mac).
+artifact is built on that OS (Windows native; Linux via WSL; macOS on a Mac). A GitHub Actions
+pipeline that builds all of them from a tag is planned: [ci-release-plan.md](ci-release-plan.md).
 
 Per-platform detail: [windows-packaging.md](windows-packaging.md),
 [linux-packaging.md](linux-packaging.md), [macos-packaging.md](macos-packaging.md).

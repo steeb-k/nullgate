@@ -90,7 +90,10 @@ universal `.app` tarball
 `releases/latest`. The signing metadata (`artifact-signing-metadata.json`) is **git-ignored** —
 never commit it. Builds are **local** (Windows native; Linux/Android via WSL; macOS on a Mac).
 **Do not build or publish releases from GitHub Actions** — no workflow may produce, sign, or
-upload an artifact. Shipping stays a local, signed, human-driven step.
+upload an artifact. Shipping stays a local, signed, human-driven step — **until** the tag-triggered
+release pipeline planned in `docs/ci-release-plan.md` lands (build everything in Actions, publish
+only after manual approval, updater contract unchanged); that doc is the course, and this rule
+changes in the same commit that ships it.
 
 CI is limited to **checking**, never shipping. Two workflows run on push + PR and neither emits
 an artifact:
