@@ -85,9 +85,10 @@ add yourself as a required reviewer if a release should wait for approval), and 
 registration `commune-ci-signing` (client id `bbcfe359-662c-4b21-9828-b8642c55613a`, tenant
 `249fb121-…`, subscription `f2204534-…`) carries both federated credentials for nullgate —
 `github-nullgate-release-environment` and `…-ids` — beside commune's, so one app signs both
-projects with the `skz-code` / `ddrx-pcsvc` profile. The Android keystore is the one at
-`iRohDP\android\keystore\nullgate-release.jks` on the Windows VM; the macOS certificate and
-notary credentials live with the Mac.
+projects with the `skz-code` / `ddrx-pcsvc` profile. The signing material (Android keystore, macOS CI Developer ID `.p12` and notary password,
+Windows metadata) is kept **outside the repository** in the maintainer's `~/nullgate-signing/`,
+which also holds `set-nullgate-secrets.sh` — the one command that (re)sets every secret above
+from those files without printing a value.
 
 **Rehearsal 2026-09-13** (`workflow_dispatch`, unsigned, unpublished): gate, Linux, macOS universal
 and Windows x86_64 + ARM64 all passed on hosted runners at the first attempt that reached them;
