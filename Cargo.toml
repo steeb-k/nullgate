@@ -102,3 +102,19 @@ strip = true
 # debugger is unaffected.
 [profile.dev.package."*"]
 debug = false
+
+# `iroh` itself comes from our fork, NOT crates.io — the v1.0.0 tag plus one fix:
+# `RemoteStateActor::pending_open_paths` (n0-computer/iroh#4390, unfixed upstream
+# through 1.2.0) re-queued a failed path-open once *per connection* to a remote
+# and retried every 333 ms, so with our several connections per peer the queue
+# multiplied every tick — the multi-GB daemon blow-ups the memory watchdog kept
+# restarting us for. The fork dedups + caps that queue. `iroh` reaches
+# `iroh-base`/`iroh-relay`/`iroh-dns` by `path`, so all four are patched to the
+# same rev or two `iroh-base`s resolve (`cargo tree -d` must stay clean).
+# On an iroh bump: rebase the fork branch onto the new tag, or drop this table
+# once #4390 is closed upstream.
+[patch.crates-io]
+iroh = { git = "https://github.com/steeb-k/iroh", rev = "8b7e3f67b9f9ba986b9e3afe52a3d0f3bdacca94" }
+iroh-base = { git = "https://github.com/steeb-k/iroh", rev = "8b7e3f67b9f9ba986b9e3afe52a3d0f3bdacca94" }
+iroh-relay = { git = "https://github.com/steeb-k/iroh", rev = "8b7e3f67b9f9ba986b9e3afe52a3d0f3bdacca94" }
+iroh-dns = { git = "https://github.com/steeb-k/iroh", rev = "8b7e3f67b9f9ba986b9e3afe52a3d0f3bdacca94" }

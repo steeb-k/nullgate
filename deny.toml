@@ -120,7 +120,11 @@ deny = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# The one sanctioned exception: our iroh fork (v1.0.0 + the pending_open_paths
+# fix, n0-computer/iroh#4390), pulled by `[patch.crates-io]` in the root
+# Cargo.toml at a pinned rev. The control still holds — any *other* git URL,
+# or this one unpinned, is a failure.
+allow-git = ["https://github.com/steeb-k/iroh"]
 
 [licenses]
 # Permissive licenses plus GPL-3.0 (these projects are GPL-3.0-or-later

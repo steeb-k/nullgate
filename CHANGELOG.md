@@ -5,6 +5,33 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 
+### Fixed
+- **The daemon's runaway memory (and the restart loop it caused) — properly this time.** Since
+  0.2.3 the daemon has restarted itself whenever resident memory passed 1 GB, blamed on iroh's
+  never-evicted mapped-address cache ([iroh#4293](https://github.com/n0-computer/iroh/issues/4293)).
+  On some machines that tripped every few minutes, and each trip dropped every connection at once.
+  That diagnosis was wrong: the cache is keyed per remote node and cannot grow past the roster on a
+  private mesh. The real cause is iroh's `pending_open_paths` retry queue
+  ([iroh#4390](https://github.com/n0-computer/iroh/issues/4390), also
+  [iroh#4509](https://github.com/n0-computer/iroh/issues/4509); unfixed upstream through 1.2.0): a
+  candidate address whose QUIC path fails to open because the connection already holds its 8 paths
+  is re-queued once **per connection to that peer** and retried every 333 ms, so with Nullgate's
+  several connections per peer (mesh, gossip, docs, blobs) the queue multiplied every tick — 1–4 GB
+  within 90 s of a start on Linux, a single ~80 GB allocation on Windows. Peers advertising
+  unroutable addresses (IPv6 on a v4-only host, the members' own `10.99.0.x` TUN addresses) keep the
+  path budget pinned and so keep it firing. iroh is now consumed from a patched fork
+  (`[patch.crates-io]` → `steeb-k/iroh`, branch `nullgate-1.0.0`, identical to 1.0.0 plus the fix)
+  that deduplicates the queue and caps it at 64 addresses, with regression tests. The memory
+  watchdog stays as a backstop and its messages no longer claim the old cause; the docs and source
+  comments that carried the wrong diagnosis are corrected. See `docs/architecture.md`.
+- **Adding a relay access token now actually takes effect.** `relay add` with a token reported
+  "applied to the running daemon — no restart needed", but iroh only reads a relay's token when it
+  first spawns that relay's connection actor, and an actor that is busy or is the home relay never
+  exits. So a device that had already been dialing your relay token-less (because a peer advertised
+  it) kept being refused indefinitely after the token was saved. A new or changed token now rebinds
+  the endpoint in place (same node identity, a few seconds' blip) so the relay is connected with the
+  token; token-less relays, removals, and policy changes still apply live as before.
+
 ## [0.7.0] - 2026-08-31
 
 ### Fixed

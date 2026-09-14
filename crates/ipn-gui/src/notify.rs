@@ -118,9 +118,9 @@ pub(crate) fn init_windows_app_id() {
 }
 
 /// How long a peer must have been offline before we announce it came back online.
-/// This absorbs the brief presence blips from the daemon's memory-watchdog
-/// restarts (iroh#4293 stopgap) so a device restarting doesn't spam every machine
-/// on the mesh with "came online". Override with `NULLGATE_ONLINE_DEBOUNCE_SECS`.
+/// This absorbs the brief presence blips from a quick daemon restart (an update,
+/// a crash, a memory-watchdog trip) so a device restarting doesn't spam every
+/// machine on the mesh with "came online". Override with `NULLGATE_ONLINE_DEBOUNCE_SECS`.
 fn online_notify_debounce() -> Duration {
     const DEFAULT_SECS: u64 = 120; // 2 minutes — headroom for slower machines.
     let secs = std::env::var("NULLGATE_ONLINE_DEBOUNCE_SECS")

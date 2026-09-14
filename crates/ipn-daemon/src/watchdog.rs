@@ -1,15 +1,20 @@
-//! Memory watchdog — a stopgap for iroh's unbounded per-remote mapped-address
-//! cache (`socket::mapped_addrs::AddrMap`, upstream n0-computer/iroh#4293).
+//! Memory watchdog — a backstop against runaway memory in the networking stack.
 //!
-//! That cache is never pruned, so under address churn the daemon's resident
-//! memory climbs until a hashmap reallocation asks for tens of GiB and Rust
-//! aborts (the observed `0xc0000409` OOM — an 80 GiB request in the captured
-//! minidump). The maps live inside the iroh node, which is built once in
-//! `Engine::start` and never rebuilt, so `set_online(false/true)` does *not* free
-//! them — only tearing down the process does. This samples our own RSS and, past
-//! a limit, logs why and exits with a non-zero code so the service manager (SCM /
-//! systemd / launchd, already configured for auto-restart) brings us back with the
-//! maps cleared — bounding memory far below the abort. Remove once #4293 ships.
+//! History: this was added for what was diagnosed as iroh's unbounded per-remote
+//! mapped-address cache (n0-computer/iroh#4293). That diagnosis was wrong — that
+//! map is keyed per remote node and cannot grow past the roster size on a private
+//! mesh. The real cause of the multi-GiB blow-ups (an ~80 GiB `VecDeque`
+//! reallocation on Windows; 1–4 GB within 90 s of start on Linux) was iroh's
+//! `pending_open_paths` retry queue (n0-computer/iroh#4390): a path that fails to
+//! open with `MaxPathIdReached` is re-queued once *per connection* to the remote,
+//! so with our mesh + gossip + docs + blobs connections to every peer the queue
+//! multiplied every 333 ms. That is fixed in our patched iroh (root `Cargo.toml`
+//! `[patch.crates-io]`), which dedups and caps the queue.
+//!
+//! The watchdog stays as a last line of defence: past a limit it logs why and
+//! exits with a non-zero code so the service manager (SCM / systemd / launchd,
+//! already configured for auto-restart) brings the daemon back. With the fix in
+//! place it should never trip; a trip is a bug report, not routine.
 //!
 //! The restart causes a brief presence blip on the mesh; the GUI debounces the
 //! resulting "came online" notifications (see `ipn-gui`'s `notify_newly_online`).
@@ -52,7 +57,7 @@ pub fn spawn(data_dir: PathBuf) {
     let interval = Duration::from_secs(env_u64("NULLGATE_MEM_CHECK_SECS", DEFAULT_INTERVAL_SECS).max(1));
     let limit_bytes = limit_mb.saturating_mul(1024 * 1024);
     tracing::info!(
-        "memory watchdog armed: limit {limit_mb} MB, checking every {}s (iroh#4293 stopgap)",
+        "memory watchdog armed: limit {limit_mb} MB, checking every {}s",
         interval.as_secs()
     );
 
@@ -68,8 +73,9 @@ pub fn spawn(data_dir: PathBuf) {
             let rss_mb = rss / (1024 * 1024);
             let body = format!(
                 "resident memory {rss_mb} MB reached the {limit_mb} MB watchdog limit; \
-                 forcing a restart to reclaim iroh's unbounded mapped-address cache \
-                 (n0-computer/iroh#4293). The service manager will restart the daemon."
+                 forcing a restart. This should not happen with the patched iroh \
+                 (pending_open_paths bound, n0-computer/iroh#4390) — please report it. \
+                 The service manager will restart the daemon."
             );
             tracing::error!(target: "watchdog", "{body}");
             // Durable note in case the async log writer can't flush before exit.

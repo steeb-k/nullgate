@@ -311,3 +311,57 @@ async fn background_pace_still_evicts_removed_device_promptly() {
     // And A no longer sees B.
     assert!(!sees(&a, &b_id).await, "A should have dropped B from the roster");
 }
+
+/// Adding a relay *token* must reach the endpoint. iroh reads a relay's token only
+/// when it spawns that relay's actor, so the engine rebinds the node for this edit
+/// (`rebind_for_relay_tokens`). The contract: the apply state settles to
+/// `Applied`, the identity is unchanged, and the pair is connected again after
+/// the rebind — i.e. a token change is a blip, not an outage or a "restart me".
+#[tokio::test]
+#[ignore = "opens real iroh endpoints; run with --ignored"]
+async fn relay_token_change_rebinds_and_reconnects() {
+    use ipn_core::relays::{RelayApply, RelayPolicy, RelayServer, RelaySettings};
+    std::env::set_var("NULLGATE_DISABLE_TUN", "1");
+    std::env::set_var("NULLGATE_SECRETS_FILE_ONLY", "1");
+
+    let (a, b) = connected_pair("relaytok").await;
+    let a_id = a.self_node_id_hex();
+    let b_id = b.self_node_id_hex();
+
+    // `Preferred` keeps the public relays in the map, so an unreachable custom
+    // relay doesn't strand the pair — this exercises the rebind, not the relay.
+    a.set_relay_settings(RelaySettings {
+        servers: vec![RelayServer {
+            url: "https://relay.invalid.example:8443".into(),
+            token: Some("test-token".into()),
+        }],
+        mode: RelayPolicy::Preferred,
+    })
+    .await
+    .expect("settings rejected");
+
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            match a.relay_status().apply {
+                RelayApply::Applied => return,
+                RelayApply::Failed { reason } => panic!("rebind failed: {reason}"),
+                RelayApply::Pending => tokio::time::sleep(Duration::from_millis(250)).await,
+            }
+        }
+    })
+    .await
+    .expect("token change never settled to Applied");
+    assert_eq!(a.self_node_id_hex(), a_id, "identity must survive the rebind");
+    assert!(a.relay_status().settings.is_custom());
+
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            if a.live_connection_count() >= 1 && sees(&a, &b_id).await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .expect("pair did not reconnect after the token rebind");
+}

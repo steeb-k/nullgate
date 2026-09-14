@@ -51,7 +51,7 @@ pwsh -File scripts\soak\run-soak.ps1 -Scenario <name> [knobs]
 | `blackhole` | **T4** | **The killer test** — unassisted recovery from a *silent* connectivity death | `-Scenario blackhole -Cycles 12 -HoldMinutes 20 -WithDoze` |
 | `kill` | T6 | The system restarts the VpnService after a crash | `-Scenario kill -Cycles 10` |
 | `attribution` | T7 | Bytes land in the right netstats bucket (wifi billed as mobile = bug) | `-Scenario attribution -Hours 4` |
-| `leak` | T8 | No RSS / per-dial cost growth with an unreachable member (iroh#4293) | `-Scenario leak -Hours 48` |
+| `leak` | T8 | No RSS / per-dial cost growth with an unreachable member (iroh#4390 regression watch) | `-Scenario leak -Hours 48` |
 
 `blackhole` works by installing root iptables DROP rules **inside the guest**
 (`adb root`, AOSP images only) for outbound UDP + TCP 80/443/8443, so Android

@@ -145,11 +145,28 @@ added.
 - The iroh ecosystem crates (`iroh`, `iroh-docs`, `iroh-gossip`, `iroh-blobs`, `iroh-tickets`,
   `iroh-mdns-address-lookup`) are pinned **together** in the root `Cargo.toml` and must be
   bumped together — after a bump run `cargo tree -d` and confirm a single `iroh-base`.
+- **`iroh` is consumed from our patched fork**, not crates.io: `[patch.crates-io]` in the root
+  `Cargo.toml` points `iroh`, `iroh-base`, `iroh-relay` and `iroh-dns` at `steeb-k/iroh` branch
+  `nullgate-1.0.0` (the v1.0.0 tag plus the `pending_open_paths` fix, see the gotcha). All four must
+  be patched together — `iroh` reaches its siblings by `path`, so patching only `iroh` yields two
+  `iroh-base`s. On an iroh bump: rebase the fork branch onto the new tag (or drop the patch once
+  iroh#4390 is fixed upstream), then re-verify `cargo tree -d`.
 - A member's signing key **is** its NodeId (ed25519); the originator master key is separate.
 - Verified iroh 1.0 API notes live in the maintainer's agent memory; when unsure, read the
   cached crate source under `~/.cargo/registry/src/.../iroh-1.0.0` rather than guessing.
 
 ## Gotchas
+- **The daemon's memory blow-ups were iroh's `pending_open_paths` fan-out, NOT the mapped-address
+  cache — and the fix lives in our iroh fork.** For 0.2.3–0.7.0 the watchdog restarts were blamed
+  on iroh#4293 (never-evicted `AddrMap`). That map is per remote *node* and can't outgrow the roster;
+  the real bug is iroh#4390 (`remote_state.rs`): a path-open that fails with `MaxPathIdReached` /
+  `RemoteCidsExhausted` is re-queued once **per connection to the remote** and retried every 333 ms,
+  so with ≥2 connections to a peer the queue multiplies every tick. Nullgate always has several
+  (mesh + gossip + docs + blobs ALPNs), and peers' unroutable candidates (v6 on a v4-only host, the
+  `10.99.0.x` TUN addresses) keep the 8-path budget pinned. It's CPU-bound, so it reads as 10–40
+  MB/s, and it is a `trace!`, so the log shows nothing. Upstream's PR #4398 was closed unmerged and
+  1.2.0 still has it. Our fork dedups + caps the queue (64). Don't remove the `[patch.crates-io]`
+  without checking iroh#4390 is closed, and don't re-explain a watchdog trip with #4293.
 - **TUN needs privilege.** Tests and headless runs set `NULLGATE_DISABLE_TUN=1`; the engine honors
   it and skips creating a real interface. Always set it in automated tests.
 - **`insert_relay`/`remove_relay` can block for *minutes*. Never `.await` them on a request path.**
@@ -174,6 +191,13 @@ added.
   `Only` promises. There's no iroh API to force it off; `engine::settle_home_relay` therefore waits
   ~60 s and reports `RelayApply::Failed` ("restart the daemon") rather than claiming a success we
   didn't get. Don't "simplify" that away.
+- **A relay token cannot be applied live — iroh reads it only when it spawns the relay's actor.**
+  `insert_relay` updates the map under a running `ActiveRelayActor`, which keeps the token it was
+  born with; an actor with traffic or home status never exits, so the change never lands (field:
+  denials continued unchanged 5 min after `relay add` with a good token, because iroh had already
+  spawned a token-less actor for the URL a peer advertised). `set_relay_settings` therefore routes a
+  new/changed token through `rebind_for_relay_tokens` → `rebuild_node` instead of `apply_relay_map`
+  (`relays::token_change_needs_rebind` decides). Don't "optimize" that back to the live push.
 - **Relay settings are per-device, and a half-deployed token-gated relay partitions the network.**
   They are not distributed through the roster. A device homed on your relay is reachable *only*
   there, so a peer without the token has no relay path to it and (hole-punching being

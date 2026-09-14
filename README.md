@@ -136,8 +136,8 @@ devices without your relay genuinely cannot reach this one, which is the point. 
 immediately and applied to the running service; the app tells you if it couldn't apply one.
 
 The background service keeps running and starts with your device. If it ever stops unexpectedly —
-or if its memory use climbs too high (a safeguard against a leak in the underlying networking
-library) — it restarts itself automatically, and it keeps a log (including the reason for any crash
+or if its memory use ever climbs too high (a safeguard that should no longer trigger now that the
+networking-library bug behind it is fixed) — it restarts itself automatically, and it keeps a log (including the reason for any crash
 or restart) under `%ProgramData%\Nullgate\logs` on Windows, `/var/log/nullgate` on Linux, and
 `/Library/Logs/Nullgate` on macOS — handy if you ever need to report a problem. A device that comes
 back within a couple of minutes of one of these quick restarts won't spam everyone with a "came

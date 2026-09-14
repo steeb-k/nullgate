@@ -67,10 +67,11 @@ const CONFIG_FILE: &str = "network.cbor";
 /// pass only needs to keep an already-connected swarm healthy, so it targets
 /// **reachable** members (see [`doc_reseed_targets`]). Kept ≤ the ~45s removal-
 /// propagation window the `delete_e2e`/`rotate_e2e` tests assert. It was 8s and
-/// unfiltered, which re-dialed every *unreachable* member every 8s — each attempt
-/// minting a permanent iroh mapped-address entry (n0-computer/iroh#4293) until the
-/// daemon memory watchdog restarted the process and dropped every connection. That
-/// restart loop was the main cause of the intermittent drops.
+/// unfiltered, which re-dialed every *unreachable* member every 8s — pure waste,
+/// and extra QUIC path churn on the connections we do hold (the path-id
+/// exhaustion behind n0-computer/iroh#4390, see `docs/architecture.md`). It was
+/// originally, and wrongly, blamed for filling iroh's mapped-address cache
+/// (iroh#4293); the throttle stays for what it actually does.
 const DOC_RESYNC_MS: u64 = 30_000;
 
 /// A peer whose presence heartbeat we've heard within this window counts as
@@ -78,7 +79,7 @@ const DOC_RESYNC_MS: u64 = 30_000;
 /// (the roster-doc and mesh use separate iroh protocols, so a member can be gossip-
 /// reachable while its mesh link is momentarily down). Re-seeding these is cheap and
 /// is what actually keeps the swarm connected; re-seeding *unreachable* members is
-/// the churn that feeds iroh#4293.
+/// wasted dialing.
 const PRESENCE_FRESH_MS: u64 = 300_000;
 
 /// Cadence for growing the presence gossip mesh via `join_peers`. Like the doc
@@ -1509,7 +1510,19 @@ impl Engine {
         );
 
         let inner = self.inner.clone();
-        tokio::spawn(async move { apply_relay_map(inner, generation, desired, stale).await });
+        if relays::token_change_needs_rebind(&old, &settings) {
+            // A live map push can't deliver a token: iroh reads it only when it
+            // spawns a relay's actor, and an actor that is busy or home never
+            // exits — so the old (or missing) token would be used indefinitely.
+            // Rebind instead; the fresh node reads `relays.cbor` at build time.
+            tracing::info!(
+                "relay token added or changed — rebinding the endpoint, since iroh only \
+                 reads a relay's token when it first connects to it"
+            );
+            tokio::spawn(async move { rebind_for_relay_tokens(inner, generation).await });
+        } else {
+            tokio::spawn(async move { apply_relay_map(inner, generation, desired, stale).await });
+        }
 
         let _ = self.inner.events.send(EngineEvent::Changed);
         Ok(())
@@ -2170,7 +2183,7 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
     // Dial missing members (off-lock). `spawn_dials` skips peers already being
     // dialed and bounds each attempt; on top of that, `dial_backoff_filter` spaces
     // out retries to a *persistently* unreachable member (previously a flat ~20s
-    // forever), which both saves battery and further shrinks the iroh#4293 churn.
+    // forever), which saves battery and metered data.
     let to_dial = dial_backoff_filter(
         to_dial,
         &inner.dial_backoff.lock().unwrap(),
@@ -2205,8 +2218,8 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
     // A membership **change** re-seeds *all* members at once (that's what keeps
     // propagation tight). The periodic self-heal only re-seeds members we believe
     // are **reachable** (a live mesh conn or a recent presence heartbeat): re-dialing
-    // *unreachable* members on a timer is what grew iroh's mapped-address cache
-    // (iroh#4293) and drove the watchdog restart loop — the main cause of the drops.
+    // *unreachable* members on a timer is wasted dialing (it was once blamed for the
+    // watchdog restart loop, wrongly — that was iroh#4390, fixed in our iroh fork).
     // A removed device still hears its ex-peers' heartbeats, so it stays in their
     // reachable set long enough to pull the Remove entry well inside the e2e windows.
     //
@@ -2247,7 +2260,7 @@ async fn tick(inner: &Arc<Inner>) -> Result<()> {
         // `force` (a network-change recovery burst) re-seeds *all* members once,
         // bypassing the reachable-only filter: after minutes behind another VPN no
         // peer is presence-fresh, so the ordinary self-heal would target nothing.
-        // A single burst, not a cadence change, so it keeps the iroh#4293 guarantees.
+        // A single burst, not a cadence change, so the reachable-only throttle holds.
         if let Some(targets) = doc_reseed_targets(
             &member_ids,
             &connected,
@@ -2538,7 +2551,7 @@ fn reset_dial_backoff(backoff: &StdMutex<HashMap<Id, BackoffEntry>>, peer: &Id) 
 /// count — a network-change hint means "conditions changed, retry now", not
 /// "forget that this peer has been dead for an hour". The wholesale `clear()`
 /// this replaces put every dead peer back on full-rate dialing after each blip,
-/// which is exactly the iroh#4293 churn the backoff exists to stop; with the
+/// which is exactly the dial churn the backoff exists to stop; with the
 /// count kept, the immediate retry still happens but a failure resumes the long
 /// spacing instead of restarting the schedule from zero.
 fn expire_dial_backoff(backoff: &StdMutex<HashMap<Id, BackoffEntry>>) {
@@ -3442,8 +3455,8 @@ fn bootstrap_addr(id: &Id) -> Result<EndpointAddr> {
 ///   changed entry must reach everyone).
 /// - Otherwise, only the periodic self-heal re-seeds, and only **reachable** members
 ///   (a live mesh conn, or a fresh presence heartbeat per `is_fresh`). Re-dialing
-///   *unreachable* members on a timer is the churn that grew iroh's mapped-address
-///   cache (iroh#4293) and drove the watchdog restart loop.
+///   *unreachable* members on a timer is wasted dialing (once blamed, wrongly, for
+///   the watchdog restart loop — that was iroh#4390, fixed in our iroh fork).
 ///
 /// Pure (no clock, no I/O) so the policy is unit-tested directly.
 fn doc_reseed_targets(
@@ -3611,6 +3624,35 @@ async fn apply_relay_map(
     );
     tracing::error!("{reason}");
     *inner.relay_apply.write().unwrap() = RelayApply::Failed { reason };
+    let _ = inner.events.send(EngineEvent::Changed);
+}
+
+/// The relay-settings applier for a token change: replace the iroh node so the
+/// relay actors are spawned afresh with the new tokens (see
+/// [`relays::token_change_needs_rebind`]). Same serialization and generation
+/// rules as [`apply_relay_map`]; on success the settled state is simply
+/// `Applied` — the new bind *is* the desired map, there is nothing to verify.
+///
+/// [`relays::token_change_needs_rebind`]: crate::relays::token_change_needs_rebind
+async fn rebind_for_relay_tokens(inner: Arc<Inner>, generation: u64) {
+    use crate::relays::RelayApply;
+
+    let _guard = inner.relay_apply_lock.lock().await;
+    if inner.relay_apply_gen.load(Ordering::SeqCst) != generation {
+        return;
+    }
+    let apply = match rebuild_node(&inner).await {
+        Ok(()) => RelayApply::Applied,
+        Err(e) => {
+            let reason = format!("rebinding the endpoint for the new relay token failed: {e:#}; restart the daemon");
+            tracing::error!("{reason}");
+            RelayApply::Failed { reason }
+        }
+    };
+    if inner.relay_apply_gen.load(Ordering::SeqCst) != generation {
+        return;
+    }
+    *inner.relay_apply.write().unwrap() = apply;
     let _ = inner.events.send(EngineEvent::Changed);
 }
 

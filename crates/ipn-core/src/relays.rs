@@ -198,6 +198,35 @@ impl RelaySettings {
 
 /// The public iroh relays — the default map, and (under
 /// [`RelayPolicy::Preferred`]) the always-reachable half of a custom one.
+/// Whether moving from `old` to `new` adds or changes an access token on a relay
+/// URL — the one edit a live relay-map push cannot deliver.
+///
+/// iroh reads a relay's token exactly once, when it spawns that relay's
+/// `ActiveRelayActor`, and an actor that carries traffic (or is the home relay)
+/// never exits, so it keeps dialing with the token it was born with. `insert_relay`
+/// updates the map underneath it and changes nothing. Worse, the actor may already
+/// exist for a URL we never configured: a peer homed on a token-gated relay
+/// advertises it, we dial it token-less and are refused in a loop — and *adding*
+/// that relay with the right token then silently fails to help. Field-observed:
+/// denials continued unchanged for five minutes after the token was applied.
+///
+/// A rebind is the only way to spawn fresh actors, so the caller rebuilds the
+/// node instead. Removing a token, adding a token-less relay, or a policy change
+/// still go the live route: none of them needs a new actor to take effect.
+pub(crate) fn token_change_needs_rebind(old: &RelaySettings, new: &RelaySettings) -> bool {
+    let old_tokens: std::collections::BTreeMap<RelayUrl, Option<String>> = old
+        .relay_configs()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| (c.url, c.auth_token))
+        .collect();
+    new.relay_configs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| c.auth_token.is_some())
+        .any(|c| old_tokens.get(&c.url) != Some(&c.auth_token))
+}
+
 pub(crate) fn default_relay_configs() -> Vec<Arc<RelayConfig>> {
     iroh::endpoint::default_relay_mode().relay_map().relays()
 }
@@ -747,5 +776,43 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "the pre-flight checks must fail without opening a socket"
         );
+    }
+
+    fn settings(servers: Vec<(&str, Option<&str>)>) -> RelaySettings {
+        RelaySettings {
+            servers: servers
+                .into_iter()
+                .map(|(u, t)| RelayServer { url: u.into(), token: t.map(Into::into) })
+                .collect(),
+            mode: RelayPolicy::Preferred,
+        }
+    }
+
+    /// Only a token that is new or different on a URL forces the rebind; every
+    /// other edit is deliverable live.
+    #[test]
+    fn token_change_needs_rebind_only_for_new_or_changed_tokens() {
+        let none = settings(vec![]);
+        let plain = settings(vec![("https://r.example.com", None)]);
+        let tok = settings(vec![("https://r.example.com", Some("a"))]);
+        let tok2 = settings(vec![("https://r.example.com", Some("b"))]);
+        let other = settings(vec![("https://o.example.com", None)]);
+
+        // Adding a token-gated relay (whether or not the URL was known).
+        assert!(token_change_needs_rebind(&none, &tok));
+        assert!(token_change_needs_rebind(&plain, &tok));
+        // Rotating the token.
+        assert!(token_change_needs_rebind(&tok, &tok2));
+        // Same token again: nothing to do.
+        assert!(!token_change_needs_rebind(&tok, &tok));
+        // Token-less relays, removals, and dropping a token go live.
+        assert!(!token_change_needs_rebind(&none, &plain));
+        assert!(!token_change_needs_rebind(&plain, &other));
+        assert!(!token_change_needs_rebind(&tok, &plain));
+        assert!(!token_change_needs_rebind(&tok, &none));
+        // A policy flip alone is live too.
+        let mut only = tok.clone();
+        only.mode = RelayPolicy::Only;
+        assert!(!token_change_needs_rebind(&tok, &only));
     }
 }

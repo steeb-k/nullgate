@@ -49,6 +49,15 @@ the membership list is a small signed document every member replicates.
   gotchas in `CLAUDE.md`. No daemon restart is needed, but we verify that rather than assert it
   (`engine::settle_home_relay`), because iroh keeps a home relay that has left the map until another
   relay takes over.
+  One edit takes a different route: **adding or changing a token** on a relay URL
+  (`relays::token_change_needs_rebind`). iroh reads a relay's token only when it spawns that relay's
+  actor, and an actor that carries traffic or is the home relay never exits, so a live map push
+  leaves it dialing with the token it was born with — including the token-less actor iroh already
+  spawned for a relay a *peer* advertised, which is exactly the case of adding your own relay's
+  token after peers were on it. The engine therefore rebuilds the iroh node in place
+  (`engine::rebind_for_relay_tokens` → `rebuild_node`, the same primitive as the Android health
+  check: same NodeId, a few seconds' mesh blip, no process restart) and reports `Applied` once the
+  fresh bind is up.
 
   A relay (and its token, if any) can be **checked before it is saved**: `relays::probe_relay()`
   binds a throwaway endpoint whose map holds nothing but that relay and waits for it to come online,
@@ -110,9 +119,9 @@ the membership list is a small signed document every member replicates.
   deliberate close). This makes an intermittent drop attributable from the log instead of silent.
 - **Swarm re-seeding is throttled to reachable members.** The roster-doc live-sync swarm and the
   presence-gossip mesh both need periodic re-seeding to stay connected, but each attempt *dials* the
-  target — and dialing **unreachable** members on a timer was minting permanent entries in iroh's
-  mapped-address cache (see the watchdog note below), the churn that drove the restart loop behind
-  the intermittent drops. So: a **membership change** re-seeds everyone immediately (keeps
+  target — and dialing **unreachable** members every few seconds is wasted work that also feeds
+  the path-open retry churn described under the watchdog note below (it was originally, and wrongly,
+  credited with filling iroh's mapped-address cache). So: a **membership change** re-seeds everyone immediately (keeps
   removals/additions propagating within seconds), while the periodic self-heal re-seeds only members
   we believe are reachable — a live mesh conn or a fresh presence heartbeat (`engine::doc_reseed_targets`,
   `DOC_RESYNC_MS` = 30 s) — and gossip `join_peers` runs on change or a 60 s cadence (15 s while we
@@ -204,22 +213,36 @@ traffic for a tracked flow. The toggle is an `AtomicBool` on the engine's `Inner
 per packet, never behind the async state mutex), persisted in `device_prefs.cbor`.
 
 ## Reliability: memory watchdog + presence-blip debounce + sleep/wake
-**Memory watchdog (iroh #4293 stopgap).** iroh 1.0's per-remote mapped-address cache
-(`socket::mapped_addrs::AddrMap`) is never pruned — every distinct transport address it sees mints a
-permanent entry in two `FxHashMap`s — so under address churn the daemon's resident memory grows
-without bound until an allocation aborts the process (the captured minidump was a single ~80 GB
-request → `0xc0000409`). Those maps live inside the iroh node, which `Engine::start` builds once and
-never rebuilds (`set_online` does not recreate it), so only a **process restart** reclaims them.
-`ipn-daemon/src/watchdog.rs` samples the daemon's own RSS every 30 s and, past a limit (default
-1024 MB; override `NULLGATE_MEM_LIMIT_MB`, `NULLGATE_MEM_CHECK_SECS`; `0` disables), records the
-reason to the crash log and exits with code 92 so the service manager (SCM failure actions / systemd
-`Restart=on-failure` / launchd `KeepAlive`, all already configured for crash recovery) restarts it —
-bounding memory far below the abort. Remove once
-[iroh#4293](https://github.com/n0-computer/iroh/issues/4293) ships an eviction fix. The
-reachable-only re-seed throttle in the maintenance tick (above) attacks the *cause* — it stops the
-daemon from re-dialing unreachable members every few seconds, which is what fed those permanent
-address-map entries — so the watchdog should trip far less often; the watchdog stays as the backstop
-until the upstream fix lands.
+**Memory watchdog + the patched iroh (`pending_open_paths`, iroh#4390).** The daemon's memory
+used to blow up — 1–4 GB within 90 s of a start on Linux, a single ~80 GB allocation → `0xc0000409`
+on Windows — episodically, on some machines dozens of times a day, and every restart dropped every
+connection at once. The first diagnosis (0.2.3–0.7.0) blamed iroh's never-evicted per-remote
+mapped-address cache ([iroh#4293](https://github.com/n0-computer/iroh/issues/4293)). That was
+**wrong**: that map is keyed per remote *node*, so on a private mesh it cannot outgrow the roster,
+and nothing about it explains a doubling allocation reaching tens of GB in a minute. The real
+mechanism is iroh's `RemoteStateActor::pending_open_paths` retry queue
+([iroh#4390](https://github.com/n0-computer/iroh/issues/4390), independently re-reported as
+[iroh#4509](https://github.com/n0-computer/iroh/issues/4509) whose recorded allocation sequence
+contains the exact 85,899,345,920-byte request from our Windows minidump; both still open upstream
+as of iroh 1.2.0, and the one fix PR, #4398, was closed unmerged):
+when opening a QUIC multipath path to a candidate address fails with `MaxPathIdReached` (the
+connection already holds its 8 paths) or `RemoteCidsExhausted`, iroh queues the address and retries
+333 ms later **on every connection to that remote** — and each connection still at the cap re-queues
+it. With `C` connections to one peer the queue multiplies by `C` every tick, with no dedup and no
+cap. Nullgate always holds several connections per peer (mesh, gossip, docs, blobs), so the
+precondition is permanent; the trigger is a peer advertising addresses we cannot route to (IPv6 on
+a v4-only host, the members' own `10.99.0.x` TUN addresses that iroh insists on advertising), which
+keeps the path-id budget pinned. The growth is CPU-bound rather than a leak, which is why it looked
+like 10–40 MB/s rather than a doubling, and why it never showed at default log levels — the requeue
+is a `trace!`. The fix is our patched iroh (root `Cargo.toml` `[patch.crates-io]` → the
+`steeb-k/iroh` fork, branch `nullgate-1.0.0`): the queue is deduplicated (an address is retried once
+per tick however many connections failed it) and capped at 64 distinct addresses, oldest evicted
+first, with unit tests in `remote_state.rs`. The watchdog (`ipn-daemon/src/watchdog.rs`) stays as a
+backstop — RSS sampled every 30 s, past a limit (default 1024 MB; `NULLGATE_MEM_LIMIT_MB`,
+`NULLGATE_MEM_CHECK_SECS`; `0` disables) it notes the reason in the crash log and exits 92 so the
+service manager restarts it — but with the patch in place a trip is a bug report, not routine. The
+reachable-only re-seed throttle (above) is kept for what it actually does — fewer dials to dead
+members — not for the cache-churn story it was originally credited with.
 
 **Presence-blip debounce.** A watchdog restart (or any brief drop) makes a device flap
 offline→online within seconds, which every *other* machine's daemon observes — and would otherwise

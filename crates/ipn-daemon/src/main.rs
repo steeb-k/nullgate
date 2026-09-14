@@ -176,8 +176,9 @@ where
     let engine = Engine::start(&data_dir).await?;
     tracing::info!("node id: {}", engine.self_node_id_hex());
 
-    // Guard against iroh's unbounded mapped-address cache (iroh#4293): restart the
-    // process before its resident memory runs away into the OOM abort we captured.
+    // Backstop against runaway memory in the networking stack: restart the process
+    // before it reaches an OOM abort. The cause it was added for (iroh#4390, the
+    // pending_open_paths fan-out) is fixed in our iroh fork, so a trip is now a bug.
     watchdog::spawn(data_dir.clone());
 
     // Leave the network while the machine sleeps, so a suspended laptop stops

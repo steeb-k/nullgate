@@ -20,7 +20,7 @@
   attribution - T7: half the run wifi-only, half cellular-only; bytes must land
                 in the matching netstats bucket (catches wifi billed as mobile).
   leak        - T8: stop the desktop peer so the phone dials an unreachable
-                member; hourly PSS + bytes (iroh#4293 growth on Android).
+                member; hourly PSS + bytes (iroh#4390-style growth on Android).
 
 .PARAMETER Hours               Duration for idle/flap/attribution/leak.
 .PARAMETER Cycles              Cycle count for doze/blackhole/kill.
