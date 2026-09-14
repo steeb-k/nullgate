@@ -96,6 +96,13 @@ architecture and (b) every imported DLL is either bundled or a system DLL. It ru
 at the end of every bundle, for both architectures.
 
 ## Signing (Azure Trusted Signing)
+**In CI** there is no `az login` session and no git-ignored file: `azure/login` turns a GitHub OIDC
+token into an Azure CLI session (a federated credential on the app registration, no client secret
+on GitHub) and `scripts/artifact-signing-metadata.ci.json` — committed, it names only the account
+and profile — is passed via `ARTIFACT_SIGNING_METADATA`. See [ci-release.md](ci-release.md). The
+updater (`nullgate-update.ps1`) refuses any MSI whose Authenticode status is not `Valid`, so an
+unsigned build can never auto-install. Locally:
+
 Signing is **on by default** and driven by a git-ignored metadata file at the repo root,
 `artifact-signing-metadata.json`, plus an interactive `az login` session (no keys on disk).
 If the file is absent, the build still succeeds but the artifacts are **unsigned** — never ship

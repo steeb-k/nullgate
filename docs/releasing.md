@@ -1,11 +1,14 @@
 # Packaging & releasing
 
-From 0.1.0, Nullgate ships **real installers** with **auto-update**: a code-signed **Windows MSI**, a
-**Linux tarball** (system-service installer), and a **macOS** universal `.app` tarball. Releases
-are published to the **public `steeb-k/nullgate` repo**; the in-product updaters and
-the `install.sh` one-liner read its `releases/latest`. Builds are **local, no CI** — each OS's
-artifact is built on that OS (Windows native; Linux via WSL; macOS on a Mac). A GitHub Actions
-pipeline that builds all of them from a tag is planned: [ci-release-plan.md](ci-release-plan.md).
+From 0.1.0, Nullgate ships **real installers** with **auto-update**: code-signed **Windows MSIs**
+(x86_64 + ARM64), a **Linux tarball** (system-service installer), a **macOS** universal `.app`
+tarball (Developer-ID signed and notarized), and a signed **Android APK**. Releases are published to
+the **public `steeb-k/nullgate` repo**; the in-product updaters and the `install.sh` one-liner read
+its `releases/latest`.
+
+**Since 0.7.1 the artifacts are built and published by CI from a tag** —
+[ci-release.md](ci-release.md). The per-platform scripts below still work by hand and are what CI
+runs; building locally is the fallback, not the process.
 
 Per-platform detail: [windows-packaging.md](windows-packaging.md),
 [linux-packaging.md](linux-packaging.md), [macos-packaging.md](macos-packaging.md).
@@ -19,49 +22,34 @@ Per-platform detail: [windows-packaging.md](windows-packaging.md),
 - (Pre-0.1.0 we used throwaway `v0.0.1-test<N>` prereleases; that scheme is retired.)
 
 ## Release checklist
-1. **Tests:** `cargo test -p ipn-core` and the relevant ignored e2e tests pass; `cargo build
-   --workspace` is clean on Windows and Linux.
+1. **Tests:** `cargo test -p ipn-core` and the relevant ignored e2e tests pass (CI's `gate` job
+   repeats the unit tests and cargo-deny, not the e2e ones).
 2. **Bump** the version in root `Cargo.toml`, run `cargo update --workspace`, and move
-   `CHANGELOG.md`'s `## [Unreleased]` items under a `## [<version>]` heading. **Also bump the
-   Android version by hand** in `android/app/build.gradle.kts` — `versionName` (to match the
-   workspace version) and `versionCode` (`MAJOR*10000 + MINOR*100 + PATCH`); these are hardcoded
-   literals, **not** derived from `Cargo.toml`, so they're easy to forget and a stale `versionCode`
-   silently blocks in-place Android updates. Commit.
-3. **Build each artifact on its own OS:**
-   - **Windows** (signed): `az login`, then
-     `pwsh -File scripts\build-msi.ps1` → `target\wix\nullgate-<ver>-windows-x86_64.msi`, and
-     `pwsh -File scripts\build-msi.ps1 -Arch arm64` → `…-windows-arm64.msi`. Both are built on
-     the x86_64 box (ARM64 is fully cross-compiled); see `windows-packaging.md` for its one-time
-     toolchain setup. **Ship both or neither** — the updater picks its asset by OS architecture
-     and will not fall back across architectures, so a release with only the x86_64 MSI silently
-     strands every ARM64 install on its current version.
-   - **Linux** (WSL/Linux): `scripts/package-linux.sh` → `dist/nullgate-<ver>-linux-x86_64.tar.gz`.
-   - **macOS** (on a Mac): once, create the conda-forge GTK env(s) with
-     `scripts/setup-conda-macos.sh --universal` (needs `micromamba`/`mamba`/`conda` on PATH);
-     then `scripts/package-macos.sh` → `dist/nullgate-<ver>-macos-{universal|arm64}.tar.gz`.
-     Verify the floor: `otool -l …/Contents/lib/libgtk-4.*.dylib | grep -A3 LC_BUILD_VERSION`
-     shows `minos 11.0`. See `macos-packaging.md` (conda-forge GTK, not Homebrew).
-   - **Android** (signed APK): needs `android/keystore.properties` (the **stable** release
-     keystore — see the Android note below). `cd android && ./gradlew :app:assembleRelease`
-     produces `android/app/build/outputs/apk/release/app-release.apk`; rename it to
-     `nullgate-<ver>-android.apk` for upload. Confirm you bumped `versionCode`/`versionName` in
-     step 2 first — a stale `versionCode` silently blocks in-place updates (Obtainium included).
-4. **Publish** to the public repo (authenticated `gh`). Create the release with whatever's ready,
-   then upload the rest as each OS finishes:
-   ```sh
-   gh release create v<ver> --repo steeb-k/nullgate \
-     --title "v<ver>" --notes-file release-notes.md \
-     target/wix/nullgate-<ver>-windows-x86_64.msi \
-     target/wix/nullgate-<ver>-windows-arm64.msi
-   gh release upload v<ver> --repo steeb-k/nullgate dist/nullgate-<ver>-linux-x86_64.tar.gz
-   gh release upload v<ver> --repo steeb-k/nullgate dist/nullgate-<ver>-macos-universal.tar.gz
-   gh release upload v<ver> --repo steeb-k/nullgate nullgate-<ver>-android.apk
-   ```
-   Asset names must stay `nullgate-<ver>-<platform>.<ext>` — the desktop updaters glob on
-   `windows-x86_64.msi`, `windows-arm64.msi`, `linux-x86_64.tar.gz`, and
-   `macos-(universal|<arch>).tar.gz`; the Android build is a single universal
-   `nullgate-<ver>-android.apk` (Obtainium auto-selects the lone `.apk` asset — see the Android
-   note below).
+   `CHANGELOG.md`'s `## [Unreleased]` items under a `## [<version>] - <date>` heading (the release
+   notes are cut from that section). **Also bump the Android version by hand** in
+   `android/app/build.gradle.kts` — `versionName` (to match) and `versionCode`
+   (`MAJOR*10000 + MINOR*100 + PATCH`); the `publish` job refuses a tag where these disagree, so
+   forgetting is loud rather than silent. Commit and push.
+3. **Rehearse if anything in the pipeline changed:** `git tag v<ver>-test1 && git push --tags`.
+   That publishes a prerelease with all five assets, which no updater or Obtainium will take.
+   Install one or two of them by hand (smoke-check below), then delete the prerelease and the tag.
+4. **Tag:** `git tag v<ver> && git push origin v<ver>`. The `release` workflow builds all four
+   platforms, gates on the checks, and creates the release with every asset in one call. If the
+   `release` environment has a required reviewer, approve it in the Actions tab.
+5. If a platform job fails, nothing is published. Fix on `main`, then dispatch `release.yml` with
+   `tag: v<ver>` — the fixed workflow builds the tag's source.
+
+### Building by hand (fallback)
+Each artifact on its own OS: **Windows** `pwsh -File scripts\build-msi.ps1` (+ `-Arch arm64`;
+signed if `artifact-signing-metadata.json` + `az login` are present — see `windows-packaging.md`);
+**Linux** `scripts/package-linux.sh`; **macOS** `scripts/setup-conda-macos.sh --universal` once,
+then `CODESIGN_IDENTITY='Developer ID Application: …' NULLGATE_NOTARIZE=1 scripts/package-macos.sh`
+(ad-hoc without the identity — installable via `nullgatectl`, not by browser download);
+**Android** `cd android && ./gradlew :app:assembleRelease` with `android/keystore.properties`,
+renamed to `nullgate-<ver>-android.apk`. Publish with `gh release create v<ver> --verify-tag
+--latest` and **all five files in the same command** — asset names must stay
+`nullgate-<ver>-<platform>.<ext>` (`windows-x86_64.msi`, `windows-arm64.msi`, `linux-x86_64.tar.gz`,
+`macos-universal.tar.gz`, `android.apk`).
 
 ## Smoke-check before announcing
 - **Windows:** install the MSI on a clean machine; confirm the app opens, the `NullgateDaemon` service

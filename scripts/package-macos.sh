@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
-# Build the Nullgate macOS release tarball — a self-contained, ad-hoc-signed
+# Build the Nullgate macOS release tarball — a self-contained, signed
 # "Nullgate.app" (bundled GTK). macOS analog of package-linux.sh.
+#
+# Signing: ad-hoc by default (a dev box). Set CODESIGN_IDENTITY to a
+# 'Developer ID Application: ...' identity present in a keychain and every
+# Mach-O is re-signed with it, with a secure timestamp and the hardened runtime
+# (the two things notarization checks beyond the signature). Set
+# NULLGATE_NOTARIZE=1 as well to notarize + staple the sealed bundle before it
+# is tarred (scripts/notarize-macos.sh; needs the NOTARY_* environment). CI does
+# both; see docs/ci-release.md.
 #
 #   scripts/package-macos.sh                cargo build --release, bundle, package
 #   scripts/package-macos.sh --skip-build   package the existing per-arch release bins
@@ -39,6 +47,17 @@ export MACOSX_DEPLOYMENT_TARGET=11.0
 # this). Without it, install_name_tool fails "load commands do not fit".
 export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-headerpad_max_install_names"
 SKIP_BUILD=0; [ "${1:-}" = "--skip-build" ] && SKIP_BUILD=1
+
+# Signing identity and the flags that go with it. Ad-hoc ('-') cannot carry a
+# timestamp; a real identity must, and must opt into the hardened runtime, or
+# notarization rejects the bundle.
+IDENTITY="${CODESIGN_IDENTITY:--}"
+if [ "$IDENTITY" = "-" ]; then
+  SIGN_FLAGS="--timestamp=none"
+  [ "${NULLGATE_NOTARIZE:-0}" = 1 ] && { echo "package-macos: NULLGATE_NOTARIZE=1 needs CODESIGN_IDENTITY (an ad-hoc bundle cannot be notarized)" >&2; exit 1; }
+else
+  SIGN_FLAGS="--timestamp --options runtime"
+fi
 
 cd "$ROOT"
 VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
@@ -131,6 +150,18 @@ if [ "$UNIVERSAL" = 1 ]; then
   done
 fi
 
+# Re-sign every Mach-O inside-out with the chosen identity. bundle-gtk-macos.sh
+# signed ad-hoc as it went (and lipo above invalidated even that), so this pass
+# is what puts the real identity, the timestamp and the hardened runtime on
+# every dylib, loader and binary — the seal below only covers the bundle.
+echo "package-macos: signing with identity '$IDENTITY'"
+for f in "$CONTENTS"/lib/*.dylib "$CONTENTS"/lib/gdk-pixbuf-2.0/2.10.0/loaders/*.so; do
+  [ -e "$f" ] || continue
+  codesign --force $SIGN_FLAGS --sign "$IDENTITY" "$f" >/dev/null 2>&1 || { echo "package-macos: codesign failed: $f" >&2; exit 1; }
+done
+for b in nullgate-cli nullgate-daemon nullgate; do
+  codesign --force $SIGN_FLAGS --sign "$IDENTITY" "$CONTENTS/MacOS/$b" >/dev/null 2>&1 || { echo "package-macos: codesign failed: $b" >&2; exit 1; }
+done
 # Info.plist (CFBundleVersion from Cargo).
 sed "s/__VERSION__/$VERSION/g" "$PKG_SRC/Info.plist" > "$CONTENTS/Info.plist"
 
@@ -146,9 +177,14 @@ iconutil -c icns "$ICONSET" -o "$CONTENTS/Resources/AppIcon.icns"
 rm -rf "$(dirname "$ICONSET")"
 echo "package-macos: wrote AppIcon.icns"
 
-# Seal the bundle (ad-hoc). Nested dylibs/helpers are already individually signed.
-codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 \
+# Seal the bundle. Nested dylibs/helpers are already individually signed.
+codesign --force $SIGN_FLAGS --sign "$IDENTITY" "$APP" >/dev/null 2>&1 \
   || { echo "package-macos: bundle codesign failed" >&2; exit 1; }
+codesign --verify --deep --strict "$APP" || { echo "package-macos: the sealed bundle does not verify" >&2; exit 1; }
+echo "package-macos: TeamIdentifier -> $(codesign -dv --verbose=2 "$APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+if [ "${NULLGATE_NOTARIZE:-0}" = 1 ]; then
+  "$ROOT/scripts/notarize-macos.sh" "$APP"
+fi
 
 # Verify the arch(es) actually landed.
 echo "package-macos: nullgate arches -> $(lipo -archs "$CONTENTS/MacOS/nullgate" 2>/dev/null)"

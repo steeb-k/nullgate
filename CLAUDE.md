@@ -85,18 +85,21 @@ x86_64 box; ship both or neither, as the updater won't cross architectures), a *
 system-service tarball (`scripts/package-linux.sh` + `packaging/linux/nullgatectl`), and a **macOS**
 universal `.app` tarball
 (`scripts/setup-conda-macos.sh` once to build the conda-forge GTK env, then
-`scripts/package-macos.sh`, built on a Mac). Releases are `gh release` uploads to the **public**
-`steeb-k/nullgate` repo; the in-product updaters + `install.sh` read its
-`releases/latest`. The signing metadata (`artifact-signing-metadata.json`) is **git-ignored** —
-never commit it. Builds are **local** (Windows native; Linux/Android via WSL; macOS on a Mac).
-**Do not build or publish releases from GitHub Actions** — no workflow may produce, sign, or
-upload an artifact. Shipping stays a local, signed, human-driven step — **until** the tag-triggered
-release pipeline planned in `docs/ci-release-plan.md` lands (build everything in Actions, publish
-only after manual approval, updater contract unchanged); that doc is the course, and this rule
-changes in the same commit that ships it.
+`scripts/package-macos.sh`, built on a Mac). Releases are **built and published by CI from a tag** to the **public** `steeb-k/nullgate` repo;
+the in-product updaters + `install.sh` read its `releases/latest`. `docs/ci-release.md` is the
+authority: `.github/workflows/release.yml` (tag push / dispatch) calls the reusable `build.yml`
+(linux, android, macos, windows jobs), gates on the same checks as `ci.yml`, and publishes **one**
+release with all five assets in a single `gh release create`. Signing happens in CI: Windows via
+Azure Trusted Signing over OIDC (`environment: release` is the federated-credential subject, not a
+gate), macOS via a Developer ID from secrets + notarization + stapling, Android via the release
+keystore. The git-ignored `artifact-signing-metadata.json` is for a laptop's own `az login`;
+`scripts/artifact-signing-metadata.ci.json` is the committed CI copy. Building by hand
+(`scripts/build-msi.ps1`, `scripts/package-linux.sh`, `scripts/package-macos.sh`) is the fallback.
+**Only `release.yml` ships**, only from a tag or an explicit dispatch naming one; no other workflow
+may sign or upload an artifact. Both updaters now verify what they download (Authenticode `Valid`
+on Windows; `codesign --verify` + a matching Team ID on macOS) — keep that.
 
-CI is limited to **checking**, never shipping. Two workflows run on push + PR and neither emits
-an artifact:
+Check-only CI still runs on push + PR and emits no artifact:
 - `.github/workflows/ci.yml` — `cargo build --workspace --locked --all-targets` then
   `cargo test --workspace --locked` on ubuntu. Installs `libgtk-4-dev libadwaita-1-dev
   libdbus-1-dev`: all three are link-time requirements of `ipn-gui` (the last via `ksni`, which
@@ -123,8 +126,8 @@ The e2e tests stay `#[ignore]`d and do not run in CI — they open real iroh end
 5. **GUI.** Add a `UiMsg`/control path in `ipn-gui` and render it. Never block the GTK thread —
    issue requests via `Net::request` and update on the `async-channel`.
 6. **Document it (required, same change).** See the rule below.
-7. **Build the installers** for each platform on its own OS (`scripts/build-msi.ps1` on Windows,
-   `scripts/package-linux.sh` via WSL, `scripts/package-macos.sh` on a Mac) before a release.
+7. **Release** by bumping the version (workspace + Android literals + CHANGELOG heading) and
+   pushing a `v<ver>` tag; CI builds and publishes (`docs/releasing.md`).
 
 ### Definition of done
 A feature isn't done until: it compiles on Windows **and** Linux; `cargo test -p ipn-core`
@@ -172,6 +175,14 @@ added.
   without checking iroh#4390 is closed, and don't re-explain a watchdog trip with #4293.
 - **TUN needs privilege.** Tests and headless runs set `NULLGATE_DISABLE_TUN=1`; the engine honors
   it and skips creating a real interface. Always set it in automated tests.
+- **Two signing traps CI already dodges — don't "simplify" them away.** (1) Windows: the Azure OIDC
+  assertion lives 5 min; a build longer than the access token (~1 h) makes signtool fail with an
+  unreadable `SignerSign() 0x80004005` on refresh. `build.yml` therefore logs in twice — early (so a
+  2-second signing probe fails fast) and again right before `build-msi.ps1 -SkipBuild` signs. (2)
+  macOS: sign *after* lipo, never before (a signature covers all slices), with `--timestamp
+  --options runtime` (notarization rejects anything else), and staple the ticket to the `.app`
+  before tarring (a ticket on a `.dmg` doesn't travel inside a tarball). The CI certificate is a
+  second Developer ID under the same team; `nullgatectl` compares Team IDs, so that is invisible.
 - **`insert_relay`/`remove_relay` can block for *minutes*. Never `.await` them on a request path.**
   They look like setters but each awaits iroh's bounded socket-actor channel (`mpsc::channel(256)`),
   and that actor blocks on a per-remote `RemoteStateActor` (inbox of 16), which blocks on

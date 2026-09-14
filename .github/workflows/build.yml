@@ -1,0 +1,428 @@
+# Every platform's release artifact, built once and reused.
+#
+# Called by `release.yml` (a tag, or a rehearsal by hand). Each job produces
+# exactly the asset the in-product updaters look for on `releases/latest` —
+# see docs/ci-release.md for the contract — and uploads it as a workflow
+# artifact; nothing here publishes. The platforms run in parallel: a release
+# needs all of them regardless of order, so the wall clock is the slowest job
+# (Windows), not the sum.
+#
+# Actions are pinned by commit SHA, as in ci.yml: a tag can be moved.
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      sign:
+        description: 'Sign the Windows MSIs (Azure Trusted Signing), the macOS bundle (Developer ID + notarization) and the Android APK (release keystore). Off for a build that only needs to prove the pipeline.'
+        required: false
+        default: true
+        type: boolean
+      platforms:
+        description: 'Which platforms to build: all, or a space-separated subset of linux windows macos android.'
+        required: false
+        default: all
+        type: string
+      ref:
+        description: 'The commit to build. Defaults to the caller''s ref; a rebuild of an existing tag from a fixed workflow on main names the tag here.'
+        required: false
+        default: ''
+        type: string
+
+# `azure/login` asks GitHub for an OIDC token; that is what replaces a stored
+# client secret for Windows signing.
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    if: inputs.platforms == 'all' || contains(format(' {0} ', inputs.platforms), ' linux ')
+    name: Linux tarball
+    # Deliberately the OLDEST image that can build the GUI (GTK 4.14 satisfies
+    # the gtk4 crate's v4_10 feature; 22.04's GTK 4.6 cannot). The tarball binds
+    # the target's glibc to this image's (2.39), so moving it forward raises the
+    # floor for every installed machine.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - name: Install GTK4, libadwaita, D-Bus headers and ImageMagick
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev libdbus-1-dev pkg-config imagemagick
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: linux-release
+      - name: Build and package
+        run: bash scripts/package-linux.sh
+      - name: Check the asset name
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          test -f "dist/nullgate-$version-linux-x86_64.tar.gz" || { echo "::error::no dist/nullgate-$version-linux-x86_64.tar.gz"; ls -la dist; exit 1; }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux
+          path: dist/nullgate-*-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  android:
+    if: inputs.platforms == 'all' || contains(format(' {0} ', inputs.platforms), ' android ')
+    name: Android APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # r27c — the version docs/android-packaging.md pins for local builds. This
+      # .so is shipped, so it comes out of the same toolchain as a local build.
+      NDK_VERSION: 27.2.12479543
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Android targets and cargo-ndk
+        run: |
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+          cargo install --locked cargo-ndk
+      - name: Install the pinned NDK
+        run: |
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: android-release
+      - name: Write the release keystore
+        # The key that decides whether this APK can upgrade an installed one.
+        # Every release must be signed with the SAME keystore (a rotated key
+        # blocks in-place updates for every user, Obtainium included), so a
+        # signed build with the keystore missing is a hard failure, not a
+        # warning. An unsigned rehearsal (`sign: false`) still builds.
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          SIGN: ${{ inputs.sign }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            if [ "$SIGN" = "true" ]; then
+              echo "::error::ANDROID_KEYSTORE_BASE64 is not set; a release APK must be signed with the release keystore"
+              exit 1
+            fi
+            echo "::warning::No release keystore; this APK is unsigned and cannot be installed over a release."
+            exit 0
+          fi
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > android/nullgate-release.jks
+          {
+            echo "storeFile=nullgate-release.jks"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+          } > android/keystore.properties
+      - name: Build the APK
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: 'false'
+        run: cd android && ./gradlew --no-daemon :app:assembleRelease
+      - name: Name it after the release
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/app-release.apk "dist/nullgate-$version-android.apk"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: android
+          path: dist/nullgate-*-android.apk
+          if-no-files-found: error
+
+  macos:
+    if: inputs.platforms == 'all' || contains(format(' {0} ', inputs.platforms), ' macos ')
+    name: macOS universal bundle
+    # Apple Silicon. The x86_64 slice is cross-built here against the osx-64
+    # conda env, exactly as scripts/package-macos.sh does on the maintainer's
+    # Mac, so one job yields the universal tarball both updaters accept.
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      SIGN_MACOS: ${{ inputs.sign && secrets.MACOS_CERTIFICATE_P12 != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - name: Intel target
+        run: rustup target add x86_64-apple-darwin
+      - name: Restore the conda-forge GTK environments
+        id: conda-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .conda-gtk
+          key: conda-gtk-universal-${{ hashFiles('scripts/setup-conda-macos.sh') }}
+      - name: Install micromamba
+        run: |
+          mkdir -p "$RUNNER_TEMP/mm/bin"
+          curl -Ls https://micro.mamba.pm/api/micromamba/osx-arm64/latest | tar -xvjO bin/micromamba > "$RUNNER_TEMP/mm/bin/micromamba"
+          chmod +x "$RUNNER_TEMP/mm/bin/micromamba"
+          echo "$RUNNER_TEMP/mm/bin" >> "$GITHUB_PATH"
+          echo "MAMBA_ROOT_PREFIX=$RUNNER_TEMP/mm/root" >> "$GITHUB_ENV"
+      - name: Build the conda-forge GTK environments (arm64 + x86)
+        if: steps.conda-cache.outputs.cache-hit != 'true'
+        run: bash scripts/setup-conda-macos.sh --universal
+      - name: Save the conda environments
+        # Saved the moment they exist rather than in a post step, which is
+        # skipped when the job fails — and the first attempts at any macOS job
+        # fail after the environment is built.
+        if: steps.conda-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .conda-gtk
+          key: ${{ steps.conda-cache.outputs.cache-primary-key }}
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: macos-release
+          cache-on-failure: true
+      - name: Refuse to ship ad-hoc
+        if: inputs.sign && env.SIGN_MACOS != 'true'
+        run: |
+          echo "::error::MACOS_CERTIFICATE_P12 is not set; a release bundle must be Developer-ID signed. Rehearse with sign=false instead."
+          exit 1
+      - name: Import the Developer ID certificate
+        if: env.SIGN_MACOS == 'true'
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: bash scripts/ci/macos-keychain.sh
+      - name: Build, sign, notarize and package
+        env:
+          # package-macos.sh signs with CODESIGN_IDENTITY (set by the keychain
+          # step) and, with NULLGATE_NOTARIZE=1, notarizes + staples before
+          # tarring. Either notary credential form works.
+          NULLGATE_NOTARIZE: ${{ env.SIGN_MACOS == 'true' && '1' || '0' }}
+          NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+          NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          CARGO_PROFILE_RELEASE_DEBUG: 'false'
+        run: bash scripts/package-macos.sh
+      - name: Check the asset, the slices and the floor
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          tarball="dist/nullgate-$version-macos-universal.tar.gz"
+          test -f "$tarball" || { echo "::error::no $tarball — the x86 conda env or the x86_64 target was missing, so the build was arm64-only"; ls -la dist; exit 1; }
+          app="dist/nullgate-$version-macos-universal/Nullgate.app"
+          lipo -archs "$app/Contents/MacOS/nullgate" | grep -q x86_64 || { echo "::error::nullgate is not universal"; exit 1; }
+          # conda-forge's dylibs carry minos 11.0; a higher number means something
+          # Homebrew-built crept in (see docs/macos-packaging.md).
+          otool -l "$app"/Contents/lib/libgtk-4.*.dylib | grep -A3 LC_BUILD_VERSION | grep minos || true
+          codesign --verify --deep --strict --verbose=2 "$app"
+          if [ "$SIGN_MACOS" = "true" ]; then
+            # A stapled ticket is what lets Gatekeeper accept the bundle offline.
+            xcrun stapler validate "$app"
+            spctl -a -t exec -vv "$app"
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos
+          path: dist/nullgate-*-macos-universal.tar.gz
+          if-no-files-found: error
+
+  windows:
+    if: inputs.platforms == 'all' || contains(format(' {0} ', inputs.platforms), ' windows ')
+    name: Windows installers (x86_64 + arm64)
+    runs-on: windows-2025
+    timeout-minutes: 120
+    # Not a gate, a subject: the Azure federated credential trusts
+    # `repo:steeb-k/nullgate:environment:release`, and a subject cannot carry a
+    # wildcard while tag names vary. Adding a required reviewer to the
+    # environment is what would make a release wait for approval.
+    environment: release
+    env:
+      SIGN_WINDOWS: ${{ inputs.sign && secrets.AZURE_CLIENT_ID != '' }}
+      # gvsbuild publishes prebuilt GTK4 for x64; building GTK from source on a
+      # runner takes an hour. Pinned by version AND digest — bump both together.
+      GVSBUILD_VERSION: 2026.8.0
+      GVSBUILD_SHA256: 1f95a92d037f5292da05e6ab1037032ff21ddb7b20d4ac8e83e3674c864c07b0
+      # llvm-mingw supplies aarch64-w64-mingw32-{clang,windres} for the ARM64
+      # GUI (mingw ABI, to match MSYS2's GTK); see scripts/build-arm64.ps1.
+      LLVM_MINGW_VERSION: '20260908'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Refuse to ship unsigned
+        if: inputs.sign && env.SIGN_WINDOWS != 'true'
+        shell: bash
+        run: |
+          echo "::error::AZURE_CLIENT_ID is not set; a release MSI must be signed (SmartScreen, and the updater refuses unsigned MSIs). Rehearse with sign=false instead."
+          exit 1
+
+      - name: Install the WiX toolset
+        shell: pwsh
+        run: dotnet tool install --global wix --version 5.*
+
+      - name: Sign in to Azure
+        # The first of two. This one lets the probe below fail in two minutes
+        # instead of after the build; it is not the session that signs the
+        # installers (see the second login).
+        if: env.SIGN_WINDOWS == 'true'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install the Trusted Signing client
+        if: env.SIGN_WINDOWS == 'true'
+        shell: pwsh
+        # The signing library comes from the NuGet package, not the PowerShell
+        # module of the same name (which carries no dlib). A .nupkg is a zip.
+        run: |
+          $url = "https://www.nuget.org/api/v2/package/Microsoft.Trusted.Signing.Client"
+          $zip = Join-Path $env:RUNNER_TEMP "trusted-signing-client.zip"
+          $out = Join-Path $env:RUNNER_TEMP "trusted-signing-client"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $out -Force
+          $dlib = Get-ChildItem -Path $out -Recurse -Filter 'Azure.CodeSigning.Dlib.dll' |
+            Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1
+          if (-not $dlib) { $dlib = Get-ChildItem -Path $out -Recurse -Filter 'Azure.CodeSigning.Dlib.dll' | Select-Object -First 1 }
+          if (-not $dlib) { throw "no Azure.CodeSigning.Dlib.dll in the NuGet package" }
+          "ARTIFACT_SIGNING_DLIB=$($dlib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "ARTIFACT_SIGNING_METADATA=$(Join-Path $PWD 'scripts\artifact-signing-metadata.ci.json')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Prove the signing chain works
+        if: env.SIGN_WINDOWS == 'true'
+        shell: pwsh
+        # Before the build. Compiles a two-second, never-signed PE and signs it,
+        # asserting unsigned-before and Valid-after: nothing short of that
+        # exercises the endpoint, the federated identity, the dlib and signtool
+        # together. (A copied system binary is already signed by Microsoft and
+        # proves nothing; its catalog signature cannot be stripped either.)
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "signprobe"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $src = Join-Path $dir "probe.cs"
+          Set-Content $src "class P { static void Main() { } }"
+          $probe = Join-Path $dir "probe.exe"
+          $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if (-not (Test-Path $csc)) { throw "no C# compiler at $csc" }
+          & $csc /nologo /out:$probe $src
+          if (-not (Test-Path $probe)) { throw "the probe did not compile" }
+          $before = Get-AuthenticodeSignature $probe
+          if ($before.Status -eq "Valid") { throw "the probe is already signed; the check would prove nothing" }
+          pwsh -File scripts\sign-artifacts.ps1 -Files $probe
+          $after = Get-AuthenticodeSignature $probe
+          Write-Host "probe: $($after.Status) by $($after.SignerCertificate.Subject)"
+          if ($after.Status -ne "Valid") { throw "the signing chain produced $($after.Status)" }
+
+      - name: GTK for x86_64 (gvsbuild release zip -> C:\gtk)
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "gtk4-gvsbuild.zip"
+          Invoke-WebRequest -Uri "https://github.com/wingtk/gvsbuild/releases/download/$env:GVSBUILD_VERSION/GTK4_Gvsbuild_${env:GVSBUILD_VERSION}_x64.zip" -OutFile $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          if ($hash -ne $env:GVSBUILD_SHA256) { throw "gvsbuild zip digest $hash != pinned $env:GVSBUILD_SHA256" }
+          Expand-Archive -Path $zip -DestinationPath "C:\gtk" -Force
+          if (-not (Test-Path "C:\gtk\lib\pkgconfig\gtk4.pc")) { throw "C:\gtk has no lib\pkgconfig\gtk4.pc" }
+          # pkgconf relocates the prefix in these .pc files to C:\gtk on its own;
+          # prove it before spending the build finding out.
+          $env:PATH = "C:\gtk\bin;$env:PATH"
+          $env:PKG_CONFIG_PATH = "C:\gtk\lib\pkgconfig"
+          $v = & pkgconf --modversion gtk4
+          if ($LASTEXITCODE -ne 0) { throw "pkgconf cannot resolve gtk4" }
+          Write-Host "gtk4 $v, libadwaita $(& pkgconf --modversion libadwaita-1)"
+
+      - name: GTK for arm64 (MSYS2 CLANGARM64 + the x86_64 host-tools mirror)
+        shell: pwsh
+        run: |
+          pwsh -File scripts\fetch-gtk-msys2.ps1
+          pwsh -File scripts\fetch-gtk-msys2.ps1 -Env ucrt64 -Root C:\gtk-msys2-x64
+
+      - name: llvm-mingw and the ARM64 Rust targets
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "llvm-mingw.zip"
+          Invoke-WebRequest -Uri "https://github.com/mstorsjo/llvm-mingw/releases/download/$env:LLVM_MINGW_VERSION/llvm-mingw-$env:LLVM_MINGW_VERSION-ucrt-x86_64.zip" -OutFile $zip
+          # build-arm64.ps1 globs C:\llvm-mingw-*; the zip's top-level folder has that name.
+          Expand-Archive -Path $zip -DestinationPath "C:\" -Force
+          if (-not (Get-ChildItem "C:\" -Directory -Filter "llvm-mingw-*")) { throw "llvm-mingw did not land at C:\llvm-mingw-*" }
+          if (-not (Test-Path "C:\Program Files\LLVM\bin\clang.exe")) { throw "no LLVM clang at C:\Program Files\LLVM (ring needs it for aarch64)" }
+          rustup target add aarch64-pc-windows-msvc aarch64-pc-windows-gnullvm
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: windows-release
+          cache-on-failure: true
+
+      - name: Build x86_64 (MSVC, against gvsbuild)
+        shell: pwsh
+        env:
+          PKG_CONFIG_PATH: C:\gtk\lib\pkgconfig
+        run: |
+          $env:PATH = "C:\gtk\bin;$env:PATH"
+          $env:LIB = "C:\gtk\lib;$env:LIB"
+          cargo build --release -p ipn-gui -p ipn-daemon -p ipn-cli
+          if ($LASTEXITCODE -ne 0) { throw "x86_64 build failed" }
+
+      - name: Build arm64 (cross: daemon + CLI on MSVC, GUI on gnullvm)
+        shell: pwsh
+        run: |
+          pwsh -File scripts\build-arm64.ps1
+          if ($LASTEXITCODE -ne 0) { throw "arm64 build failed" }
+
+      - name: Sign in to Azure again
+        # GitHub's OIDC assertion lives five minutes and the access token about
+        # an hour; a build long enough to outlive the token fails at signtool
+        # with an unreadable SignerSign() 0x80004005 when the CLI tries to
+        # refresh from a dead assertion. A fresh session right before signing
+        # is the whole fix; the early login above is what lets the probe fail
+        # fast.
+        if: env.SIGN_WINDOWS == 'true'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign, bundle and build both installers
+        shell: pwsh
+        # -SkipBuild: the binaries exist; build-msi.ps1 now signs the exes,
+        # bundles GTK, generates the license, runs wix and signs the MSI. Both
+        # arches, or neither — the updater will not fall back across them.
+        run: |
+          pwsh -File scripts\build-msi.ps1 -Arch x86_64 -SkipBuild
+          if ($LASTEXITCODE -ne 0) { throw "x86_64 MSI failed" }
+          pwsh -File scripts\build-msi.ps1 -Arch arm64 -SkipBuild
+          if ($LASTEXITCODE -ne 0) { throw "arm64 MSI failed" }
+
+      - name: Verify the bundles and the signatures
+        shell: pwsh
+        run: |
+          pwsh -File scripts\verify-bundle.ps1 -Dist dist\nullgate-windows-x86_64 -Arch x86_64
+          if ($LASTEXITCODE -ne 0) { throw "x86_64 bundle verification failed" }
+          pwsh -File scripts\verify-bundle.ps1 -Dist dist\nullgate-windows-arm64 -Arch arm64
+          if ($LASTEXITCODE -ne 0) { throw "arm64 bundle verification failed" }
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          foreach ($arch in "x86_64", "arm64") {
+            $msi = "target\wix\nullgate-$version-windows-$arch.msi"
+            if (-not (Test-Path $msi)) { throw "missing $msi" }
+            $sig = Get-AuthenticodeSignature $msi
+            Write-Host "$msi -> $($sig.Status) $($sig.SignerCertificate.Subject)"
+            if ($env:SIGN_WINDOWS -eq 'true' -and $sig.Status -ne 'Valid') { throw "$msi is not validly signed ($($sig.Status))" }
+          }
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows
+          path: target/wix/nullgate-*-windows-*.msi
+          if-no-files-found: error

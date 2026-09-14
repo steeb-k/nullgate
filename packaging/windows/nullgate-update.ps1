@@ -202,6 +202,19 @@ function Invoke-Update {
     Write-Log "downloading $($asset.name)"
     Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tmp -UseBasicParsing -Headers @{ 'User-Agent' = 'nullgate-update' }
 
+    # Never hand msiexec something we have not verified. The release MSIs are
+    # Authenticode-signed (Azure Trusted Signing); a download that is not is
+    # either a build that went out unsigned or not ours at all, and both must
+    # stay uninstalled. The failure is logged and the machine stays on the
+    # working version — the same posture as the missing-asset case above.
+    $sig = Get-AuthenticodeSignature -FilePath $tmp
+    if ($sig.Status -ne 'Valid') {
+        Write-Log "REFUSING $($asset.name): Authenticode status is '$($sig.Status)' (expected Valid); staying on $installed"
+        Remove-Item $tmp -ErrorAction SilentlyContinue
+        return
+    }
+    Write-Log "signature OK: $($sig.SignerCertificate.Subject)"
+
     # Close the tray GUI first (see the session-boundary note above), remembering
     # whether it was running and who to relaunch it as.
     $guiUser       = Get-ConsoleUser

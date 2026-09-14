@@ -1,0 +1,149 @@
+# A tag becomes a release.
+#
+# Pushing `v<version>` builds every platform (build.yml), gates on the same
+# checks ci.yml runs, and publishes ONE GitHub release with all five assets
+# attached in a single call — never create-then-upload, because the updaters
+# read `releases/latest` the moment it exists and a release missing an asset
+# strands that platform (the Windows updater will not cross architectures).
+#
+# Rehearsals: a `v<version>-test<N>` tag publishes a PRERELEASE, which every
+# updater and Obtainium ignore; `workflow_dispatch` with publish=false builds
+# the artifacts and publishes nothing. docs/releasing.md has the checklist.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'An existing tag to build and publish (leave empty to build the current ref without publishing).'
+        required: false
+        default: ''
+        type: string
+      publish:
+        description: 'Publish the GitHub release. Off builds artifacts only.'
+        required: false
+        default: true
+        type: boolean
+      sign:
+        description: 'Sign the artifacts. Off only for a rehearsal on a fork or before the secrets exist.'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: build + test + cargo-deny
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Install GTK4, libadwaita and D-Bus headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev libdbus-1-dev
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo build --workspace --locked --all-targets
+      - run: cargo test --workspace --locked
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: ""
+          manifest-path: ./Cargo.toml
+
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      sign: ${{ github.event_name == 'push' || inputs.sign }}
+      platforms: all
+      # The tag's source even when dispatched from a branch: the workflow comes
+      # from wherever it was dispatched (so it carries a CI fix), the code
+      # built is exactly what the tag points at.
+      ref: ${{ inputs.tag || github.ref }}
+    secrets: inherit
+
+  publish:
+    name: Publish the release
+    if: github.event_name == 'push' || (inputs.publish && inputs.tag != '')
+    needs: [gate, build]
+    runs-on: ubuntu-24.04
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+
+      - name: Version gate
+        id: release
+        # The tag is the authority. If it disagrees with Cargo.toml, or Android
+        # was not bumped (the literals in build.gradle.kts, the step everyone
+        # forgets), publishing would put a version behind a tag nobody expects
+        # or ship an APK that silently cannot update in place.
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          base="${tag#v}"; base="${base%%-*}"
+          [ "$base" = "$version" ] || { echo "::error::tag $tag does not match Cargo.toml version $version"; exit 1; }
+          vname="$(sed -n 's/^\s*versionName = "\(.*\)"/\1/p' android/app/build.gradle.kts)"
+          vcode="$(sed -n 's/^\s*versionCode = \([0-9]*\)/\1/p' android/app/build.gradle.kts)"
+          IFS=. read -r maj min pat <<< "$version"
+          want=$((maj * 10000 + min * 100 + pat))
+          [ "$vname" = "$version" ] || { echo "::error::android versionName $vname != $version"; exit 1; }
+          [ "$vcode" = "$want" ] || { echo "::error::android versionCode $vcode != $want (MAJOR*10000+MINOR*100+PATCH)"; exit 1; }
+          case "$tag" in *-*) prerelease=true ;; *) prerelease=false ;; esac
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Collect exactly the five assets
+        run: |
+          v="${{ steps.release.outputs.version }}"
+          mkdir -p dist
+          for name in "nullgate-$v-windows-x86_64.msi" "nullgate-$v-windows-arm64.msi" \
+                      "nullgate-$v-linux-x86_64.tar.gz" "nullgate-$v-macos-universal.tar.gz" \
+                      "nullgate-$v-android.apk"; do
+            f="$(find artifacts -type f -name "$name" | head -1)"
+            [ -n "$f" ] || { echo "::error::missing asset $name — a platform job did not produce it"; exit 1; }
+            cp "$f" dist/
+          done
+          ls -la dist
+
+      - name: Release notes from the changelog
+        run: |
+          v="${{ steps.release.outputs.version }}"
+          # The `## [<version>]` section of CHANGELOG.md, or a one-liner.
+          awk -v v="$v" '
+            $0 ~ "^## \\["v"\\]" {on=1; next}
+            on && /^## \[/ {exit}
+            on {print}
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then echo "Nullgate $v." > notes.md; fi
+          cat notes.md
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=(--verify-tag --title "v${{ steps.release.outputs.version }}" --notes-file notes.md)
+          if [ "${{ steps.release.outputs.prerelease }}" = "true" ]; then
+            flags+=(--prerelease)
+          else
+            flags+=(--latest)
+          fi
+          gh release create "${{ steps.release.outputs.tag }}" "${flags[@]}" dist/*

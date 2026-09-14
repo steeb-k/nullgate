@@ -159,9 +159,33 @@ daemon_bootout() { launchctl bootout "system/$APP_ID.daemon" >/dev/null 2>&1 || 
 update_bootout() { launchctl bootout "system/$APP_ID.update" >/dev/null 2>&1 || true; }
 gui_bootout()    { local u; u="$(console_uid)"; [ -n "$u" ] && launchctl bootout "gui/$u/$APP_ID.gui" >/dev/null 2>&1 || true; }
 
+# The Team ID in a bundle's signature, or "adhoc" for an ad-hoc seal, or "" if
+# it is not signed at all.
+team_of() {
+  local out; out="$(codesign -dv --verbose=2 "$1" 2>&1)" || { printf ''; return; }
+  if printf '%s' "$out" | grep -q '^Signature=adhoc'; then printf 'adhoc'; return; fi
+  printf '%s' "$out" | sed -n 's/^TeamIdentifier=//p' | head -n1
+}
+# Refuse to install a bundle that is broken or signed by someone else. The
+# release bundles are Developer-ID signed and notarized; an installed copy
+# signed by team X must only ever be replaced by one signed by team X. A
+# machine that installed an older ad-hoc build accepts either (there is
+# nothing to compare against) — which is how it migrates to the signed builds.
+verify_bundle() {
+  local new="$1" new_team old_team
+  codesign --verify --deep --strict "$new" 2>/dev/null || die "refusing $APP_NAME: its code signature does not verify"
+  new_team="$(team_of "$new")"
+  old_team=""; [ -d "$APP_DST" ] && old_team="$(team_of "$APP_DST")"
+  case "$old_team" in
+    ""|adhoc) ;;   # nothing trustworthy to compare against
+    *) [ "$new_team" = "$old_team" ] || die "refusing $APP_NAME: signed by team '${new_team:-none}', the installed app is by '$old_team'" ;;
+  esac
+  log "signature OK (team: ${new_team:-none})"
+}
 apply_tree() {
   local src="$1"
   [ -d "$src/$APP_NAME" ] || die "release tree '$src' has no $APP_NAME"
+  verify_bundle "$src/$APP_NAME"
 
   log "stopping services"
   daemon_bootout

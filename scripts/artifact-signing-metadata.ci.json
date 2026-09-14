@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "The Trusted Signing account, in the form CI needs.",
+    "",
+    "The copy at the repository root is git-ignored: it is the file a developer",
+    "points at their own `az login` session. A runner has no such file, so it",
+    "needs one that is committed. The account and profile names are not secrets;",
+    "the authorisation to use them is (an Azure federated credential trusting",
+    "repo:steeb-k/nullgate:environment:release, see docs/ci-release.md).",
+    "",
+    "`azure/login` authenticates with a GitHub OIDC token and then runs `az login`,",
+    "so what a runner ends up holding is an Azure CLI session - exactly like a",
+    "laptop. It does NOT set the environment that EnvironmentCredential or",
+    "WorkloadIdentityCredential read, so those stay excluded along with everything",
+    "interactive: a credential type that can open a browser has no business in a",
+    "non-interactive job, where it would hang until the step times out."
+  ],
+  "Endpoint": "https://wus.codesigning.azure.net/",
+  "CodeSigningAccountName": "skz-code",
+  "CertificateProfileName": "ddrx-pcsvc",
+  "ExcludeCredentials": [
+    "EnvironmentCredential",
+    "WorkloadIdentityCredential",
+    "ManagedIdentityCredential",
+    "SharedTokenCacheCredential",
+    "VisualStudioCredential",
+    "VisualStudioCodeCredential",
+    "AzurePowerShellCredential",
+    "AzureDeveloperCliCredential",
+    "InteractiveBrowserCredential"
+  ]
+}

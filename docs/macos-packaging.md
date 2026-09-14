@@ -98,10 +98,18 @@ Or from the tarball: `./nullgatectl --install`. `nullgatectl` uses `sudo` and:
 Manage: `nullgatectl --status`, `nullgatectl --update [--check]`, `nullgatectl --uninstall [--purge]`.
 
 ## Signing / notarization
-The app is **ad-hoc signed only** (no Developer ID, no notarization). Installing via the
-`curl … | sh` command or the tarball does **not** set the `com.apple.quarantine` xattr, so
-Gatekeeper doesn't block it. (Distributing the raw `.app` via a browser download *would* be
-quarantined — use the installer command.)
+Release bundles are **Developer-ID signed, notarized and stapled** by CI (see
+[ci-release.md](ci-release.md)): `scripts/package-macos.sh` signs every Mach-O with the identity in
+`CODESIGN_IDENTITY` (`--timestamp --options runtime`, the two things notarization checks beyond the
+signature), seals and verifies the bundle, then with `NULLGATE_NOTARIZE=1` hands it to
+`scripts/notarize-macos.sh`, which submits it, prints the notary log if rejected, and staples the
+ticket to the `.app` before it is tarred. `nullgatectl` verifies a downloaded bundle
+(`codesign --verify --deep --strict`) and refuses one whose **Team ID** differs from the installed
+app's; a machine on an older ad-hoc build accepts either, which is how it migrates.
+
+Without `CODESIGN_IDENTITY` the script signs **ad-hoc** (a dev box). That still installs via the
+`curl … | sh` command or `nullgatectl` — neither sets `com.apple.quarantine` — but a browser download
+of an ad-hoc `.app` is refused by Gatekeeper on first launch.
 
 ## Auto-update
 `…Nullgate.update.plist` (root LaunchDaemon; daily at 13:00 + at load) runs `nullgatectl --update`: compares

@@ -135,6 +135,10 @@ If you'd rather *never* touch the public relays, switch the policy to **my relay
 devices without your relay genuinely cannot reach this one, which is the point. Changes are saved
 immediately and applied to the running service; the app tells you if it couldn't apply one.
 
+Updates are checked before they are installed: on Windows the installer must carry a valid
+code signature, and on macOS the app must be signed by the same developer as the one already
+installed, so a tampered or unsigned download is never applied.
+
 The background service keeps running and starts with your device. If it ever stops unexpectedly —
 or if its memory use ever climbs too high (a safeguard that should no longer trigger now that the
 networking-library bug behind it is fixed) — it restarts itself automatically, and it keeps a log (including the reason for any crash

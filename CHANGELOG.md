@@ -5,6 +5,21 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 
+### Added
+- **Releases are built and published by CI from a tag.** `.github/workflows/release.yml` builds
+  the Windows x86_64 + ARM64 MSIs (signed with Azure Trusted Signing over OIDC), the Linux tarball,
+  the macOS universal tarball (Developer-ID signed, **notarized and stapled** — a first), and the
+  release-keystore-signed Android APK, then publishes one GitHub release with all five assets in a
+  single call after a version gate (tag == workspace version == Android `versionName`/`versionCode`).
+  `v<ver>-test<N>` tags publish a prerelease the updaters ignore, for rehearsals. Modeled on
+  `steeb-k/commune`'s pipeline. See `docs/ci-release.md` and `docs/releasing.md`.
+### Changed
+- **Both desktop updaters now verify what they download.** Windows refuses an MSI whose Authenticode
+  status is not `Valid`; macOS `nullgatectl` refuses a bundle that fails `codesign --verify` or whose
+  Team ID differs from the installed app's (an older ad-hoc install accepts either, so it migrates).
+- `scripts/package-macos.sh` signs with `CODESIGN_IDENTITY` when set (hardened runtime + timestamp)
+  and notarizes with `NULLGATE_NOTARIZE=1`; ad-hoc remains the default on a dev box.
+
 ## [0.7.1] - 2026-09-13
 
 ### Fixed
