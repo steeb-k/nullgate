@@ -408,3 +408,6 @@ added.
 - Don't run the GUI as root/sudo on Linux (it loses the display); privilege belongs to the
   daemon (via `setcap`/service), not the GUI.
 - Commit/push only when asked. Releases are `gh release` uploads of locally-built artifacts.
+- **No AI attribution anywhere**: no `Co-Authored-By`, `Claude-Session`, "Generated with" lines or
+  session links in commits, PRs, tags, release notes, or files. Commits carry the maintainer's
+  identity only. If one slips in, rewrite the history to remove it.
