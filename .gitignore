@@ -27,3 +27,6 @@
 # OS / editor cruft
 .DS_Store
 Thumbs.db
+
+# Claude Code per-machine permission overrides
+.claude/settings.local.json
