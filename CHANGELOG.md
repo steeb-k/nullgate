@@ -5,6 +5,8 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-13
+
 ### Fixed
 - **The daemon's runaway memory (and the restart loop it caused) — properly this time.** Since
   0.2.3 the daemon has restarted itself whenever resident memory passed 1 GB, blamed on iroh's
