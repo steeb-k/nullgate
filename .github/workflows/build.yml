@@ -374,7 +374,7 @@ jobs:
           cargo build --release -p ipn-gui -p ipn-daemon -p ipn-cli
           if ($LASTEXITCODE -ne 0) { throw "x86_64 build failed" }
 
-      - name: Build arm64 (cross: daemon + CLI on MSVC, GUI on gnullvm)
+      - name: "Build arm64 (cross: daemon + CLI on MSVC, GUI on gnullvm)"
         shell: pwsh
         run: |
           pwsh -File scripts\build-arm64.ps1
