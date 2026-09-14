@@ -90,6 +90,13 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Host build deps
+        # Gradle also builds ipn-mobile for the HOST so uniffi-bindgen can read
+        # it; on Linux that pulls keyring -> libdbus-sys, which needs the D-Bus
+        # headers exactly as ci.yml does.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
       - name: Android targets and cargo-ndk
         run: |
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
