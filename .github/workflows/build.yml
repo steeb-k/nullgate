@@ -78,9 +78,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      # r27c — the version docs/android-packaging.md pins for local builds. This
-      # .so is shipped, so it comes out of the same toolchain as a local build.
-      NDK_VERSION: 27.2.12479543
+      # r27d, the image's default. Local builds pin r27c (docs/android-packaging.md),
+      # but Google has withdrawn r27c from the sdkmanager repository, so it cannot be
+      # installed on a runner; r27d is the same LTS line and the image already has it.
+      NDK_VERSION: 27.3.13750724
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -93,9 +94,12 @@ jobs:
         run: |
           rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
           cargo install --locked cargo-ndk
-      - name: Install the pinned NDK
+      - name: Pin the NDK
         run: |
-          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" > /dev/null
+          if [ ! -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" ]; then
+            yes 2>/dev/null | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION" > /dev/null
+          fi
+          test -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" || { echo "::error::NDK $NDK_VERSION is not installed and sdkmanager could not fetch it"; exit 1; }
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:

@@ -31,6 +31,11 @@ on:
         required: false
         default: true
         type: boolean
+      platforms:
+        description: 'Which platforms to build: all, or a space-separated subset of linux windows macos android. Anything but all disables publishing.'
+        required: false
+        default: all
+        type: string
 
 permissions:
   contents: write
@@ -66,7 +71,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       sign: ${{ github.event_name == 'push' || inputs.sign }}
-      platforms: all
+      platforms: ${{ inputs.platforms || 'all' }}
       # The tag's source even when dispatched from a branch: the workflow comes
       # from wherever it was dispatched (so it carries a CI fix), the code
       # built is exactly what the tag points at.
@@ -75,7 +80,7 @@ jobs:
 
   publish:
     name: Publish the release
-    if: github.event_name == 'push' || (inputs.publish && inputs.tag != '')
+    if: github.event_name == 'push' || (inputs.publish && inputs.tag != '' && (inputs.platforms == 'all' || inputs.platforms == ''))
     needs: [gate, build]
     runs-on: ubuntu-24.04
     environment: release

@@ -36,6 +36,8 @@ VpnService (TUN fd) ┘        │  block_on
 ## Toolchain
 
 - **JDK 17** (`JAVA_HOME`), **Android SDK 35** (`ANDROID_HOME`), **NDK r27c** (`ANDROID_NDK_HOME`).
+  (CI builds with the runner image's NDK r27d, `27.3.13750724`: Google withdrew r27c from the
+  sdkmanager repository, and r27d is the same LTS line — see `.github/workflows/build.yml`.)
 - `cargo install cargo-ndk`; `rustup target add aarch64-linux-android armv7-linux-androideabi
   x86_64-linux-android`.
 - On Windows, turn **Smart App Control off** (it blocks cargo build scripts: os error 4551).
