@@ -80,9 +80,19 @@ the same credentials, the Android keystore is Nullgate's own):
 | `MACOS_NOTARY_APPLE_ID`, `MACOS_NOTARY_PASSWORD`, `MACOS_NOTARY_TEAM_ID` | app-specific password form (or `MACOS_NOTARY_KEY`, `_KEY_ID`, `_ISSUER_ID` for an API key) |
 | `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` | the keystore behind `android/keystore.properties` |
 
-Plus: the `release` environment (`gh api -X PUT repos/steeb-k/nullgate/environments/release`;
-add yourself as a required reviewer if a release should wait for approval), and the two federated
-credentials on the Azure app registration for the nullgate subject.
+**Already done (2026-09-13):** the `release` environment exists (auto-created by the first run;
+add yourself as a required reviewer if a release should wait for approval), and the Azure app
+registration `commune-ci-signing` (client id `bbcfe359-662c-4b21-9828-b8642c55613a`, tenant
+`249fb121-…`, subscription `f2204534-…`) carries both federated credentials for nullgate —
+`github-nullgate-release-environment` and `…-ids` — beside commune's, so one app signs both
+projects with the `skz-code` / `ddrx-pcsvc` profile. The Android keystore is the one at
+`iRohDP\android\keystore\nullgate-release.jks` on the Windows VM; the macOS certificate and
+notary credentials live with the Mac.
+
+**Rehearsal 2026-09-13** (`workflow_dispatch`, unsigned, unpublished): gate, Linux, macOS universal
+and Windows x86_64 + ARM64 all passed on hosted runners at the first attempt that reached them;
+Android needed two fixes (r27c withdrawn from sdkmanager → the image's r27d; `gradlew` lacked its
+exec bit in git).
 
 ## Rollout
 1. `gh workflow run release.yml -f publish=false -f sign=false` — every platform builds, nothing
