@@ -1738,8 +1738,24 @@ fn build_ui(app: &adw::Application, net: Net, rx: async_channel::Receiver<UiMsg>
 /// appears. The duplicate-window problem that `open` would have solved is instead
 /// handled by [`macos_single_instance`].
 pub(crate) fn launch_gui() {
-    if let Ok(exe) = std::env::current_exe() {
+    if let Some(exe) = spawnable_exe() {
         let _ = std::process::Command::new(exe).spawn();
+    }
+}
+
+/// This binary's path, for spawning a fresh copy of it. After an in-place upgrade
+/// (dpkg, rpm, pacman and `nullgatectl` all replace the file by rename) Linux reports
+/// a running image as `<path> (deleted)`, which names no file, while the new binary
+/// sits at `<path>`. Without this the long-lived tray agent could neither relaunch
+/// onto the new version nor open the window: the tray vanished until next login.
+fn spawnable_exe() -> Option<PathBuf> {
+    std::env::current_exe().ok().map(strip_deleted_suffix)
+}
+
+fn strip_deleted_suffix(exe: PathBuf) -> PathBuf {
+    match exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(live) => PathBuf::from(live),
+        None => exe,
     }
 }
 
@@ -1750,7 +1766,7 @@ pub(crate) fn launch_gui() {
 /// to it and exits, making this safe to call unconditionally. This is how the tray reliably appears whenever Nullgate
 /// is used, without the user ever having to launch the agent by hand.
 pub(crate) fn spawn_agent() {
-    if let Ok(exe) = std::env::current_exe() {
+    if let Some(exe) = spawnable_exe() {
         let _ = std::process::Command::new(exe).arg("--agent").spawn();
     }
 }
@@ -1760,7 +1776,7 @@ pub(crate) fn spawn_agent() {
 /// GApplication doesn't collide with the outgoing instance. Linux/macOS only.
 #[cfg(not(windows))]
 fn relaunch_after_exit(extra_arg: Option<&str>) {
-    if let Ok(exe) = std::env::current_exe() {
+    if let Some(exe) = spawnable_exe() {
         let flag = extra_arg.map(|a| format!(" {a}")).unwrap_or_default();
         let script = format!(
             "while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; exec \"{exe}\"{flag}",
@@ -3958,6 +3974,20 @@ fn fmt_last_seen(ms: u64) -> String {
 #[cfg(test)]
 mod mode_tests {
     use super::*;
+
+    /// A binary replaced under a running process is reported with a ` (deleted)`
+    /// suffix; the relaunch must target the path the new binary lives at.
+    #[test]
+    fn replaced_exe_relaunches_from_its_path() {
+        assert_eq!(
+            strip_deleted_suffix(PathBuf::from("/usr/bin/nullgate (deleted)")),
+            PathBuf::from("/usr/bin/nullgate")
+        );
+        assert_eq!(
+            strip_deleted_suffix(PathBuf::from("/usr/local/bin/nullgate")),
+            PathBuf::from("/usr/local/bin/nullgate")
+        );
+    }
 
     fn args(extra: &[&str]) -> Vec<String> {
         // argv[0] is always the program path; extra flags follow.
