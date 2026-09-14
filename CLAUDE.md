@@ -82,14 +82,18 @@ Packaging + releases: see `docs/releasing.md` (+ `windows-/linux-/macos-/android
 0.1.0 we ship real installers with auto-update: **code-signed Windows MSIs** for x86_64 **and
 ARM64** (`scripts/build-msi.ps1 [-Arch arm64]`, Azure Trusted Signing — ARM64 is cross-built on the
 x86_64 box; ship both or neither, as the updater won't cross architectures), a **Linux**
-system-service tarball (`scripts/package-linux.sh` + `packaging/linux/nullgatectl`), and a **macOS**
+system-service tarball (`scripts/package-linux.sh` + `packaging/linux/nullgatectl`) plus a `.deb` and
+`.rpm` built from its staged tree by nfpm (`scripts/package-linux-native.sh`, `packaging/linux/nfpm.yaml`)
+and an Arch `.pkg.tar.zst` plus an AUR source package (`packaging/arch/PKGBUILD`, pushed by hand via
+`scripts/aur-prepare.sh`); the deb/rpm/Arch assets feed signed apt/dnf/zypper/pacman repos on
+apps.kznjk.com, which a timer on that host pulls from `releases/latest` (nothing here pushes), and a **macOS**
 universal `.app` tarball
 (`scripts/setup-conda-macos.sh` once to build the conda-forge GTK env, then
 `scripts/package-macos.sh`, built on a Mac). Releases are **built and published by CI from a tag** to the **public** `steeb-k/nullgate` repo;
 the in-product updaters + `install.sh` read its `releases/latest`. `docs/ci-release.md` is the
 authority: `.github/workflows/release.yml` (tag push / dispatch) calls the reusable `build.yml`
-(linux, android, macos, windows jobs), gates on the same checks as `ci.yml`, and publishes **one**
-release with all five assets in a single `gh release create`. Signing happens in CI: Windows via
+(linux, arch, android, macos, windows jobs), gates on the same checks as `ci.yml`, and publishes **one**
+release with all eight assets in a single `gh release create`. Signing happens in CI: Windows via
 Azure Trusted Signing over OIDC (`environment: release` is the federated-credential subject, not a
 gate), macOS via a Developer ID from secrets + notarization + stapling, Android via the release
 keystore. The git-ignored `artifact-signing-metadata.json` is for a laptop's own `az login`;
@@ -384,6 +388,23 @@ added.
   the card; they are what caught that a *pure* vivid yellow border is ~1.5:1 on a white card, which
   is why Yellow is a gold. Note `.ng-action` in `style.css` deliberately sets **no `border`** — the
   generated color classes own it, and a `border: none` there would flatten every button.
+- **Native Linux packages (.deb/.rpm/AUR) are a second install *mode*, not just a second format.**
+  They install to `/usr` and let the package manager own upgrades, so they ship **no update timer**,
+  and `nullgatectl` refuses `--install/--update/--uninstall` when `/usr/bin/nullgate-daemon` exists
+  without `/usr/local/bin/nullgate-daemon` (`pkg_managed`). They must **never coexist** with a
+  tarball install: `/usr/local/bin` wins on `PATH` and `/etc/systemd/system` shadows the packaged
+  unit, so the deb/rpm pre-install aborts and the AUR package warns. Three traps found in testing:
+  (1) a replaced binary's `current_exe()` is `<path> (deleted)` on Linux, so every self-spawn in the
+  GUI goes through `spawnable_exe()` — without it the tray agent could not relaunch after an upgrade
+  or open the window, and the tray vanished until next login; (2) the PKGBUILD needs
+  `options=('!lto')`, because makepkg's GCC LTO turns `ring`'s C objects into bitcode that rustc's
+  `lld` cannot link; (3) dpkg reports a reinstall after `apt remove` as an upgrade, so `postrm`
+  leaves `/var/lib/nullgate/.package-removed` for `postinst` to re-enable the service. Keep
+  `nfpm.yaml` and the PKGBUILD's `package()` installing the same file set. The `.deb`/`.rpm` also
+  add the apps.kznjk.com repository (`packaging/linux/repo/`), whose files must stay byte-identical
+  to the host's `packages/static/` copies; the repositories are signed by their **own** key
+  (`07E6…9F8D`), never a subkey of the flatpak key, because gpg would sign flatpak content with
+  the newest subkey. Details: `docs/linux-packaging.md`.
 - **GTK on Windows** comes from gvsbuild at `C:\gtk`; `pkg-config` must resolve `gtk4` and
   `libadwaita-1`. On Linux, install the `-dev` packages.
 - **The Windows ARM64 build is two ABIs in one bundle, and that is not a mistake to tidy up.**

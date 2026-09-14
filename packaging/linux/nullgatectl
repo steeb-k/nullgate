@@ -88,6 +88,36 @@ need_root() {
   fi
 }
 
+# A .deb/.rpm/Arch package installs to /usr/bin and owns its upgrades and removal;
+# this script manages only its own /usr/local install. The two never coexist (the
+# packages refuse to install over a tarball install), so /usr/bin alone means a
+# package manager is in charge.
+pkg_managed() { [ -x /usr/bin/nullgate-daemon ] && [ ! -e "$BIN_DIR/nullgate-daemon" ]; }
+
+pkg_hint() {
+  # The .deb and .rpm add the apps.kznjk.com repository when installed, so the
+  # system's normal upgrade picks up new releases.
+  if have pacman; then
+    printf '%s\n' "update with: sudo pacman -Syu (the [kznjk] repository) or your AUR helper; remove with: sudo pacman -R nullgate"
+  elif have apt-get; then
+    printf '%s\n' "update with: sudo apt update && sudo apt upgrade; remove with: sudo apt remove nullgate"
+  elif have dnf; then
+    printf '%s\n' "update with: sudo dnf upgrade; remove with: sudo dnf remove nullgate"
+  elif have zypper; then
+    printf '%s\n' "update with: sudo zypper update; remove with: sudo zypper remove nullgate"
+  else
+    printf '%s\n' "update or remove it with your package manager"
+  fi
+}
+
+refuse_if_pkg_managed() {
+  pkg_managed || return 0
+  printf '%s\n' "nullgatectl: Nullgate was installed as a system package, so nullgatectl does not manage it." >&2
+  pkg_hint | sed 's/^/nullgatectl: /' >&2
+  printf '%s\n' "nullgatectl: (nullgatectl --update --check still reports whether a newer release exists.)" >&2
+  exit 1
+}
+
 version_gt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$2" ]; }
 installed_version() { have nullgate-daemon && nullgate-daemon --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1; }
 
@@ -198,7 +228,24 @@ launch_agent_for_user() {
   fi
 }
 
+# The tray agent's login autostart entry. Current release trees carry it (the
+# same file the native packages ship); derive it from the app-menu entry for an
+# older tree. NoDisplay so it doesn't show as a second app-menu entry.
+install_autostart() {
+  local src="$1"
+  install -d -m 0755 "$AUTOSTART_DIR"
+  if [ -f "$src/etc/xdg/autostart/$APP_ID.desktop" ]; then
+    install -m 0644 "$src/etc/xdg/autostart/$APP_ID.desktop" "$AUTOSTART_DIR/$APP_ID.desktop"
+  else
+    sed -e "s|^Exec=.*|Exec=nullgate --agent|" -e "s|^NoDisplay=.*||" \
+        "$APPS_DIR/$APP_ID.desktop" > "$AUTOSTART_DIR/$APP_ID.desktop"
+    echo "NoDisplay=true" >> "$AUTOSTART_DIR/$APP_ID.desktop"
+    echo "X-GNOME-Autostart-enabled=true" >> "$AUTOSTART_DIR/$APP_ID.desktop"
+  fi
+}
+
 cmd_install() {
+  refuse_if_pkg_managed
   need_root "--install" "$@"
   banner
   local auto=1 gui=1 a
@@ -231,15 +278,10 @@ cmd_install() {
 
   systemctl daemon-reload || true
   if [ "$gui" = 1 ] && [ -f "$APPS_DIR/$APP_ID.desktop" ]; then
-    install -d -m 0755 "$AUTOSTART_DIR"
     # Autostart the lightweight tray agent (`nullgate --agent`), not the full GUI:
     # it owns the tray icon + notifications and opens the GUI window on demand, so
-    # closing/crashing the GUI no longer drops the tray. NoDisplay so it doesn't
-    # show as a second app-menu entry.
-    sed -e "s|^Exec=.*|Exec=nullgate --agent|" -e "s|^NoDisplay=.*||" \
-        "$APPS_DIR/$APP_ID.desktop" > "$AUTOSTART_DIR/$APP_ID.desktop"
-    echo "NoDisplay=true" >> "$AUTOSTART_DIR/$APP_ID.desktop"
-    echo "X-GNOME-Autostart-enabled=true" >> "$AUTOSTART_DIR/$APP_ID.desktop"
+    # closing/crashing the GUI no longer drops the tray.
+    install_autostart "$tree"
     log "tray agent will start at login"
     launch_agent_for_user   # ...and now, so the tray shows without a re-login
   fi
@@ -253,6 +295,7 @@ cmd_install() {
 cmd_update() {
   local check=0 a
   for a in "$@"; do case "$a" in --check) check=1 ;; *) die "unknown flag for --update: $a" ;; esac; done
+  [ "$check" = 1 ] || refuse_if_pkg_managed
 
   local inst latest
   inst="$(installed_version || true)"
@@ -267,12 +310,17 @@ cmd_update() {
   banner
   local tree; tree="$(fetch_latest_tree)"
   apply_tree "$tree"
-  # If the tray autostart is installed, restart the agent onto the new binary now.
-  [ -f "$AUTOSTART_DIR/$APP_ID.desktop" ] && launch_agent_for_user
+  # If the tray autostart is installed, refresh its entry and restart the agent
+  # onto the new binary now.
+  if [ -f "$AUTOSTART_DIR/$APP_ID.desktop" ]; then
+    install_autostart "$tree"
+    launch_agent_for_user
+  fi
   log "updated to $latest"
 }
 
 cmd_uninstall() {
+  refuse_if_pkg_managed
   need_root "--uninstall" "$@"
   banner
   local purge=0 a
@@ -296,6 +344,9 @@ cmd_uninstall() {
 
 cmd_status() {
   printf '%-10s %s\n' "installed:" "$(installed_version || echo none)"
+  if pkg_managed; then printf '%-10s %s\n' "managed:" "package manager"
+  elif [ -e "$BIN_DIR/nullgate-daemon" ]; then printf '%-10s %s\n' "managed:" "nullgatectl"
+  fi
   printf '%-10s %s\n' "latest:"    "$(latest_version 2>/dev/null || echo '?')"
   printf '%-10s %s / %s\n' "daemon:" "$(systemctl is-active nullgate-daemon.service 2>/dev/null || echo inactive)" "$(systemctl is-enabled nullgate-daemon.service 2>/dev/null || echo disabled)"
   printf '%-10s %s\n' "timer:"     "$(systemctl is-enabled nullgate-update.timer 2>/dev/null || echo disabled)"

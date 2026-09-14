@@ -1,0 +1,74 @@
+# Maintainer: steeb-k <skaznak at protonmail dot com>
+#
+# Source of truth for the AUR package `nullgate`. CI builds it on every release
+# (with pkgver forced to the workspace version and the source replaced by the
+# tagged tree); scripts/aur-prepare.sh copies it into an AUR clone, sets pkgver,
+# fills in the real checksum and writes .SRCINFO. Keep it in step with the file
+# set in packaging/linux/nfpm.yaml.
+pkgname=nullgate
+pkgver=0.7.1
+pkgrel=1
+pkgdesc='Private peer-to-peer network for your own devices, over iroh'
+arch=('x86_64')
+url='https://github.com/steeb-k/nullgate'
+license=('GPL-3.0-or-later')
+depends=('bash' 'dbus' 'gdk-pixbuf2' 'glib2' 'glibc' 'gtk4' 'hicolor-icon-theme' 'libadwaita' 'libgcc')
+makedepends=('cargo' 'pkgconf')
+backup=('etc/xdg/autostart/io.github.steeb_k.Nullgate.desktop')
+install=nullgate.install
+# makepkg's LTO compiles C dependencies (ring) to GCC LTO bitcode, which rustc's
+# lld linker cannot read: the link fails on every ring_core_* symbol.
+options=('!lto')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+# scripts/aur-prepare.sh replaces this with the tag archive's sum in the AUR copy.
+sha256sums=('SKIP')
+
+_appid=io.github.steeb_k.Nullgate
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release -p ipn-daemon -p ipn-gui -p ipn-cli
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # The engine's unit tests; TUN creation needs privilege a build has not got.
+  NULLGATE_DISABLE_TUN=1 cargo test --frozen --release -p ipn-core
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+
+  local bin
+  for bin in nullgate nullgate-daemon nullgate-cli; do
+    install -Dm0755 "target/release/$bin" "$pkgdir/usr/bin/$bin"
+  done
+  # Kept for --status; it refuses to manage a package-installed copy.
+  install -Dm0755 packaging/linux/nullgatectl "$pkgdir/usr/bin/nullgatectl"
+
+  # The committed unit names the tarball install's /usr/local/bin.
+  install -dm0755 "$pkgdir/usr/lib/systemd/system"
+  sed 's|/usr/local/bin/|/usr/bin/|g' packaging/linux/nullgate-daemon.service \
+    > "$pkgdir/usr/lib/systemd/system/nullgate-daemon.service"
+  chmod 0644 "$pkgdir/usr/lib/systemd/system/nullgate-daemon.service"
+
+  install -Dm0644 "packaging/linux/$_appid.Agent.desktop" "$pkgdir/etc/xdg/autostart/$_appid.desktop"
+  install -Dm0644 "packaging/linux/$_appid.desktop" "$pkgdir/usr/share/applications/$_appid.desktop"
+  install -Dm0644 "packaging/linux/$_appid.metainfo.xml" "$pkgdir/usr/share/metainfo/$_appid.metainfo.xml"
+
+  local size
+  for size in 16 32 64 128 256 512; do
+    install -Dm0644 "img/nullgate-icon-$size.png" \
+      "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/$_appid.png"
+  done
+}

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Nullgate
+Comment=Nullgate tray icon and notifications
+Exec=nullgate --agent
+# A native package's autostart entry is a config file, so it can outlive the
+# package (apt remove keeps it). TryExec makes a leftover entry inert.
+TryExec=nullgate
+Icon=io.github.steeb_k.Nullgate
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

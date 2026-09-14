@@ -19,7 +19,7 @@ on:
         default: true
         type: boolean
       platforms:
-        description: 'Which platforms to build: all, or a space-separated subset of linux windows macos android.'
+        description: 'Which platforms to build: all, or a space-separated subset of linux arch windows macos android.'
         required: false
         default: all
         type: string
@@ -41,7 +41,7 @@ env:
 jobs:
   linux:
     if: inputs.platforms == 'all' || contains(format(' {0} ', inputs.platforms), ' linux ')
-    name: Linux tarball
+    name: Linux tarball, .deb and .rpm
     # Deliberately the OLDEST image that can build the GUI (GTK 4.14 satisfies
     # the gtk4 crate's v4_10 feature; 22.04's GTK 4.6 cannot). The tarball binds
     # the target's glibc to this image's (2.39), so moving it forward raises the
@@ -62,14 +62,100 @@ jobs:
           shared-key: linux-release
       - name: Build and package
         run: bash scripts/package-linux.sh
-      - name: Check the asset name
+      - name: Install nfpm
+        # A pinned release checked against the sha256 from its checksums.txt,
+        # rather than a third-party action.
+        env:
+          NFPM_VERSION: 2.47.0
+          NFPM_SHA256: 0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783
+        run: |
+          curl -fsSLo /tmp/nfpm.tar.gz "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          echo "${NFPM_SHA256}  /tmp/nfpm.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/nfpm.tar.gz -C /usr/local/bin nfpm
+          nfpm --version | tail -n 4
+      - name: Build the .deb and .rpm
+        run: bash scripts/package-linux-native.sh
+      - name: Check the asset names
         run: |
           version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          test -f "dist/nullgate-$version-linux-x86_64.tar.gz" || { echo "::error::no dist/nullgate-$version-linux-x86_64.tar.gz"; ls -la dist; exit 1; }
+          for f in "nullgate-$version-linux-x86_64.tar.gz" "nullgate_$version-1_amd64.deb" "nullgate-$version-1.x86_64.rpm"; do
+            test -f "dist/$f" || { echo "::error::no dist/$f"; ls -la dist; exit 1; }
+          done
+      - name: Smoke-test the .deb under systemd
+        # The runner is a real systemd host, so this exercises what a container
+        # cannot: the postinst enabling and starting the daemon, and the prerm
+        # stopping and disabling it again.
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          sudo apt-get install -y "./dist/nullgate_$version-1_amd64.deb"
+          for _ in $(seq 1 15); do systemctl is-active --quiet nullgate-daemon && break; sleep 1; done
+          sleep 5
+          systemctl is-enabled nullgate-daemon
+          systemctl is-active nullgate-daemon || { sudo journalctl -u nullgate-daemon --no-pager | tail -50; exit 1; }
+          [ "$(systemctl show -p NRestarts --value nullgate-daemon)" = 0 ] || { sudo journalctl -u nullgate-daemon --no-pager | tail -50; exit 1; }
+          [ "$(nullgate-daemon --version)" = "nullgate-daemon $version" ]
+          grep -qx 'ExecStart=/usr/bin/nullgate-daemon run' /usr/lib/systemd/system/nullgate-daemon.service
+          if nullgatectl --update; then echo "::error::nullgatectl managed a package install"; exit 1; fi
+          # The package configures the apps.kznjk.com repository (conffiles).
+          grep -qx 'URIs: https://apps.kznjk.com/deb' /etc/apt/sources.list.d/kznjk.sources
+          test -s /etc/apt/keyrings/kznjk-packages.asc
+          sudo apt-get remove -y nullgate
+          if systemctl is-active --quiet nullgate-daemon; then echo "::error::daemon still running after removal"; exit 1; fi
+          test ! -e /usr/bin/nullgate-daemon
+      - name: Smoke-test the .rpm on Fedora
+        # No systemd in the container: this proves the dependencies resolve on a
+        # current Fedora and that every scriptlet tolerates a host without it.
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          docker run --rm -e V="$version" -v "$PWD/dist:/dist:ro" registry.fedoraproject.org/fedora:latest bash -euxc '
+            dnf install -y "/dist/nullgate-$V-1.x86_64.rpm"
+            rpm -V nullgate
+            [ "$(nullgate-daemon --version)" = "nullgate-daemon $V" ]
+            ldd /usr/bin/nullgate /usr/bin/nullgate-daemon | { ! grep "not found"; }
+            if nullgatectl --update; then exit 1; fi
+            [ "$(cat /usr/share/nullgate/repo/kznjk.repo)" = "$(cat /etc/yum.repos.d/kznjk.repo)" ]
+            # rpm -e, not dnf remove: dnf would first refresh the repo just added.
+            rpm -e nullgate
+            test ! -e /usr/bin/nullgate-daemon
+            test ! -e /etc/yum.repos.d/kznjk.repo'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: linux
-          path: dist/nullgate-*-linux-x86_64.tar.gz
+          path: |
+            dist/nullgate-*-linux-x86_64.tar.gz
+            dist/nullgate_*_amd64.deb
+            dist/nullgate-*.x86_64.rpm
+          if-no-files-found: error
+
+  arch:
+    if: inputs.platforms == 'all' || contains(format(' {0} ', inputs.platforms), ' arch ')
+    name: Arch PKGBUILD and package
+    # Proves the PKGBUILD the maintainer publishes to the AUR (scripts/aur-prepare.sh)
+    # still builds, installs and removes cleanly against the tagged tree, and
+    # uploads the resulting package: release.yml attaches it, and apps.kznjk.com's
+    # [kznjk] pacman repository signs and serves it.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - name: Source archive shaped like GitHub's tag archive
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          mkdir -p dist/arch
+          git archive --prefix="nullgate-$version/" -o "dist/arch/nullgate-$version.tar.gz" HEAD
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: makepkg, install and remove in archlinux
+        run: |
+          mkdir -p dist/arch-out
+          docker run --rm -v "$PWD:/src:ro" -v "$PWD/dist/arch-out:/out" archlinux:latest \
+            bash /src/scripts/ci/arch-pkgbuild.sh "/src/dist/arch/nullgate-$VERSION.tar.gz"
+          test -f "dist/arch-out/nullgate-$VERSION-1-x86_64.pkg.tar.zst"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: arch
+          path: dist/arch-out/nullgate-*-1-x86_64.pkg.tar.zst
           if-no-files-found: error
 
   android:

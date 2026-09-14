@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.steeb_k.Nullgate</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Nullgate</name>
+  <summary>Connect your own devices into a private peer-to-peer network</summary>
+  <description>
+    <p>
+      Nullgate links your computers and phones into a small private network, so you can reach one
+      machine directly with remote desktop, SSH or file sharing instead of routing everything
+      through a home VPN.
+    </p>
+    <p>
+      There are no accounts and no central server. New devices join with a ticket and a matching
+      emoji code, and connections go directly between devices whenever the network allows it.
+    </p>
+  </description>
+  <developer id="io.github.steeb_k">
+    <name>steeb-k</name>
+  </developer>
+  <launchable type="desktop-id">io.github.steeb_k.Nullgate.desktop</launchable>
+  <url type="homepage">https://github.com/steeb-k/nullgate</url>
+  <url type="bugtracker">https://github.com/steeb-k/nullgate/issues</url>
+  <categories>
+    <category>Network</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <provides>
+    <binary>nullgate</binary>
+  </provides>
+</component>

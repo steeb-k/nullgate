@@ -1,0 +1,28 @@
+# Arch convention: packages do not enable or start services themselves.
+
+pre_install() {
+  if [ -e /usr/local/bin/nullgate-daemon ]; then
+    echo "==> WARNING: Nullgate is also installed from the release tarball (/usr/local/bin)."
+    echo "    That copy runs instead of this package and keeps updating itself."
+    echo "    Remove it (your network membership and keys are kept):"
+    echo "        sudo nullgatectl --uninstall"
+  fi
+}
+
+post_install() {
+  echo "==> Start the Nullgate daemon now and at every boot:"
+  echo "        sudo systemctl enable --now nullgate-daemon"
+  echo "    Then open Nullgate from your app menu. The tray icon starts at your next login."
+}
+
+post_upgrade() {
+  echo "==> Restart the daemon to run the new version:"
+  echo "        sudo systemctl try-restart nullgate-daemon"
+}
+
+pre_remove() {
+  # The unit file is about to disappear, and systemctl cannot disable a unit it
+  # can no longer find, which would strand the enablement symlink.
+  systemctl disable --now nullgate-daemon.service >/dev/null 2>&1 || true
+  pkill -f 'nullgate --agent' >/dev/null 2>&1 || true
+}

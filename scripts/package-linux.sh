@@ -13,7 +13,8 @@
 #   sudo apt install libgtk-4-1 libadwaita-1-0
 # Build-time also needs: libgtk-4-dev libadwaita-1-dev pkg-config build-essential
 #
-# Requires: cargo, tar, and ImageMagick (`magick` or `convert`) for icon sizes.
+# Requires: cargo and tar. The .deb/.rpm are built from this staged tree by
+# scripts/package-linux-native.sh.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -36,6 +37,8 @@ STAGE="$ROOT/dist/$NAME"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin" \
          "$STAGE/share/applications" \
+         "$STAGE/share/metainfo" \
+         "$STAGE/etc/xdg/autostart" \
          "$STAGE/lib/systemd/system"
 
 # GUI (unprivileged), daemon (owns the TUN), CLI.
@@ -48,8 +51,11 @@ install -m 0755 "$PKG_SRC/nullgatectl"      "$STAGE/nullgatectl"
 install -m 0644 "$PKG_SRC/INSTALL.txt" "$STAGE/INSTALL.txt"
 install -m 0644 "$ROOT/LICENSE"        "$STAGE/LICENSE"
 
-# Desktop entry
+# Desktop entry, AppStream metadata, and the tray agent's login autostart entry
+# (installed under the app's own id, which is the name nullgatectl uses too).
 install -m 0644 "$PKG_SRC/$APP_ID.desktop" "$STAGE/share/applications/$APP_ID.desktop"
+install -m 0644 "$PKG_SRC/$APP_ID.metainfo.xml" "$STAGE/share/metainfo/$APP_ID.metainfo.xml"
+install -m 0644 "$PKG_SRC/$APP_ID.Agent.desktop" "$STAGE/etc/xdg/autostart/$APP_ID.desktop"
 
 # systemd SYSTEM units (installed to /etc/systemd/system by nullgatectl)
 install -m 0644 "$PKG_SRC/nullgate-daemon.service"  "$STAGE/lib/systemd/system/nullgate-daemon.service"

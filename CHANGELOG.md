@@ -5,6 +5,32 @@ Pre-1.0; prereleases are tagged `v<version>-test<N>`.
 
 ## [Unreleased]
 
+### Added
+- **Native Linux packages, with updates.** Every release now also carries a `.deb` (Debian 13+,
+  Ubuntu 24.04+), an `.rpm` (Fedora 40+, openSUSE Tumbleweed) and an Arch package, and all three
+  are published to signed apt, dnf/zypper and pacman repositories at
+  [apps.kznjk.com](https://apps.kznjk.com), so updates arrive with normal system updates.
+  Installing a downloaded `.deb` or `.rpm` adds the repository automatically. Arch users add the
+  `[kznjk]` repository by hand or build the `nullgate` AUR package. The packages install under
+  `/usr`, pull in the GTK runtime, enable the daemon (except on Arch, by convention), and carry no
+  self-update timer. They refuse to install over the one-line tarball install; remove that first
+  with `sudo nullgatectl --uninstall`, which keeps your network and keys. CI installs and removes
+  the `.deb` under systemd and the `.rpm` on Fedora, and builds the PKGBUILD on Arch, before any
+  release is published.
+- AppStream metadata, so software centers can describe Nullgate.
+
+### Changed
+- `nullgatectl` refuses to install, update or uninstall a copy that a package manager installed,
+  and says which command to use instead; `--status` shows who manages the install. The tray
+  agent's autostart entry is now a shipped file rather than generated at install time, and it is
+  inert if left behind after the app is removed.
+
+### Fixed
+- **After an update, the tray icon could disappear until the next login.** A running program whose
+  file was replaced sees its own path with ` (deleted)` appended on Linux, so the tray agent's
+  relaunch onto the new version, and its *Open Nullgate* item, pointed at a file that doesn't
+  exist. The tarball installer hid this by restarting the agent itself; package upgrades don't.
+
 ## [0.7.1] - 2026-09-13
 
 ### Fixed

@@ -1,7 +1,8 @@
 # Packaging & releasing
 
 From 0.1.0, Nullgate ships **real installers** with **auto-update**: code-signed **Windows MSIs**
-(x86_64 + ARM64), a **Linux tarball** (system-service installer), a **macOS** universal `.app`
+(x86_64 + ARM64), a **Linux tarball** (system-service installer) plus a `.deb` and an `.rpm` (and an
+AUR package, published separately), a **macOS** universal `.app`
 tarball (Developer-ID signed and notarized), and a signed **Android APK**. Releases are published to
 the **public `steeb-k/nullgate` repo**; the in-product updaters and the `install.sh` one-liner read
 its `releases/latest`.
@@ -31,31 +32,42 @@ Per-platform detail: [windows-packaging.md](windows-packaging.md),
    (`MAJOR*10000 + MINOR*100 + PATCH`); the `publish` job refuses a tag where these disagree, so
    forgetting is loud rather than silent. Commit and push.
 3. **Rehearse if anything in the pipeline changed:** `git tag v<ver>-test1 && git push --tags`.
-   That publishes a prerelease with all five assets, which no updater or Obtainium will take.
+   That publishes a prerelease with all eight assets, which no updater, Obtainium or package repository will take.
    Install one or two of them by hand (smoke-check below), then delete the prerelease and the tag.
 4. **Tag:** `git tag v<ver> && git push origin v<ver>`. The `release` workflow builds all four
    platforms, gates on the checks, and creates the release with every asset in one call. If the
    `release` environment has a required reviewer, approve it in the Actions tab.
 5. If a platform job fails, nothing is published. Fix on `main`, then dispatch `release.yml` with
    `tag: v<ver>` — the fixed workflow builds the tag's source.
+6. **Package repositories** need nothing: within about 10 minutes of the release, apps.kznjk.com's
+   timer signs the `.deb`, `.rpm` and `.pkg.tar.zst` into its apt, rpm and pacman repositories
+   (`journalctl --user -u packages-sync` on that host shows it).
+7. **AUR**, once the release is published: `scripts/aur-prepare.sh <ver> ../nullgate-aur`, review,
+   commit and push the clone (details in `linux-packaging.md`). CI's `arch` job has already proved
+   that PKGBUILD builds against the tag.
 
 ### Building by hand (fallback)
 Each artifact on its own OS: **Windows** `pwsh -File scripts\build-msi.ps1` (+ `-Arch arm64`;
 signed if `artifact-signing-metadata.json` + `az login` are present — see `windows-packaging.md`);
-**Linux** `scripts/package-linux.sh`; **macOS** `scripts/setup-conda-macos.sh --universal` once,
+**Linux** `scripts/package-linux.sh` then `scripts/package-linux-native.sh` (needs nfpm); **macOS** `scripts/setup-conda-macos.sh --universal` once,
 then `CODESIGN_IDENTITY='Developer ID Application: …' NULLGATE_NOTARIZE=1 scripts/package-macos.sh`
 (ad-hoc without the identity — installable via `nullgatectl`, not by browser download);
 **Android** `cd android && ./gradlew :app:assembleRelease` with `android/keystore.properties`,
 renamed to `nullgate-<ver>-android.apk`. Publish with `gh release create v<ver> --verify-tag
---latest` and **all five files in the same command** — asset names must stay
+--latest` and **all eight files in the same command** — asset names must stay
 `nullgate-<ver>-<platform>.<ext>` (`windows-x86_64.msi`, `windows-arm64.msi`, `linux-x86_64.tar.gz`,
-`macos-universal.tar.gz`, `android.apk`).
+`macos-universal.tar.gz`, `android.apk`), plus nfpm's `nullgate_<ver>-1_amd64.deb` and
+`nullgate-<ver>-1.x86_64.rpm`, and makepkg's `nullgate-<ver>-1-x86_64.pkg.tar.zst` (from
+`scripts/ci/arch-pkgbuild.sh` with `/out` mounted).
 
 ## Smoke-check before announcing
 - **Windows:** install the MSI on a clean machine; confirm the app opens, the `NullgateDaemon` service
   runs, and the `NullgateUpdate` task exists (`schtasks /Query /TN NullgateUpdate`).
 - **Linux/macOS:** run the `curl … | sh` one-liner; confirm `nullgatectl --status` shows the daemon
   active and the updater enabled.
+- **Linux packages:** on a machine without the tarball install, `sudo apt install ./nullgate_<ver>-1_amd64.deb`
+  (or the `.rpm`); confirm the daemon is enabled and active and `nullgatectl --status` says
+  `managed: package manager`.
 - **Two machines:** create on one, join on the other, compare the emoji code, approve, connect
   RDP/SSH to the peer's `10.99.0.x`.
 - **Auto-update path:** with an older build installed, publish a newer release and confirm the

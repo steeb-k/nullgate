@@ -1,7 +1,7 @@
 # CI release pipeline
 
 Pushing a `v<version>` tag builds every platform on GitHub Actions and publishes one release with
-all five assets. The shape and most of the signing machinery are lifted from `steeb-k/commune`,
+all eight assets. The shape and most of the signing machinery are lifted from `steeb-k/commune`,
 which has shipped this way since September 2026.
 
 ## The updater contract (what must never change)
@@ -12,6 +12,8 @@ asset names, so the pipeline reproduces exactly:
 |-------|----------|------|
 | `nullgate-<ver>-windows-x86_64.msi` + `…-windows-arm64.msi` | `nullgate-update.ps1`, picks by OS arch, never falls back | **both or neither**; Authenticode must be **Valid** or the updater refuses it |
 | `nullgate-<ver>-linux-x86_64.tar.gz` | `nullgatectl --update` | built on `ubuntu-24.04`, i.e. a glibc 2.39 floor |
+| `nullgate_<ver>-1_amd64.deb` + `nullgate-<ver>-1.x86_64.rpm` | apps.kznjk.com's `sync-packages.py` (apt/dnf/zypper repos), and people installing the file | nfpm's distro-conventional names; built from the tarball's staged tree, so the same binaries; see [linux-packaging.md](linux-packaging.md) |
+| `nullgate-<ver>-1-x86_64.pkg.tar.zst` | apps.kznjk.com's `[kznjk]` pacman repo | exactly one; the `-debug` split package is never uploaded, and the repo's asset pattern can't match it |
 | `nullgate-<ver>-macos-universal.tar.gz` | `nullgatectl` accepts `universal` or `<host arch>` | one universal tarball serves Intel and Apple Silicon; Developer-ID signed, notarized, stapled; `nullgatectl` refuses a bundle whose Team ID differs from the installed one |
 | `nullgate-<ver>-android.apk` | Obtainium takes the lone `.apk` | the **same** keystore every release; `versionCode` bumped |
 
@@ -26,8 +28,13 @@ Consequences the workflow enforces: the release is created in **one call with ev
 
 ```
 gate     ubuntu-24.04    cargo build/test + cargo-deny (what ci.yml runs)
-build    ./build.yml     four jobs in parallel:
-  linux      ubuntu-24.04   scripts/package-linux.sh
+build    ./build.yml     five jobs in parallel:
+  linux      ubuntu-24.04   scripts/package-linux.sh, then package-linux-native.sh (nfpm, pinned
+                            + sha256); installs the .deb on the runner under systemd and the .rpm
+                            in a fedora:latest container, and removes both
+  arch       ubuntu-24.04   scripts/ci/arch-pkgbuild.sh in archlinux:latest against a git archive of
+                            the ref: makepkg, namcap, pacman -U / -R; uploads the .pkg.tar.zst
+                            (the AUR itself builds from source; scripts/aur-prepare.sh after release)
   android    ubuntu-24.04   gradlew :app:assembleRelease, release keystore from secrets
   macos      macos-15       setup-conda-macos.sh --universal, package-macos.sh (signs with the
                             Developer ID from a throwaway keychain, notarizes, staples), checks
@@ -35,7 +42,7 @@ build    ./build.yml     four jobs in parallel:
                             fetch-gtk-msys2.ps1; llvm-mingw; both arches built, then
                             build-msi.ps1 -SkipBuild x2 (signs exes + MSIs via Azure Trusted
                             Signing over OIDC); verify-bundle.ps1; Authenticode must be Valid
-publish  ubuntu-24.04    version gate, exactly five assets, notes from CHANGELOG.md,
+publish  ubuntu-24.04    version gate, exactly eight assets, notes from CHANGELOG.md,
                          `gh release create --verify-tag` in one shot (prerelease for -testN)
 ```
 
@@ -100,7 +107,7 @@ exec bit in git).
    is signed or published. Install each artifact by hand (`releasing.md` smoke-check).
 2. Set the secrets; rerun with `sign=true`, `publish=false`. Check the Windows job's probe and
    signature steps, the macOS job's `spctl` line.
-3. Tag `v<ver>-test1`: a prerelease with all five assets appears; an installed copy does **not**
+3. Tag `v<ver>-test1`: a prerelease with all eight assets appears; an installed copy does **not**
    take it.
 4. Tag `v<ver>`. Confirm each updater takes it (Windows scheduled task, `nullgatectl --update
    --check`, Obtainium).

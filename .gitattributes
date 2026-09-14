@@ -14,3 +14,8 @@ packaging/macos/nullgatectl text eol=lf
 *.png binary
 *.xcf binary
 *.ico binary
+# Arch packaging is sourced by bash (makepkg); CRLF would break it.
+packaging/arch/PKGBUILD text eol=lf
+packaging/arch/*.install text eol=lf
+# apt/dnf/zypper definitions must stay byte-identical to the copies apps.kznjk.com serves.
+packaging/linux/repo/* text eol=lf

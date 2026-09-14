@@ -1,7 +1,7 @@
 # A tag becomes a release.
 #
 # Pushing `v<version>` builds every platform (build.yml), gates on the same
-# checks ci.yml runs, and publishes ONE GitHub release with all five assets
+# checks ci.yml runs, and publishes ONE GitHub release with all eight assets
 # attached in a single call — never create-then-upload, because the updaters
 # read `releases/latest` the moment it exists and a release missing an asset
 # strands that platform (the Windows updater will not cross architectures).
@@ -32,7 +32,7 @@ on:
         default: true
         type: boolean
       platforms:
-        description: 'Which platforms to build: all, or a space-separated subset of linux windows macos android. Anything but all disables publishing.'
+        description: 'Which platforms to build: all, or a space-separated subset of linux arch windows macos android. Anything but all disables publishing.'
         required: false
         default: all
         type: string
@@ -116,13 +116,14 @@ jobs:
             echo "prerelease=$prerelease"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Collect exactly the five assets
+      - name: Collect exactly the eight assets
         run: |
           v="${{ steps.release.outputs.version }}"
           mkdir -p dist
           for name in "nullgate-$v-windows-x86_64.msi" "nullgate-$v-windows-arm64.msi" \
-                      "nullgate-$v-linux-x86_64.tar.gz" "nullgate-$v-macos-universal.tar.gz" \
-                      "nullgate-$v-android.apk"; do
+                      "nullgate-$v-linux-x86_64.tar.gz" "nullgate_$v-1_amd64.deb" \
+                      "nullgate-$v-1.x86_64.rpm" "nullgate-$v-1-x86_64.pkg.tar.zst" \
+                      "nullgate-$v-macos-universal.tar.gz" "nullgate-$v-android.apk"; do
             f="$(find artifacts -type f -name "$name" | head -1)"
             [ -n "$f" ] || { echo "::error::missing asset $name — a platform job did not produce it"; exit 1; }
             cp "$f" dist/

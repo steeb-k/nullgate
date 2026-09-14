@@ -73,6 +73,18 @@ box you can skip it and drive everything with `nullgate-cli` (see "Headless / CL
 Afterwards, manage it with `nullgatectl` (`nullgatectl --status`, `--update`, `--uninstall`).
 On **macOS** the app lands in `/Applications`.
 
+**Prefer your distribution's package manager?** Nullgate is also packaged for Debian and Ubuntu,
+Fedora, openSUSE and Arch. See [apps.kznjk.com](https://apps.kznjk.com) for the two or three
+commands that add the repository, or install the `.deb` or `.rpm` from the
+[Releases](https://github.com/steeb-k/nullgate/releases) page (for example
+`sudo apt install ./nullgate_<version>-1_amd64.deb`), which adds the repository for you. Arch users
+can also build the `nullgate` package from the AUR. Either way the GTK runtime comes along
+automatically, and updates arrive with your normal system updates (`apt upgrade`, `dnf upgrade`,
+`zypper update`, `pacman -Syu`) rather than through `nullgatectl`. Pick one way of installing per
+machine. The `.deb` and `.rpm` refuse to install over the one-line install, and the AUR package
+warns about it; remove that install first with `sudo nullgatectl --uninstall` (your network and keys
+are kept).
+
 ## Using it
 1. On one device: **+ → Create a network**, then share the ticket (copy it, or show the QR).
 2. On the other: **+ → Join with a ticket** and paste it. Both screens show an emoji code.
