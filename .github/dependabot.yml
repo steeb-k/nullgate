@@ -1,0 +1,33 @@
+# Dependabot opens pull requests for dependency updates once a week.
+#
+# Two things ride on this. cargo-deny fails on advisories against versions
+# that are already in the lockfile, so the bumps have to come from somewhere;
+# and GitHub switches off a scheduled workflow after 60 days without activity
+# in the repository, so a repository that is finished but still watched
+# needs some commits to keep its weekly check alive. Merged update PRs are
+# both.
+#
+# Minor and patch bumps arrive grouped in one PR; a major bump gets its own.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: deps
+    groups:
+      cargo-minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
